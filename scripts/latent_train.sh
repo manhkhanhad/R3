@@ -1,8 +1,8 @@
 
 # CDs_and_Vinyl
 category="CDs_and_Vinyl"
-# base_data_dir=data/${category}
-base_data_dir="data/CDs_and_Vinyl_3_2022-10-2023-10_randNeg"
+base_data_dir=data/${category}
+# base_data_dir="data/CDs_and_Vinyl_3_2022-10-2023-10_randNeg"
 tdir=test
 train_file=$(ls -f ${base_data_dir}/train/${category}*.csv)
 eval_file=$(ls -f ${base_data_dir}/valid/${category}*.csv)
@@ -50,4 +50,4 @@ wait
 python src/utils/merge.py --input_path ./output_dir/${category}_base/ \
         --output_path ${model_ckpt}/final_result.json --nn ${nn}
 python src/utils/calc.py --path ${model_ckpt}/final_result.json \
-        --item_path ${info_file}
+        --item_path ${info_file} > >(tee -a ${out}/metric.log)

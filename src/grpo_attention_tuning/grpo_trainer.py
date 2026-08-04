@@ -1,3 +1,5 @@
+import os
+import sys
 import torch
 import torch.nn as nn
 from typing import Any, Union
@@ -14,6 +16,11 @@ from transformers.utils import is_sagemaker_mp_enabled
 
 from latent_grpo_processor import CFEnhancedLogitsProcessor
 
+_latent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "latent")
+if _latent_dir not in sys.path:
+    sys.path.insert(0, _latent_dir)
+
+
 def swap_adjacent_blocks(x, k):
     # 保存原始形状
     original_shape = x.shape
@@ -26,9 +33,22 @@ def swap_adjacent_blocks(x, k):
     return x_2d[indices].view(original_shape)
 
 class NoiseGRPORecTrainer(GRPOTrainer):
+    """GRPO with the original LatentR3 loss/advantage/ratio scheme (token-level
+    logprob ratio, swap_adjacent_blocks advantage baseline, optional token-KL).
 
-    def __init__(self, prefix_allowed_tokens_fn, *args, **kwargs) -> None:
+    `use_diffusion` selects how the perturbed thought-slot candidate is produced:
+      - True  (DiffuReason Think-then-Diffuse): z_i = mu + sigma * eps_i, sampled
+        from the learned diffusion Gaussian. The rollout's diffusion trajectory
+        noises + reparameterization eps are replayed in compute_loss (with grad)
+        so the recomputed embeds match the sampled z_i.
+      - False (original LatentR3): a fixed isotropic noise ~ N(0, 1.5^2) is added
+        to the thought-slot embedding, replayed as-is in compute_loss.
+    Everything else (ratio, advantage, KL, clipping) is identical either way.
+    """
+
+    def __init__(self, prefix_allowed_tokens_fn, *args, use_diffusion: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.use_diffusion = use_diffusion
         data_collator = DataCollatorForSeq2Seq(self.processing_class, pad_to_multiple_of=8, return_tensors="pt", padding=True)
         def data_collate_fn(batch):
             new_batch = data_collator(batch)
@@ -118,22 +138,38 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         prompt_mask = prompt_completion_mask[:, :prompt_length]
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
-        # generate the embeddings using LLM
-        # then calculate the PPL and re-generate embeddings to get better PPL
+        # generate the embeddings using LLM, then perturb the thought-slot
+        # candidate either via the learned diffusion Gaussian (Think-then-Diffuse)
+        # or the original fixed isotropic noise, depending on self.use_diffusion.
         with torch.no_grad():
             batch_size = prompt_completion_ids.size(0)
-            original_embeds = self.model.generate_embs(prompt_completion_ids, prompt_completion_mask)
-            where_thought_ids = torch.nonzero(
-                prompt_completion_ids == self.model.model.embed_tokens.num_embeddings - 1
-            )
-            noise = torch.randn(
-                (batch_size, original_embeds.size(-1)), device=self.model.device
-            ).mul(1.5)
-            noise[0, :] = 0
-            original_embeds[torch.arange(batch_size), where_thought_ids[:, 1]] += noise
-            
+            if self.use_diffusion:
+                original_embeds, diff = self.model.generate_embs(
+                    prompt_completion_ids, prompt_completion_mask, return_diffusion=True
+                )
+                where_thought_ids = torch.nonzero(
+                    prompt_completion_ids == self.model.model.embed_tokens.num_embeddings - 1
+                )
+                mu = diff["mu"].float()
+                sigma = diff["sigma"].float()
+                eps = torch.randn_like(sigma)
+                eps[0, :] = 0
+                z = (mu + sigma * eps).to(original_embeds.dtype)
+                original_embeds[torch.arange(batch_size), where_thought_ids[:, 1]] = z
+                diff_noises = diff["noises"]
+            else:
+                original_embeds = self.model.generate_embs(prompt_completion_ids, prompt_completion_mask)
+                where_thought_ids = torch.nonzero(
+                    prompt_completion_ids == self.model.model.embed_tokens.num_embeddings - 1
+                )
+                noise = torch.randn(
+                    (batch_size, original_embeds.size(-1)), device=self.model.device
+                ).mul(1.5)
+                noise[0, :] = 0
+                original_embeds[torch.arange(batch_size), where_thought_ids[:, 1]] += noise
+
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
-        
+
         with torch.no_grad():
             # if self.num_iterations > 1:
             old_per_token_logps = self.my_get_per_token_logps(
@@ -182,7 +218,7 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         )
         advantages = advantages[process_slice]
 
-        return {
+        outputs = {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
             "completion_ids": completion_ids,
@@ -191,8 +227,13 @@ class NoiseGRPORecTrainer(GRPOTrainer):
             "ref_per_token_logps": ref_per_token_logps,
             "advantages": advantages,
             "original_embeds": original_embeds,
-            "noise": noise,
         }
+        if self.use_diffusion:
+            outputs["eps"] = eps
+            outputs["diff_noises"] = diff_noises
+        else:
+            outputs["noise"] = noise
+        return outputs
 
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -206,15 +247,29 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
-        original_embeds = inputs["original_embeds"]
-        
-        noise = inputs["noise"]
-        embeds = self.model.generate_embs(input_ids, attention_mask)
+        batch_size = input_ids.size(0)
         where_thought_ids = torch.nonzero(
             input_ids == self.model.model.embed_tokens.num_embeddings - 1
         )
-        batch_size = input_ids.size(0)
-        embeds[torch.arange(batch_size), where_thought_ids[:, 1]] += noise
+        if self.use_diffusion:
+            # Re-run the think+diffuse chain WITH grad, replaying the rollout's
+            # trajectory noises so (mu, sigma) parameterize the same trajectory;
+            # reuse the rollout's reparameterization eps so the reconstructed z
+            # numerically matches the sampled candidate while keeping the gradient
+            # path through mu/sigma (z = mu_new + sigma_new * eps).
+            embeds, diff = self.model.generate_embs(
+                input_ids, attention_mask, return_diffusion=True,
+                replay_noises=inputs["diff_noises"],
+            )
+            mu = diff["mu"].float()
+            sigma = diff["sigma"].float()
+            eps = inputs["eps"]
+            z = (mu + sigma * eps).to(embeds.dtype)
+            embeds[torch.arange(batch_size), where_thought_ids[:, 1]] = z
+        else:
+            noise = inputs["noise"]
+            embeds = self.model.generate_embs(input_ids, attention_mask)
+            embeds[torch.arange(batch_size), where_thought_ids[:, 1]] += noise
 
         per_token_logps = self.my_get_per_token_logps(
             model, input_ids, embeds, attention_mask, logits_to_keep

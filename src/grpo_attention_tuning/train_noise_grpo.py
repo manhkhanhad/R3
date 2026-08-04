@@ -39,6 +39,7 @@ def train(
     epsilon: float = 0.2, # clipping value
     epsilon_high: float = 0.28, # 其实这两个一个是high，一个是low. 当没有high的时候，low就是high
     max_completion_length: int = 256,
+    use_diffusion: bool = True, # sample the thought-slot candidate from the learned diffusion Gaussian (DiffuReason) instead of fixed isotropic noise
 
     use_vllm: bool = False,
     vllm_gpu_memory_utilization: float = 0.7,
@@ -70,10 +71,23 @@ def train(
         torch_dtype=torch.bfloat16,
     )
     model.attention.end_k = end_k
+    if use_diffusion:
+        assert model.config.diff_T > 0, (
+            "stage-2 GRPO samples from the learned diffusion Gaussian; the base_model "
+            "checkpoint must be trained with --diff_T > 0 (see scripts/diffureason_train.sh)")
     for param in model.model.parameters():
         param.requires_grad = False
     for param in model.lm_head.parameters():
         param.requires_grad = False
+    # diff_proj only serves the (stage-1) MSE anchor loss
+    model.diff_proj.requires_grad_(False)
+    if use_diffusion:
+        # Zero out denoiser dropout: the GRPO ratio replays the rollout trajectory in
+        # compute_loss, and differing dropout masks between the two passes would
+        # desynchronize (mu, sigma) from the sampled candidates.
+        for m in model.denoiser.modules():
+            if isinstance(m, nn.Dropout):
+                m.p = 0.0
     def count_trainable_params(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
     trainable_params = count_trainable_params(model)
@@ -121,6 +135,7 @@ def train(
     # from grpo_trainer import HalfGRPORecTrainer
     # trainer = HalfGRPORecTrainer(
         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+        use_diffusion=use_diffusion,
         model=model,
         reward_funcs=reward_funcs,
         args= trl.GRPOConfig(

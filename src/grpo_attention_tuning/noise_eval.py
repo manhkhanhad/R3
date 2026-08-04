@@ -31,7 +31,8 @@ def main(
         seed: int = 42,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
-        length_penalty: float = 1.0
+        length_penalty: float = 1.0,
+        eps_init_zero: bool = False,  # deterministic diffusion warm start (x_T = tau_R)
 ):
 
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games",
@@ -43,6 +44,7 @@ def main(
     model = LatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16,
                                         use_flash_attention_2=True if base_model.lower().find("llama") > -1 else False)
     model.attention.end_k = end_k
+    model.eps_init_zero = eps_init_zero
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id

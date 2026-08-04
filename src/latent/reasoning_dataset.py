@@ -38,7 +38,9 @@ class Tokenizer:
 
     
 class LatentRDataset(Dataset):
-    def __init__(self, train_file, tokenizer, max_len=2048, sample=-1, test = False, seed=0, category="", K=4, dedup=False):
+    def __init__(self, train_file, tokenizer, max_len=2048, sample=-1, test = False, seed=0, category="", K=4, dedup=False, with_item_ids=False):
+        # with_item_ids: also emit the target item id (for the optional MSE anchor loss)
+        self.with_item_ids = with_item_ids
         self.data = pd.read_csv(train_file)
         random.seed(seed)
         
@@ -100,6 +102,7 @@ class LatentRDataset(Dataset):
         last_history_item_id = eval(row["history_item_id"])[-1]
         return {"input": f"The user has palyed the following {self.category}s before: {history}",
                 "output": target_item + '\n',
+                "item_id": int(target_item_id),
                 "dedup": target_item_id == last_history_item_id}
     
     def pre(self, idx):
@@ -144,12 +147,15 @@ class LatentRDataset(Dataset):
             print(len(tokens))
         
         
-        return {
+        out = {
             "input_ids": tokens[-self.max_len:],
             "attention_mask": attention_mask[-self.max_len:],
             "labels": labels[-self.max_len:],
-            
+
         }
+        if self.with_item_ids:
+            out["item_ids"] = int(history["item_id"])
+        return out
     
 
     def get_inputs(self):

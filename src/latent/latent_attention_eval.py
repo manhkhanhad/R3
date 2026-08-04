@@ -29,7 +29,8 @@ def main(
     seed: int = 0,
     temperature: float=1.0,
     guidance_scale: float=1.0,
-    length_penalty: float=1.0
+    length_penalty: float=1.0,
+    eps_init_zero: bool = False,  # deterministic diffusion warm start (x_T = tau_R)
 ):
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movies": "movie",
                      "yelp": "resturant" }
@@ -37,6 +38,7 @@ def main(
 
     model = LatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
+    model.eps_init_zero = eps_init_zero
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 

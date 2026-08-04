@@ -26,7 +26,19 @@ def train(
     seed: int = 0,
     # attention hyper parameters
     end_k: int = -1,
-    
+
+    # DiffuReason (Think-then-Diffuse) hyper parameters
+    # defaults = original LatentR3 (no thinking loop, no diffusion);
+    # DiffuReason runs pass --latent_R 3 --diff_T 16 (see scripts/diffureason_train.sh)
+    latent_R: int = 1,
+    diff_T: int = 0,
+    diff_s: float = 0.008,
+    use_schedule_scaling: bool = True,
+    # optional MSE anchor loss (off by default: CE-only, original LatentR3 loss)
+    alpha: float = 0.0,
+    item_emb_file: str = None,
+    diff_loss: str = "proj_mse",
+
     # training hyperparams
     batch_size: int = 128,
     micro_batch_size: int = 4,
@@ -69,6 +81,27 @@ def train(
     )
     model.attention.end_k = end_k
     model.config.loss_type = "ce"
+
+    # DiffuReason hyperparameters (persisted in config.json for eval/stage-2)
+    model.config.latent_R = latent_R
+    model.config.diff_T = diff_T
+    model.config.diff_s = diff_s
+    model.config.diff_alpha = alpha
+    model.config.diff_loss = diff_loss
+    model.config.use_schedule_scaling = use_schedule_scaling
+    if alpha > 0:
+        assert item_emb_file, "--item_emb_file is required when alpha > 0"
+        model.load_item_embeddings(item_emb_file)
+    # Freeze modules that are off the active forward path so DDP
+    # (ddp_find_unused_parameters=False) does not wait for their gradients
+    if alpha == 0 or diff_loss != "proj_mse":
+        model.diff_proj.requires_grad_(False)
+    if latent_R <= 1:
+        model.think_mlp.requires_grad_(False)
+    if diff_T <= 0:
+        model.cond_pool.requires_grad_(False)
+        model.denoiser.requires_grad_(False)
+        model.time_embed.requires_grad_(False)
     
     ##############################################################################
     ##################                                 
@@ -88,8 +121,8 @@ def train(
     ##################
     ##############################################################################
 
-    train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category, K = K)
-    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, category=category, K = K)
+    train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category, K = K, with_item_ids=alpha > 0)
+    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, category=category, K = K, with_item_ids=alpha > 0)
 
     print("LOAD DATA FINISHED")
 
