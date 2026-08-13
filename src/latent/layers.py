@@ -187,7 +187,30 @@ class LatentModel(Qwen2ForCausalLM):
         config.diff_s = getattr(config, "diff_s", 0.008)
         config.diff_alpha = getattr(config, "diff_alpha", 0.0)
         config.diff_loss = getattr(config, "diff_loss", "proj_mse")
-        config.use_schedule_scaling = getattr(config, "use_schedule_scaling", True)
+        # Paper (Appendix C.1.1): no forward process q(x_t|x_0), no analytic posterior
+        # mean from (beta_t, alpha_bar_t) -- Algorithm 1 samples x_{t-1} ~ N(mu_phi,
+        # sigma_phi) directly at every step, with no extra schedule-based scaling on
+        # the injected noise. Default False reproduces this literally; True is an
+        # (unverified) extension that anneals step noise via sqrt(1 - alpha_bar_{t-1}).
+        config.use_schedule_scaling = getattr(config, "use_schedule_scaling", False)
+        # Eq. 3's eps_init ~ N(0, I) is unit variance per dim; for hidden_size=1536
+        # that's an expected norm of ~39.2, which can dwarf this backbone's actual
+        # thought-vector norms (tau_R observed ~3.7 on a trained checkpoint) -- the
+        # warm start x_T = tau_R + eps_init is then mostly noise by variance.
+        # Default 1.0 reproduces the paper literally; <1.0 is an unverified
+        # extension that shrinks eps_init to better match this embedding scale.
+        config.diff_eps_init_scale = getattr(config, "diff_eps_init_scale", 1.0)
+        # dim of the (optional) item-title embeddings used by the MSE anchor loss;
+        # defaults to hidden_size (original behavior) but may differ (e.g. a
+        # Qwen3-Embedding truncation that doesn't match this backbone's hidden_size)
+        # when diff_loss="proj_mse", which projects mu into that space via diff_proj.
+        config.item_emb_dim = getattr(config, "item_emb_dim", config.hidden_size)
+        if config.diff_loss in ("mse", "cosine") and config.item_emb_dim != config.hidden_size:
+            raise ValueError(
+                f"--diff_loss {config.diff_loss} compares mu directly against the item "
+                f"embeddings (no projection), so item_emb_dim ({config.item_emb_dim}) "
+                f"must equal hidden_size ({config.hidden_size}); use --diff_loss proj_mse "
+                f"instead to support a different item embedding dim")
 
         d = config.hidden_size
         self.attention = SelfAttentionLayer(d)  # thinking attention (Eq. 1)
@@ -195,7 +218,9 @@ class LatentModel(Qwen2ForCausalLM):
         self.cond_pool = AttentionPooling(d)
         self.denoiser = DenoiseMLP(d)
         self.time_embed = TimestepEmbedding(d)
-        self.diff_proj = nn.Linear(d, d)  # loss-only head for the MSE anchor loss
+        # loss-only head for the MSE anchor loss; projects mu (hidden_size) into the
+        # item-embedding space (item_emb_dim), which need not equal hidden_size.
+        self.diff_proj = nn.Linear(d, config.item_emb_dim)
         self.register_buffer(
             "alpha_bar", cosine_alpha_bar(max(config.diff_T, 1), config.diff_s), persistent=False)
 
@@ -203,11 +228,27 @@ class LatentModel(Qwen2ForCausalLM):
         self.eps_init_zero = False
         self._last_diff = None
 
+    def _init_weights(self, module):
+        # from_pretrained() re-initializes any parameter missing from the loaded
+        # checkpoint (all of our custom submodules) via self.apply(self._init_weights)
+        # AFTER __init__ returns -- this overwrites DenoiseMLP's own near-identity
+        # zero-init of its final layer (done in DenoiseMLP.__init__) with the
+        # generic Qwen2 scheme. Restore it here, since this hook runs last.
+        super()._init_weights(module)
+        denoiser = getattr(self, "denoiser", None)
+        if denoiser is not None and module is denoiser.net[-1]:
+            nn.init.zeros_(module.weight)
+            nn.init.zeros_(module.bias)
+            with torch.no_grad():
+                module.bias[self.config.hidden_size:] = -4.0
+
     def load_item_embeddings(self, path):
         data = torch.load(path, map_location="cpu")
         emb = data["embeddings"] if isinstance(data, dict) else data
-        assert emb.size(-1) == self.config.hidden_size, \
-            f"item embedding dim {emb.size(-1)} != hidden {self.config.hidden_size}"
+        assert emb.size(-1) == self.config.item_emb_dim, (
+            f"item embedding dim {emb.size(-1)} != config.item_emb_dim "
+            f"{self.config.item_emb_dim} (this must be set on the config, e.g. via "
+            f"AutoConfig before model construction, to match the embedding file used)")
         self.register_buffer("item_emb", emb.float().to(self.device), persistent=False)
 
     def generate_embs(self, input_ids, attention_mask, return_diffusion=False,
@@ -252,7 +293,8 @@ class LatentModel(Qwen2ForCausalLM):
                 T=self.config.diff_T, alpha_bar=self.alpha_bar,
                 training=self.training,
                 use_schedule_scaling=self.config.use_schedule_scaling,
-                eps_init=eps_init, noises=replay_noises, generator=generator,
+                eps_init=eps_init, eps_init_scale=self.config.diff_eps_init_scale,
+                noises=replay_noises, generator=generator,
             )
         else:  # T=0: no refinement (original LatentR3 behavior)
             c = None
@@ -323,9 +365,12 @@ class LatentModel(Qwen2ForCausalLM):
             v_target = self.item_emb[item_ids]  # [B, d] fp32, unit-norm
             if self.config.diff_loss == "proj_mse":
                 pred = self.diff_proj(mu).float()
-                l_diff = ((pred - v_target) ** 2).sum(dim=-1).mean()
+                # mean (not sum) over the feature dim -- summing over hidden_size/
+                # item_emb_dim inflates l_diff to ~1000x a typical per-token CE
+                # loss, so it dominates the combined objective regardless of alpha.
+                l_diff = ((pred - v_target) ** 2).mean(dim=-1).mean()
             elif self.config.diff_loss == "mse":
-                l_diff = ((mu.float() - v_target) ** 2).sum(dim=-1).mean()
+                l_diff = ((mu.float() - v_target) ** 2).mean(dim=-1).mean()
             elif self.config.diff_loss == "cosine":
                 l_diff = (1 - F.cosine_similarity(mu.float(), v_target, dim=-1)).mean()
             else:

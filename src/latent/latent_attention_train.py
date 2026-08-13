@@ -7,6 +7,7 @@ import torch
 
 import transformers
 from transformers import (
+    AutoConfig,
     AutoTokenizer,
     EarlyStoppingCallback,
     DataCollatorForSeq2Seq,
@@ -33,7 +34,15 @@ def train(
     latent_R: int = 1,
     diff_T: int = 0,
     diff_s: float = 0.008,
-    use_schedule_scaling: bool = True,
+    # False (default) = paper-exact: x_{t-1} = mu + sigma * eps_t verbatim
+    # (Algorithm 1, line 16); Appendix C.1.1 states there is no forward process
+    # and alpha_bar (Eq. 17) is never shown scaling the reverse-step noise.
+    # True is an unverified extension that anneals the injected noise -> 0.
+    use_schedule_scaling: bool = False,
+    # 1.0 (default) = paper-exact eps_init ~ N(0, I) (Eq. 3). For hidden_size=1536
+    # this gives eps_init an expected norm ~39.2, which can dwarf tau_R's actual
+    # scale (~3.7 observed) -- an unverified fix is to shrink it, e.g. 0.1.
+    diff_eps_init_scale: float = 1.0,
     # optional MSE anchor loss (off by default: CE-only, original LatentR3 loss)
     alpha: float = 0.0,
     item_emb_file: str = None,
@@ -73,24 +82,34 @@ def train(
         device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
+    # diff_proj's output dim (and item_emb_dim) must be fixed at model construction
+    # time, so infer it from the embedding file (may differ from hidden_size, e.g. a
+    # Qwen3-Embedding MRL truncation) before creating the model.
+    config = AutoConfig.from_pretrained(base_model)
+    config.loss_type = "ce"
+    config.latent_R = latent_R
+    config.diff_T = diff_T
+    config.diff_s = diff_s
+    config.diff_alpha = alpha
+    config.diff_loss = diff_loss
+    config.use_schedule_scaling = use_schedule_scaling
+    config.diff_eps_init_scale = diff_eps_init_scale
+    if alpha > 0:
+        assert item_emb_file, "--item_emb_file is required when alpha > 0"
+        _emb_data = torch.load(item_emb_file, map_location="cpu")
+        _emb = _emb_data["embeddings"] if isinstance(_emb_data, dict) else _emb_data
+        config.item_emb_dim = _emb.size(-1)
+
     model = LatentModel.from_pretrained(
         base_model,
+        config=config,
         # load_in_8bit=True,
         torch_dtype=torch.bfloat16,
         # device_map=device_map,
     )
     model.attention.end_k = end_k
-    model.config.loss_type = "ce"
 
-    # DiffuReason hyperparameters (persisted in config.json for eval/stage-2)
-    model.config.latent_R = latent_R
-    model.config.diff_T = diff_T
-    model.config.diff_s = diff_s
-    model.config.diff_alpha = alpha
-    model.config.diff_loss = diff_loss
-    model.config.use_schedule_scaling = use_schedule_scaling
     if alpha > 0:
-        assert item_emb_file, "--item_emb_file is required when alpha > 0"
         model.load_item_embeddings(item_emb_file)
     # Freeze modules that are off the active forward path so DDP
     # (ddp_find_unused_parameters=False) does not wait for their gradients

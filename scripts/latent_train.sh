@@ -18,13 +18,13 @@ mkdir -p ${out}
 # Replace with your actual base model path
 # for example: Qwen/Qwen2.5-1.5B
 BASE_MODEL=Qwen/Qwen2.5-1.5B-Instruct
-torchrun --nproc_per_node=2 --nnodes=1 --master_port=$port \
-    src/latent/latent_attention_train.py \
-    --base_model $BASE_MODEL \
-    --micro_batch_size 4 \
-    --train_file ${train_file} --eval_file ${eval_file} \
-    --output_dir ${out} --category ${category} --sample -1 \
-    > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
+# torchrun --nproc_per_node=2 --nnodes=1 --master_port=$port \
+#     src/latent/latent_attention_train.py \
+#     --base_model $BASE_MODEL \
+#     --micro_batch_size 4 \
+#     --train_file ${train_file} --eval_file ${eval_file} \
+#     --output_dir ${out} --category ${category} --sample -1 \
+#     > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
 
 # available gpu
 array=(0 1)

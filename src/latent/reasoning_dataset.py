@@ -45,7 +45,7 @@ class LatentRDataset(Dataset):
         random.seed(seed)
         
         if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
+            self.data = self.data.sample(min(sample, len(self.data)), random_state=seed)
         self.tokenizer = Tokenizer(tokenizer)
         self.test = test
         self.max_len = max_len
