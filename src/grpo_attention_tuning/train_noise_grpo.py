@@ -149,7 +149,7 @@ def train(
             # eval_steps=1000,
             # save_strategy="epoch",
             save_steps=200,
-            save_total_limit=2,
+            save_total_limit=1,
             load_best_model_at_end=False,
             ddp_find_unused_parameters=True,
             report_to="none",

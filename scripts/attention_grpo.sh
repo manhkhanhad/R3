@@ -2,12 +2,13 @@
 
 for category in "CDs_and_Vinyl"; do
 
-    path_to_data="data/CDs_and_Vinyl_3_2022-10-2023-10_randNeg"
+    # path_to_data="data/CDs_and_Vinyl_3_2022-10-2023-10_randNeg"
+    path_to_data=data/${category}
     train_file=$(ls -f ${path_to_data}/train/${category}*.csv)
     eval_file=$(ls -f ${path_to_data}/valid/${category}*.csv)
     test_file=$(ls -f ${path_to_data}/test/${category}*.csv)
     info_file=$(ls -f ${path_to_data}/info/${category}*.txt)
-    for lr in 5e-5; do #1e-4 1e-5 5e-4 5e-5;
+    for lr in 1e-4; do #1e-4 1e-5 5e-4 5e-5;
         export CUDA_VISIBLE_DEVICES=0,1
         task_name=nomul_attn_lr_${lr}
         base_model=output_dir/${category}/latent
