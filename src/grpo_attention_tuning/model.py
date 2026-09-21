@@ -128,7 +128,18 @@ class LatentModel(Qwen2ForCausalLM):
 
     def __init__(self, config):
         super().__init__(config)
-        self.attention = SelfAttentionLayer(config.hidden_size)
+        decomposition = getattr(config, "latent_decomposition", None)
+        if decomposition:
+            # Checkpoints trained with src/latent/decomposed_attention.py (Attempt 6)
+            # carry this flag in config.json; build the matching layer so the
+            # E1 pipeline reads the same r = mu + z the decoder was trained on.
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
+            from decomposed_attention import build_decomposed_attention
+            self.attention = build_decomposed_attention(config.hidden_size, decomposition)
+        else:
+            self.attention = SelfAttentionLayer(config.hidden_size)
 
     def generate_embs(self, input_ids, attention_mask):
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)

@@ -18,7 +18,7 @@
                                 # You must provide an absolute path eg /common/home/module/username/
                                 # If no paths are provided, the output file will be placed in your current working directory
 # Remove if you do not want the workload scheduler to requeue your job after preemption --requeue
-#SBATCH --constraint="a100"
+#SBATCH --constraint="l40|l40s"
 ################################################################
 ## EDIT AFTER THIS LINE IF YOU ARE OKAY WITH DEFAULT SETTINGS ##
 ################################################################
@@ -53,7 +53,7 @@ echo ${train_file} ${test_file} ${info_file} ${eval_file}
 port=$((RANDOM % 5000 + 10000))
 export CUDA_VISIBLE_DEVICES=0,1
 task_name="latent_${category}"
-out=./output_dir/${category}_v2/latent
+out=./output_dir/${category}_v7/latent
 mkdir -p ${out}
 
 # Replace with your actual base model path
@@ -62,7 +62,7 @@ BASE_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 torchrun --nproc_per_node=2 --nnodes=1 --master_port=$port \
     src/latent/latent_attention_train.py \
     --base_model $BASE_MODEL \
-    --micro_batch_size 4 \
+    --micro_batch_size 2 \
     --train_file ${train_file} --eval_file ${eval_file} \
     --output_dir ${out} --category ${category} --sample -1 \
     > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
@@ -72,11 +72,11 @@ array=(0 1)
 
 # total number of gpus
 nn=2
-mkdir -p ./output_dir/${category}_v2
+mkdir -p ./output_dir/${category}_v7
 python src/utils/split.py --input_path $test_file \
-        --output_path ./output_dir/${category}_v2 --nn ${nn}
+        --output_path ./output_dir/${category}_v7 --nn ${nn}
 
-model_ckpt=./output_dir/${category}_v2/latent
+model_ckpt=./output_dir/${category}_v7/latent
 for (( i=0; i<$nn; i++ ))
 do
     export CUDA_VISIBLE_DEVICES=${array[$i]}
@@ -84,11 +84,13 @@ do
     python src/latent/latent_attention_eval.py --batch_size 8 \
         --base_model $model_ckpt --sample -1 \
         --info_file ${info_file} --category ${category} \
-        --test_data_path ./output_dir/${category}_v2/${i}.csv \
-        --result_json_data ./output_dir/${category}_v2/${i}.json &
+        --test_data_path ./output_dir/${category}_v7/${i}.csv \
+        --result_json_data ./output_dir/${category}_v7/${i}.json &
 done
 wait
-python src/utils/merge.py --input_path ./output_dir/${category}_v2/ \
+
+echo "SFT EVALUATION"
+python src/utils/merge.py --input_path ./output_dir/${category}_v7/ \
         --output_path ${model_ckpt}/final_result.json --nn ${nn}
 python src/utils/calc.py --path ${model_ckpt}/final_result.json \
         --item_path ${info_file}
@@ -107,8 +109,8 @@ for category in "CDs_and_Vinyl"; do
     for lr in 5e-5; do #1e-4 1e-5 5e-4 5e-5;
         export CUDA_VISIBLE_DEVICES=0,1
         task_name=nomul_attn_lr_${lr}
-        base_model=output_dir/${category}_v2/latent
-        out=./output_dir/${category}_v2/${task_name}
+        base_model=output_dir/${category}_v7/latent/checkpoint-1152
+        out=./output_dir/${category}_v7/${task_name}
         mkdir -p $out
         torchrun --nnodes=1 --nproc_per_node=2 --master_port=$((RANDOM % 9999 + 10000)) \
             src/grpo_attention_tuning/train_noise_grpo.py --category $category \
@@ -123,23 +125,24 @@ for category in "CDs_and_Vinyl"; do
         array=(0 1)
         nn=2
         model_ckpt=${out}
-        mkdir -p ./output_dir/${category}_v2
+        mkdir -p ./output_dir/${category}_v7
         python src/utils/split.py --input_path $test_file \
-                --output_path ./output_dir/${category}_v2 --nn ${nn}
+                --output_path ./output_dir/${category}_v7 --nn ${nn}
 
         # 遍历数组并输出内容
         for (( i=0; i<$nn; i++ ))
         do
             export CUDA_VISIBLE_DEVICES=${array[$i]}
-            echo output_dir/${category}_v2/${i}.csv
+            echo output_dir/${category}_v7/${i}.csv
             python src/grpo_attention_tuning/noise_eval.py \
                     --batch_size 12 --base_model $model_ckpt --sample -1 \
                     --info_file ${info_file} --category ${category} --end_k -1 \
-                    --test_data_path ./output_dir/${category}_v2/${i}.csv \
-                    --result_json_data ./output_dir/${category}_v2/${i}.json &
+                    --test_data_path ./output_dir/${category}_v7/${i}.csv \
+                    --result_json_data ./output_dir/${category}_v7/${i}.json &
             done
         wait
-        python src/utils/merge.py --input_path ./output_dir/${category}_v2/ \
+        echo "RL EVALUATION"
+        python src/utils/merge.py --input_path ./output_dir/${category}_v7/ \
                 --output_path ${model_ckpt}/final_result.json --nn ${nn}
 
         python src/utils/calc.py --path ${model_ckpt}/final_result.json \
@@ -147,6 +150,7 @@ for category in "CDs_and_Vinyl"; do
     done
 done
 
+echo "EVALUATION COMPLETE"
 # #==========================================
 # # EVALUATION WITH ATTENTION GRPO
 # #==========================================
@@ -160,26 +164,26 @@ done
 #     eval_file=$(ls -f ${path_to_data}/${category}/valid/${category}*11.csv)
 #     test_file=$(ls -f ${path_to_data}/${category}/test/${category}*11.csv)
 #     info_file=$(ls -f ${path_to_data}/${category}/info/${category}*.txt)
-#     base_model=output_dir/${category}_v2/latent
+#     base_model=output_dir/${category}_v7/latent
 #     for lr in 5e-5; do
 #         model_ckpt=output_dir/CDs_and_Vinyl/nomul_attn_lr_5e-5
 
-#         mkdir -p ./output_dir/${category}_v2
+#         mkdir -p ./output_dir/${category}_v7
 #         python src/utils/split.py --input_path $test_file \
-#                 --output_path ./output_dir/${category}_v2 --nn ${nn}
+#                 --output_path ./output_dir/${category}_v7 --nn ${nn}
 
 #         for (( i=0; i<$nn; i++ ))
 #         do
 #             export CUDA_VISIBLE_DEVICES=${array[$i]}
-#             echo output_dir/${category}_v2/${i}.csv
+#             echo output_dir/${category}_v7/${i}.csv
 #             python src/grpo_attention_tuning/noise_eval.py \
 #                     --batch_size 8 --base_model $model_ckpt --sample -1 \
 #                     --info_file ${info_file} --category ${category} --end_k -1 \
-#                     --test_data_path ./output_dir/${category}_v2/${i}.csv \
-#                     --result_json_data ./output_dir/${category}_v2/${i}.json &
+#                     --test_data_path ./output_dir/${category}_v7/${i}.csv \
+#                     --result_json_data ./output_dir/${category}_v7/${i}.json &
 #         done
 #         wait
-#         python src/utils/merge.py --input_path ./output_dir/${category}_v2/ \
+#         python src/utils/merge.py --input_path ./output_dir/${category}_v7/ \
 #                 --output_path ${model_ckpt}/final_result.json --nn ${nn}
 
 

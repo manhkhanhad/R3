@@ -140,7 +140,12 @@ class LatentModel(Qwen2ForCausalLM):
     def __init__(self, config):
         super().__init__(config)
         # self.mlp = Noise(config.hidden_size)
-        self.attention = SelfAttentionLayer(config.hidden_size)
+        decomposition = getattr(config, "latent_decomposition", None)
+        if decomposition:
+            from decomposed_attention import build_decomposed_attention
+            self.attention = build_decomposed_attention(config.hidden_size, decomposition)
+        else:
+            self.attention = SelfAttentionLayer(config.hidden_size)
 
     def generate_embs(self, input_ids, attention_mask):
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)

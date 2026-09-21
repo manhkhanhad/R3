@@ -1,3 +1,5 @@
 *.csv
 output_dir/
 data/
+analysis/
+run_logs/
