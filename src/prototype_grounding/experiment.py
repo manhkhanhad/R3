@@ -236,11 +236,23 @@ def extract(split: str, batch_size: int, limit: int = -1,
     ds = PromptDataset(split, tokenizer, limit)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
                         collate_fn=lambda x: collate(x, tokenizer.pad_token_id))
-    vectors, raw_nll, mask_nll, metadata = [], [], [], []
+    vectors, z_vectors, raw_nll, mask_nll, metadata = [], [], [], [], []
     start = time.time()
     for step, batch in enumerate(loader):
         ids, mask, labels, pos = [batch[k].to(device) for k in ("input_ids", "attention_mask", "labels", "thought_pos")]
         thought, embeds = thought_embeds(model, ids, mask, pos)
+        # For mu/z-decomposed checkpoints (Attempts 7/8+), last_z is set as a
+        # side effect of the model.attention(...) call inside thought_embeds --
+        # free to capture, no extra forward pass. mu's norm is architecturally
+        # fixed (see VAEDecomposedSelfAttentionLayer), so any norm/direction
+        # variance in the combined thought vector is a property of z, not mu;
+        # geometry run on the combined vector alone can't distinguish "z is
+        # genuinely diverse" from "mu's fixed norm is just large relative to a
+        # collapsed z". Saving z separately lets latent-distribution measure it
+        # directly instead of inferring it from the sum.
+        last_z = getattr(model.attention, "last_z", None)
+        if last_z is not None:
+            z_vectors.append(last_z.detach().cpu().half())
         nll_raw = per_example_nll(model, embeds, mask, labels)
         nll_mask = per_example_nll(model, substitute(embeds, pos, torch.zeros_like(thought)), mask, labels)
         vectors.append(thought.cpu().half())
@@ -267,6 +279,8 @@ def extract(split: str, batch_size: int, limit: int = -1,
     out = out / split
     out.mkdir(parents=True, exist_ok=True)
     torch.save(vec, out / "thoughts.pt")
+    if z_vectors:
+        torch.save(torch.cat(z_vectors), out / "z_only.pt")
     pd.DataFrame(metadata).drop(columns=["history_item_ids"]).to_csv(out / "metadata.csv", index=False)
     atomic_json(out / "summary.json", {
         "split": split, "n": len(ds), "shape": list(vec.shape), "dtype": str(vec.dtype),
@@ -601,6 +615,12 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
             p, diag = retrieve(q, centers, topk, temperature)
         if mode == "raw": grounded = q
         elif mode == "mask": grounded = torch.zeros_like(q)
+        elif mode == "mu_only":
+            fixed_mu = getattr(model.attention, "fixed_mu", None)
+            initialized = getattr(model.attention, "fixed_mu_initialized", False)
+            if fixed_mu is None or not bool(initialized):
+                raise ValueError("mu_only requires an Attempt-9 residual-correction checkpoint")
+            grounded = fixed_mu.to(device).expand_as(q)
         elif mode == "mean": grounded = train_mean.expand_as(q)
         elif mode == "hard": grounded = centers[diag["indices"]]
         elif mode == "residual": grounded = q + alpha * (p - q)
@@ -702,6 +722,10 @@ def intervention(split: str, batch_size: int, limit: int = -1,
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
                         collate_fn=lambda x: collate(x, tokenizer.pad_token_id))
     names = ["raw", "mask", "mean", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0"]
+    fixed_mu = getattr(model.attention, "fixed_mu", None)
+    fixed_mu_initialized = getattr(model.attention, "fixed_mu_initialized", False)
+    if fixed_mu is not None and bool(fixed_mu_initialized):
+        names.insert(2, "mu_only")
     values = {x: [] for x in names}
     offset = 0
     for batch_i, batch in enumerate(loader):
@@ -713,6 +737,8 @@ def intervention(split: str, batch_size: int, limit: int = -1,
         variants = {"raw": q, "mask": torch.zeros_like(q), "mean": mean.expand_as(q),
                     "shuffle_user": train_vec[other].to(device),
                     "shuffle_target": train_vec[(other + len(train_vec)//2) % len(train_vec)].to(device)}
+        if "mu_only" in names:
+            variants["mu_only"] = fixed_mu.to(device).expand_as(q)
         std = train_vec.std().to(device)
         for scale in (.25, .5, 1.0):
             variants[f"noise_{scale}"] = q + torch.randn(q.shape, generator=gen, device=device) * std * scale
@@ -872,15 +898,29 @@ def prototype_report() -> None:
 
 def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
                                pca_samples: int = 20_000, tag: str = "",
-                               checkpoint: Path = CHECKPOINT) -> None:
-    """Measure and visualize diversity/collapse in extracted train thoughts."""
+                               checkpoint: Path = CHECKPOINT, component: str = "r") -> None:
+    """Measure and visualize diversity/collapse in extracted train thoughts.
+
+    component="r" (default): the combined thought vector spliced into the
+    decoder, r_i = mu_i + z_i for mu/z-decomposed checkpoints. component="z":
+    the residual alone, saved by `extract` as z_only.pt when the checkpoint
+    exposes model.attention.last_z. Since mu's norm is architecturally fixed
+    (VAEDecomposedSelfAttentionLayer), running this on r conflates mu's fixed
+    contribution with z's own variance; component="z" measures z directly.
+    """
     seed_all(seed)
     rng = np.random.default_rng(seed)
     base = ANALYSIS / f"evidence/{CATEGORY}"
     if tag:
         base = base / tag
     base = base / "train"
-    stored_vectors = torch.load(base / "thoughts.pt", map_location="cpu", weights_only=True)
+    vector_file = "thoughts.pt" if component == "r" else "z_only.pt"
+    if component == "z" and not (base / vector_file).exists():
+        raise FileNotFoundError(
+            f"{base / vector_file} not found -- re-run `extract` for this checkpoint/tag "
+            "(z_only.pt is only saved for mu/z-decomposed checkpoints, and only after this fix)."
+        )
+    stored_vectors = torch.load(base / vector_file, map_location="cpu", weights_only=True)
     vectors = stored_vectors.float()
     meta = pd.read_csv(base / "metadata.csv")
     if "cf_cluster" not in meta.columns:
@@ -1070,8 +1110,10 @@ def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
     prefix = f"{tag}_" if tag else ""
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
-    atomic_json(out_dir / "train_latent_distribution.json", report)
-    np.savez_compressed(out_dir / "train_latent_distribution_arrays.npz",
+    out_stem = "train_latent_distribution" if component == "r" else f"train_latent_distribution_{component}"
+    report["component"] = component
+    atomic_json(out_dir / f"{out_stem}.json", report)
+    np.savez_compressed(out_dir / f"{out_stem}_arrays.npz",
                         eigenvalues=eigenvalues.numpy(),
                         variance_fraction=variance_fraction.numpy(),
                         pca_indices=pca_idx,
@@ -1175,12 +1217,12 @@ def main() -> None:
     x = sub.add_parser("cf-clusters"); x.add_argument("--category", default="CDs_and_Vinyl")
     sub.add_parser("evidence-report")
     sub.add_parser("prototype-report")
-    x = sub.add_parser("latent-distribution"); x.add_argument("--seed", type=int, default=42); x.add_argument("--pair-samples", type=int, default=100_000); x.add_argument("--pca-samples", type=int, default=20_000); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
+    x = sub.add_parser("latent-distribution"); x.add_argument("--seed", type=int, default=42); x.add_argument("--pair-samples", type=int, default=100_000); x.add_argument("--pca-samples", type=int, default=20_000); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl"); x.add_argument("--component", choices=("r", "z"), default="r")
     x = sub.add_parser("extract"); x.add_argument("--split", choices=("train", "valid", "test"), required=True); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
     x = sub.add_parser("intervention"); x.add_argument("--split", choices=("valid", "test"), default="valid"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     x = sub.add_parser("mine"); x.add_argument("--bank", choices=("all", "correct", "positive", "top", "harmful"), required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True)
     x = sub.add_parser("score"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "hard", "residual", "mean", "shuffled", "random"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
-    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random", "z_alone", "noise_matched"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
+    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "mu_only", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random", "z_alone", "noise_matched"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
     x = sub.add_parser("collaborative"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--exclusion", choices=("none", "user", "target", "both"), required=True); x.add_argument("--min-users", type=int, default=1); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     x = sub.add_parser("oracle"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--candidate-k", type=int, default=8); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     args = p.parse_args()
@@ -1190,7 +1232,7 @@ def main() -> None:
     elif args.command == "cf-clusters": build_cf_clusters()
     elif args.command == "evidence-report": evidence_report()
     elif args.command == "prototype-report": prototype_report()
-    elif args.command == "latent-distribution": latent_distribution_report(args.seed, args.pair_samples, args.pca_samples, args.tag, args.checkpoint)
+    elif args.command == "latent-distribution": latent_distribution_report(args.seed, args.pair_samples, args.pca_samples, args.tag, args.checkpoint, args.component)
     elif args.command == "extract": extract(args.split, args.batch_size, args.limit, args.checkpoint, args.tag)
     elif args.command == "intervention": intervention(args.split, args.batch_size, args.limit, args.checkpoint, args.tag)
     elif args.command == "mine": mine(args.bank, args.k, args.seed)

@@ -32,21 +32,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True, help="run version, e.g. v4 or v5")
     parser.add_argument("--steps", nargs="+", type=int, default=(384, 768, 1152))
+    parser.add_argument("--category", default="CDs_and_Vinyl", help="dataset name for the plot title")
+    parser.add_argument("--tag-prefix", default="latent_", help="prefix before '<version>_checkpoint_<step>' in the result directory name; some older runs (e.g. toys_and_games_v0) have none")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
 
-def load_metrics(version: str, step: int, mode: str) -> dict[str, float]:
+def load_metrics(version: str, step: int, mode: str, tag_prefix: str) -> dict[str, float]:
     path = (
         ROOT
         / "analysis/results/intervention"
-        / f"latent_{version}_checkpoint_{step}"
+        / f"{tag_prefix}{version}_checkpoint_{step}"
         / f"generation_test_all_k32_s42_{mode}_t1_temp0.1_a1.0.json"
     )
     data = json.loads(path.read_text())
     metrics = data["metrics"]
-    if metrics.get("n") != 6157:
-        raise ValueError(f"incomplete result in {path}: n={metrics.get('n')}")
     if metrics.get("catalog_violations") != 0:
         raise ValueError(f"catalog violations in {path}: {metrics['catalog_violations']}")
     return metrics
@@ -55,9 +55,15 @@ def load_metrics(version: str, step: int, mode: str) -> dict[str, float]:
 def main() -> None:
     args = parse_args()
     values = {
-        step: {mode: load_metrics(args.version, step, mode) for mode, _ in MODES}
+        step: {mode: load_metrics(args.version, step, mode, args.tag_prefix) for mode, _ in MODES}
         for step in args.steps
     }
+    # All modes/checkpoints for one run must share the same completed test-set
+    # size (whatever that dataset's n is, not a fixed constant) -- catches a
+    # truncated/incomplete E1 result without hardcoding one dataset's row count.
+    ns = {values[step][mode]["n"] for step in args.steps for mode, _ in MODES}
+    if len(ns) != 1:
+        raise ValueError(f"inconsistent n across modes/checkpoints: {sorted(ns)}")
 
     x = np.arange(len(MODES))
     width = 0.8 / len(args.steps)
@@ -97,7 +103,7 @@ def main() -> None:
         frameon=False,
     )
     fig.suptitle(
-        f"CDs_and_Vinyl latent_{args.version}: causal intervention ranking",
+        f"{args.category} latent_{args.version}: causal intervention ranking",
         fontsize=16,
         weight="bold",
         y=0.995,

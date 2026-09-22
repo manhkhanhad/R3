@@ -147,6 +147,38 @@ class LatentModel(Qwen2ForCausalLM):
         else:
             self.attention = SelfAttentionLayer(config.hidden_size)
 
+        residual = getattr(config, "latent_residual_correction", None)
+        if residual:
+            from residual_correction_attention import wrap_with_residual_correction
+            self.attention = wrap_with_residual_correction(
+                self.attention, config.hidden_size, residual
+            )
+
+        self.last_soft_vocab_entropy = None
+        self.last_soft_vocab_max_probability = None
+        self.last_soft_vocab_raw_norm = None
+        self.last_soft_vocab_norm = None
+
+    def project_reasoning_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        """Map ``latent`` to input-embedding space when enabled in config.
+
+        Keeping this selection in the base checkpoint class ensures training,
+        ordinary ranking evaluation, and generation all use the same latent.
+        With no config flag, the baseline path is exactly the identity.
+        """
+        spec = getattr(self.config, "latent_soft_vocabulary", None)
+        if not spec:
+            return latent
+
+        from soft_vocabulary import project_to_soft_vocabulary
+
+        soft_latent, diagnostics = project_to_soft_vocabulary(self, latent, spec)
+        self.last_soft_vocab_entropy = diagnostics["entropy"]
+        self.last_soft_vocab_max_probability = diagnostics["max_probability"]
+        self.last_soft_vocab_raw_norm = diagnostics["raw_norm"]
+        self.last_soft_vocab_norm = diagnostics["soft_norm"]
+        return soft_latent
+
     def generate_embs(self, input_ids, attention_mask):
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
@@ -155,10 +187,14 @@ class LatentModel(Qwen2ForCausalLM):
         hidden_states = output_mid['hidden_states']
         input_embs = self.model.embed_tokens(input_ids)
 
-        input_embs[where_thought_ids[:, 0], where_thought_ids[:, 1]] = self.attention(
+        reasoning_latent = self.attention(
             hidden_states=hidden_states[-1], attention_mask=attention_mask,
             thought_id_idx=where_thought_ids[:, 1],
-        ).to(input_embs.dtype)
+        )
+        reasoning_latent = self.project_reasoning_latent(reasoning_latent)
+        input_embs[where_thought_ids[:, 0], where_thought_ids[:, 1]] = reasoning_latent.to(
+            input_embs.dtype
+        )
 
         return input_embs
 
@@ -199,6 +235,4 @@ class LatentModel(Qwen2ForCausalLM):
             num_logits_to_keep=num_logits_to_keep,
             **kwargs,
         )
-
-
 

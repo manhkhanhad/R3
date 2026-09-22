@@ -46,6 +46,7 @@ class ScheduledLatentModel(LatentModel):
     def __init__(self, config):
         super().__init__(config)
         self.alpha = 0.0
+        self.equal_three_way_mix = False
         self.last_schedule_mode = "both"
 
     def _thought_positions(self, input_ids: torch.LongTensor) -> torch.LongTensor:
@@ -56,6 +57,13 @@ class ScheduledLatentModel(LatentModel):
         return idx
 
     def _draw_mode(self) -> str:
+        if self.equal_three_way_mix:
+            u = random.random()
+            if u < 1.0 / 3.0:
+                return "history_only"
+            if u < 2.0 / 3.0:
+                return "reasoning_only"
+            return "both"
         if self.alpha >= 1.0:
             return "both"
         u = random.random()

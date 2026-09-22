@@ -30,7 +30,12 @@ from reasoning_dataset import LatentRDataset
 
 
 class AttentionScheduleCallback(transformers.TrainerCallback):
-    def __init__(self, ramp_epochs: float, alpha_max: float = 1.0):
+    def __init__(
+        self,
+        ramp_epochs: float,
+        alpha_max: float = 1.0,
+        three_way_start_epoch: float = -1.0,
+    ):
         self.ramp_epochs = max(ramp_epochs, 1e-8)
         # alpha_max >= 1.0 preserves the original behavior: ramp 0->1, then
         # keep growing past 1.0 (forcing deterministic "both" for the rest of
@@ -39,10 +44,18 @@ class AttentionScheduleCallback(transformers.TrainerCallback):
         # and the model trains exclusively on the stochastic
         # reasoning_only/history_only mix for the entire run.
         self.alpha_max = alpha_max
+        # Negative preserves every existing schedule. At or after a
+        # non-negative threshold, sample history_only, reasoning_only, and
+        # both uniformly.
+        self.three_way_start_epoch = three_way_start_epoch
 
-    def _set_alpha(self, model, alpha: float):
+    def _set_schedule(self, model, alpha: float, progress: float):
         target = model.module if hasattr(model, "module") else model
         target.alpha = alpha
+        target.equal_three_way_mix = (
+            self.three_way_start_epoch >= 0
+            and progress >= self.three_way_start_epoch
+        )
 
     def on_step_begin(self, args, state, control, **kwargs):
         model = kwargs.get("model")
@@ -56,7 +69,7 @@ class AttentionScheduleCallback(transformers.TrainerCallback):
                 alpha = self.alpha_max
         else:
             alpha = self.alpha_max * (progress / self.ramp_epochs)
-        self._set_alpha(model, alpha)
+        self._set_schedule(model, alpha, progress)
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         model = kwargs.get("model")
@@ -64,6 +77,7 @@ class AttentionScheduleCallback(transformers.TrainerCallback):
             return
         target = model.module if hasattr(model, "module") else model
         logs["schedule_alpha"] = getattr(target, "alpha", None)
+        logs["schedule_equal_three_way"] = getattr(target, "equal_three_way_mix", False)
         logs["schedule_mode"] = getattr(target, "last_schedule_mode", None)
 
 
@@ -98,6 +112,7 @@ def train(
     # attention-schedule hyperparameters
     ramp_epochs: float = -1.0,  # -1 means num_epochs - 1 (default: linear ramp over all but the last epoch)
     alpha_max: float = 1.0,  # <1.0: ramp 0->alpha_max and hold there, never triggering deterministic "both"
+    three_way_start_epoch: float = -1.0,
 ):
 
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
@@ -196,7 +211,11 @@ def train(
             # history_only/reasoning_only training batches. Stopping early on that noise would
             # prevent ever reaching the final alpha>=1 epoch, which is the one that actually
             # matters (a full epoch of unrestricted "both" training/eval, matching deployment).
-            AttentionScheduleCallback(ramp_epochs=ramp_epochs, alpha_max=alpha_max),
+            AttentionScheduleCallback(
+                ramp_epochs=ramp_epochs,
+                alpha_max=alpha_max,
+                three_way_start_epoch=three_way_start_epoch,
+            ),
         ],
     )
     model.config.use_cache = False

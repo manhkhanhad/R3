@@ -81,6 +81,7 @@ def train(
     kl_weight: float = 1.0,
     mu_consistency_weight: float = 0.0,  # 0 -> 7a, >0 -> 7b
     z_queue_size: int = 256,
+    kl_min_queue_size: int = 0,  # set equal to z_queue_size to fill FIFO before KL
 ):
 
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
@@ -114,6 +115,9 @@ def train(
     model.kl_weight = kl_weight
     model.mu_consistency_weight = mu_consistency_weight
     model.z_queue_size = z_queue_size
+    if not 0 <= kl_min_queue_size <= z_queue_size:
+        raise ValueError("kl_min_queue_size must be between 0 and z_queue_size")
+    model.kl_min_queue_size = kl_min_queue_size
     model.grad_accum_steps = gradient_accumulation_steps
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -126,7 +130,11 @@ def train(
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")['input_ids'][0] == len(tokenizer) - 1
 
-    print(f"VAE-decomposed attention: rho_mu={rho_mu} kl_weight={kl_weight} mu_consistency_weight={mu_consistency_weight}")
+    print(
+        f"VAE-decomposed attention: rho_mu={rho_mu} kl_weight={kl_weight} "
+        f"mu_consistency_weight={mu_consistency_weight} z_queue_size={z_queue_size} "
+        f"kl_min_queue_size={kl_min_queue_size}"
+    )
 
     train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K)
     val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K)

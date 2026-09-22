@@ -4,11 +4,18 @@ r_i = mu_i + z_i, no sampling, prior N(0, I) imposed on z by an aggregate KL.
   L = CE + beta * KL( N(m, diag(s^2)) || N(0, I) )          (7a)
         + gamma * mean_i ||mu_i - mu_ema||^2 / H              (7b, gamma > 0)
 
+For 7b, an optional deployment CE evaluates the same examples with unrestricted
+history + latent attention. The scheduled isolated-path CE is retained, so the
+model is optimized for ranking-time behavior without removing the causal-path
+pressure.
+
   KL per dim = 0.5 * (s_d^2 + m_d^2 - 1 - log s_d^2), averaged over dims.
   m, s^2 are the mean / per-dim variance of z over [current micro-batch ; queue
   of recent detached z].  A micro-batch of 4 alone gives a 3-dof variance
   estimate, far too noisy for the log barrier; the queue gives a stable
-  estimate while gradient still flows through the current rows.
+  estimate while gradient still flows through the current rows.  Experiments
+  can set kl_min_queue_size to the queue capacity so KL remains disabled until
+  the FIFO queue has a full, stable reference population.
 
 What the KL does: m -> 0 pushes shared content out of z into mu; s^2 -> 1 with
 a log barrier makes it impossible to shrink any dimension of z (and forbids a
@@ -36,14 +43,21 @@ class VAEDecomposedLatentModel(ScheduledLatentModel):
         super().__init__(config)
         self.kl_weight = 1.0
         self.mu_consistency_weight = 0.0
+        # Optional CE on the exact inference-time path (history + latent).
+        # The scheduled CE remains active so this does not trade away the
+        # isolated reasoning path that gives the latent causal utility.
+        self.deployment_ce_weight = 0.0
         self.z_queue_size = 256
+        self.kl_min_queue_size = 0
         self.grad_accum_steps = 1
         self.register_buffer("z_queue", torch.zeros(0, config.hidden_size, dtype=torch.float32), persistent=False)
         self.last_ce_loss = None
+        self.last_deployment_ce_loss = None
         self.last_kl_loss = None
         self.last_mu_consistency_loss = None
         self.last_z_mean_sq = None
         self.last_z_var = None
+        self.last_kl_active = False
 
     def _run_second_pass(self, embeds, attention_mask, position_ids, cache_position, num_logits_to_keep):
         return Qwen2ForCausalLM.forward(
@@ -71,7 +85,19 @@ class VAEDecomposedLatentModel(ScheduledLatentModel):
 
     def _push_queue(self, z: torch.Tensor) -> None:
         with torch.no_grad():
-            self.z_queue = torch.cat([z.detach().float(), self.z_queue.to(z.device)], dim=0)[: self.z_queue_size]
+            # Store rows oldest -> newest and evict from the front.  Keeping
+            # the chronological ordering explicit makes the FIFO behavior
+            # unambiguous; aggregate moments themselves are order-invariant.
+            self.z_queue = torch.cat([self.z_queue.to(z.device), z.detach().float()], dim=0)[-self.z_queue_size :]
+
+    def _queued_kl(self, z: torch.Tensor) -> torch.Tensor:
+        # Do not estimate the log-variance term from a sparse startup queue.
+        # Push happens after the test, so the first KL-bearing batch sees a
+        # complete detached reference queue plus its current, differentiable z.
+        self.last_kl_active = self.z_queue.size(0) >= self.kl_min_queue_size
+        kl_loss = self._aggregate_kl(z) if self.last_kl_active else z.new_zeros(())
+        self._push_queue(z)
+        return kl_loss
 
     def forward(
         self,
@@ -114,6 +140,7 @@ class VAEDecomposedLatentModel(ScheduledLatentModel):
 
         thought_idx = self._thought_positions(input_ids)
         embeds = self.generate_embs(input_ids, attention_mask)
+        deployment_embeds = embeds
         mu, z = self.attention.last_mu, self.attention.last_z  # [B, H] float32
         batch_idx = torch.arange(embeds.size(0), device=embeds.device)
 
@@ -134,9 +161,26 @@ class VAEDecomposedLatentModel(ScheduledLatentModel):
         shift_labels = labels[:, 1:].contiguous()
         ce_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100)
 
+        # alpha_max < 1 never draws "both", although ranking and generation
+        # always use "both". Train that deployed path explicitly instead of
+        # asking one random path draw to serve both ranking and causality.
+        if self.deployment_ce_weight > 0 and mode != "both":
+            deployment_out = self._run_second_pass(
+                deployment_embeds, attention_mask, position_ids, cache_position, num_logits_to_keep
+            )
+            deployment_shift_logits = deployment_out.logits[:, :-1, :].contiguous().float()
+            deployment_ce_loss = F.cross_entropy(
+                deployment_shift_logits.view(-1, deployment_shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+            deployment_loss_term = self.deployment_ce_weight * deployment_ce_loss
+        else:
+            deployment_ce_loss = ce_loss
+            deployment_loss_term = ce_loss.new_zeros(())
+
         if mode != "history_only":
-            kl_loss = self._aggregate_kl(z)
-            self._push_queue(z)
+            kl_loss = self._queued_kl(z)
             if self.mu_consistency_weight > 0 and bool(self.attention.mu_ema_initialized):
                 mu_consistency = (mu - self.attention.mu_ema.unsqueeze(0)).pow(2).mean()
             else:
@@ -144,13 +188,18 @@ class VAEDecomposedLatentModel(ScheduledLatentModel):
         else:
             kl_loss = ce_loss.new_zeros(())
             mu_consistency = ce_loss.new_zeros(())
+            self.last_kl_active = False
 
         self.last_ce_loss = ce_loss.detach()
+        self.last_deployment_ce_loss = deployment_ce_loss.detach()
         self.last_kl_loss = kl_loss.detach()
         self.last_mu_consistency_loss = mu_consistency.detach()
 
+        # Add rather than average the auxiliary deployment CE: the scheduled
+        # causal-path gradient keeps its original strength.
+        ce_objective = ce_loss + deployment_loss_term
         total_loss = (
-            ce_loss + self.kl_weight * kl_loss + self.mu_consistency_weight * mu_consistency
+            ce_objective + self.kl_weight * kl_loss + self.mu_consistency_weight * mu_consistency
         ) / self.grad_accum_steps
 
         return CausalLMOutputWithPast(
