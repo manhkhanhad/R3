@@ -2,9 +2,10 @@
 
 This is deliberately additive: the R3 encoder, the full latent ``r``, and the
 recommendation decoder path are unchanged.  During training only, recent
-high-quality latent vectors are kept in a non-persistent FIFO corpus.  Two
-projection heads organize that shared latent space independently by user and
-by target item.  The heads and corpus do not participate in inference.
+high-quality latent vectors are kept in a non-persistent FIFO corpus.  User
+and target heads organize the latent space, with an optional title-weighted
+user objective and CF-neighbor head.  These training signals do not
+participate in inference.
 """
 
 import torch
@@ -23,6 +24,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         hidden = config.hidden_size
         projection_dim = int(settings.get("projection_dim", 256))
         self.bank_size = int(settings.get("bank_size", 10_000))
+        self.title_feature_dim = int(settings.get("title_feature_dim", 0))
+        self.cf_topk = int(settings.get("cf_topk", 0))
 
         self.user_projection = nn.Sequential(
             nn.LayerNorm(hidden), nn.Linear(hidden, projection_dim, bias=False)
@@ -30,6 +33,10 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         self.target_projection = nn.Sequential(
             nn.LayerNorm(hidden), nn.Linear(hidden, projection_dim, bias=False)
         )
+        if self.cf_topk:
+            self.cf_projection = nn.Sequential(
+                nn.LayerNorm(hidden), nn.Linear(hidden, projection_dim, bias=False)
+            )
 
         # The queue is run-local state: stale vectors must not enter a resumed
         # model merely because they happened to be present when it was saved.
@@ -53,12 +60,27 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             "bank_nll", torch.zeros(self.bank_size, dtype=torch.float32),
             persistent=False,
         )
+        if self.title_feature_dim:
+            self.register_buffer(
+                "bank_title", torch.zeros(self.bank_size, self.title_feature_dim, dtype=torch.float16),
+                persistent=False,
+            )
+            self.register_buffer(
+                "bank_item", torch.full((self.bank_size,), -1, dtype=torch.int64),
+                persistent=False,
+            )
+            self.register_buffer(
+                "cf_neighbor_ids", torch.empty(0, self.cf_topk, dtype=torch.int64),
+                persistent=False,
+            )
         self.register_buffer("bank_pointer", torch.zeros((), dtype=torch.int64), persistent=False)
         self.register_buffer("bank_count", torch.zeros((), dtype=torch.int64), persistent=False)
 
         self.temperature = 0.1
         self.user_contrastive_weight = 0.1
         self.target_contrastive_weight = 0.1
+        self.cf_contrastive_weight = 0.1
+        self.title_positive_floor = 0.25
         self.max_user_positives = 16
         self.max_target_positives = 16
         self.num_negatives = 256
@@ -69,8 +91,10 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         self.last_ce_loss = None
         self.last_user_contrastive_loss = None
         self.last_target_contrastive_loss = None
+        self.last_cf_contrastive_loss = None
         self.last_user_positive_rate = None
         self.last_target_positive_rate = None
+        self.last_cf_positive_rate = None
         self.last_queue_accept_rate = None
         self.last_queue_count = None
 
@@ -137,8 +161,20 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             self.bank_sample[order], self.bank_nll[order],
         )
 
+    def _bank_aux_view(self):
+        count = int(self.bank_count.item())
+        if count < self.bank_size:
+            return self.bank_title[:count], self.bank_item[:count]
+        pointer = int(self.bank_pointer.item())
+        order = torch.cat([
+            torch.arange(pointer, self.bank_size, device=self.bank_r.device),
+            torch.arange(0, pointer, device=self.bank_r.device),
+        ])
+        return self.bank_title[order], self.bank_item[order]
+
     @torch.no_grad()
-    def _push_bank(self, r, user_hash, target_hash, sample_hash, nll, quality):
+    def _push_bank(self, r, user_hash, target_hash, sample_hash, nll, quality,
+                   target_title_features=None, target_item_index=None):
         keep = torch.nonzero(quality, as_tuple=False).flatten()
         if keep.numel() == 0:
             return
@@ -147,12 +183,19 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         target_hash = target_hash.detach()[keep].to(self.bank_target.device)
         sample_hash = sample_hash.detach()[keep].to(self.bank_sample.device)
         nll = nll.detach()[keep].to(self.bank_nll.device, dtype=self.bank_nll.dtype)
+        if getattr(self, "title_feature_dim", 0):
+            title = target_title_features.detach()[keep].to(
+                self.bank_title.device, dtype=self.bank_title.dtype
+            )
+            item = target_item_index.detach()[keep].to(self.bank_item.device)
 
         if r.size(0) > self.bank_size:
             r, user_hash, target_hash, sample_hash, nll = (
                 value[-self.bank_size:]
                 for value in (r, user_hash, target_hash, sample_hash, nll)
             )
+            if getattr(self, "title_feature_dim", 0):
+                title, item = title[-self.bank_size:], item[-self.bank_size:]
         pointer = int(self.bank_pointer.item())
         first = min(r.size(0), self.bank_size - pointer)
         second = r.size(0) - first
@@ -168,6 +211,9 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             (self.bank_nll, nll),
         ):
             copy_ring(buffer, values)
+        if getattr(self, "title_feature_dim", 0):
+            copy_ring(self.bank_title, title)
+            copy_ring(self.bank_item, item)
         self.bank_pointer.fill_((pointer + r.size(0)) % self.bank_size)
         self.bank_count.fill_(min(self.bank_size, int(self.bank_count.item()) + r.size(0)))
 
@@ -180,7 +226,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
     def _relation_loss(
         self, anchor_r, candidate_r, anchor_user, anchor_target,
         anchor_sample, candidate_user, candidate_target, candidate_sample,
-        projection, relation, max_positives,
+        projection, relation, max_positives, positive_mask=None,
+        excluded_negatives=None, anchor_title=None, candidate_title=None,
     ):
         zero = anchor_r.sum() * 0.0
         if candidate_r.size(0) == 0:
@@ -192,13 +239,17 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         not_self = anchor_sample[:, None] != candidate_sample[None, :]
         if relation == "user":
             positives = not_self & (anchor_user[:, None] == candidate_user[None, :])
-        else:
+        elif relation == "target":
             positives = not_self & (anchor_target[:, None] == candidate_target[None, :])
+        else:
+            positives = not_self & positive_mask
         negatives = (
             not_self
             & (anchor_user[:, None] != candidate_user[None, :])
             & (anchor_target[:, None] != candidate_target[None, :])
         )
+        if excluded_negatives is not None:
+            negatives &= ~excluded_negatives
 
         losses = []
         has_positive = positives.any(dim=1)
@@ -209,6 +260,13 @@ class CollaborativeContrastiveLatentModel(LatentModel):
                 continue
             pos_scores = anchors[row] @ candidates[pos_idx].T / self.temperature
             neg_scores = anchors[row] @ candidates[neg_idx].T / self.temperature
+            if relation == "user" and anchor_title is not None:
+                similarity = F.cosine_similarity(
+                    anchor_title[row].float().unsqueeze(0),
+                    candidate_title[pos_idx].float(), dim=-1,
+                ).clamp(min=0.0, max=1.0)
+                weights = self.title_positive_floor + (1 - self.title_positive_floor) * similarity
+                pos_scores = pos_scores + (weights / weights.mean()).log()
             # Multi-positive InfoNCE: maximize the probability mass assigned
             # to any eligible positive rather than trusting one random match.
             losses.append(
@@ -218,7 +276,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         loss = torch.stack(losses).mean() if losses else zero
         return loss, has_positive.float().mean().detach()
 
-    def _collaborative_losses(self, r, user_hash, target_hash, sample_hash, quality):
+    def _collaborative_losses(self, r, user_hash, target_hash, sample_hash, quality,
+                              target_title_features=None, target_item_index=None):
         bank_r, bank_user, bank_target, bank_sample, _ = self._bank_view()
         current = torch.nonzero(quality, as_tuple=False).flatten()
         candidate_r = torch.cat([bank_r.to(r.device), r.detach()[current]], dim=0)
@@ -226,17 +285,53 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         candidate_target = torch.cat([bank_target.to(r.device), target_hash[current]], dim=0)
         candidate_sample = torch.cat([bank_sample.to(r.device), sample_hash[current]], dim=0)
 
+        pair_options = {}
+        cf_positive = None
+        if getattr(self, "title_feature_dim", 0):
+            bank_title, bank_item = self._bank_aux_view()
+            candidate_title = torch.cat([
+                bank_title.to(r.device), target_title_features.detach()[current]
+            ], dim=0)
+            candidate_item = torch.cat([
+                bank_item.to(r.device), target_item_index[current]
+            ], dim=0)
+            if self.cf_neighbor_ids.numel():
+                neighbor_ids = self.cf_neighbor_ids[target_item_index.clamp(min=0)]
+                cf_positive = (
+                    (neighbor_ids[:, :, None] == candidate_item[None, None, :])
+                    & (neighbor_ids[:, :, None] >= 0)
+                ).any(dim=1)
+                cf_positive &= (
+                    (target_item_index[:, None] >= 0)
+                    & (candidate_user[None, :] != user_hash[:, None])
+                    & (candidate_target[None, :] != target_hash[:, None])
+                )
+            pair_options = {
+                "excluded_negatives": cf_positive,
+                "anchor_title": target_title_features,
+                "candidate_title": candidate_title,
+            }
+
         common = (
             r, candidate_r, user_hash, target_hash, sample_hash,
             candidate_user, candidate_target, candidate_sample,
         )
         user_loss, user_rate = self._relation_loss(
-            *common, self.user_projection, "user", self.max_user_positives
+            *common, self.user_projection, "user", self.max_user_positives, **pair_options
         )
         target_loss, target_rate = self._relation_loss(
-            *common, self.target_projection, "target", self.max_target_positives
+            *common, self.target_projection, "target", self.max_target_positives,
+            excluded_negatives=cf_positive,
         )
-        return user_loss, target_loss, user_rate, target_rate
+        if cf_positive is not None:
+            cf_loss, cf_rate = self._relation_loss(
+                *common, self.cf_projection, "cf", self.max_target_positives,
+                positive_mask=cf_positive, excluded_negatives=cf_positive,
+            )
+        else:
+            cf_loss = r.sum() * 0.0
+            cf_rate = cf_loss.detach()
+        return user_loss, target_loss, cf_loss, user_rate, target_rate, cf_rate
 
     def forward(
         self,
@@ -255,6 +350,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         user_hash=None,
         target_hash=None,
         sample_hash=None,
+        target_title_features=None,
+        target_item_index=None,
         **kwargs,
     ):
         is_training_prefill = (
@@ -273,6 +370,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
                 return_dict=return_dict, cache_position=cache_position,
                 num_logits_to_keep=num_logits_to_keep, **kwargs,
             )
+        if self.title_feature_dim and (target_title_features is None or target_item_index is None):
+            raise ValueError("Title features and item indices are required for collaborative training")
 
         embeds = self.generate_embs(input_ids, attention_mask)
         thought_idx = self._thought_positions(input_ids)
@@ -287,16 +386,22 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             & (example_nll <= self.positive_max_nll)
         )
 
-        user_loss, target_loss, user_rate, target_rate = self._collaborative_losses(
-            r, user_hash, target_hash, sample_hash, quality
+        user_loss, target_loss, cf_loss, user_rate, target_rate, cf_rate = self._collaborative_losses(
+            r, user_hash, target_hash, sample_hash, quality,
+            target_title_features, target_item_index,
         )
-        self._push_bank(r, user_hash, target_hash, sample_hash, example_nll, quality)
+        self._push_bank(
+            r, user_hash, target_hash, sample_hash, example_nll, quality,
+            target_title_features, target_item_index,
+        )
 
         self.last_ce_loss = ce_loss.detach()
         self.last_user_contrastive_loss = user_loss.detach()
         self.last_target_contrastive_loss = target_loss.detach()
+        self.last_cf_contrastive_loss = cf_loss.detach()
         self.last_user_positive_rate = user_rate
         self.last_target_positive_rate = target_rate
+        self.last_cf_positive_rate = cf_rate
         self.last_queue_accept_rate = quality.float().mean().detach()
         self.last_queue_count = self.bank_count.detach().clone()
 
@@ -304,6 +409,7 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             ce_loss
             + self.user_contrastive_weight * user_loss
             + self.target_contrastive_weight * target_loss
+            + self.cf_contrastive_weight * cf_loss
         ) / self.grad_accum_steps
         return CausalLMOutputWithPast(
             loss=total_loss,

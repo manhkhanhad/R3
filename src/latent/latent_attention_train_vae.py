@@ -8,6 +8,7 @@ import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 import fire
 import torch
 
@@ -21,6 +22,7 @@ from transformers import (
 from vae_decomposed_attention import VAEDecomposedLatentModel
 from latent_attention_train_scheduled import AttentionScheduleCallback
 from reasoning_dataset import LatentRDataset
+from experiment_tracking import init_training_run, wandb_report_to
 
 
 class DecompositionLogCallback(transformers.TrainerCallback):
@@ -82,8 +84,10 @@ def train(
     mu_consistency_weight: float = 0.0,  # 0 -> 7a, >0 -> 7b
     z_queue_size: int = 256,
     kl_min_queue_size: int = 0,  # set equal to z_queue_size to fill FIFO before KL
+    wandb_run_name: str = None,
 ):
 
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
     print(category)
     category = category_dict[category]
@@ -166,7 +170,7 @@ def train(
             save_total_limit=1,
             load_best_model_at_end=False,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False
         ),
         data_collator=DataCollatorForSeq2Seq(

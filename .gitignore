@@ -3,3 +3,4 @@ output_dir/
 data/
 analysis/
 run_logs/
+wandb

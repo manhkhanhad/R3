@@ -5,15 +5,19 @@ import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 
 import fire
 import torch
 import transformers
 from datasets import Dataset as HFDataset
+from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 
 from collaborative_contrastive_attention import CollaborativeContrastiveLatentModel
 from collaborative_contrastive_dataset import CollaborativeContrastiveDataset
+from collaborative_pair_features import build_pair_features
+from experiment_tracking import init_training_run, move_callback_to_end, wandb_report_to
 
 
 class CollaborativeLogCallback(transformers.TrainerCallback):
@@ -26,13 +30,55 @@ class CollaborativeLogCallback(transformers.TrainerCallback):
             ("last_ce_loss", "ce_loss"),
             ("last_user_contrastive_loss", "user_infonce_loss"),
             ("last_target_contrastive_loss", "target_infonce_loss"),
+            ("last_cf_contrastive_loss", "cf_infonce_loss"),
             ("last_user_positive_rate", "user_positive_rate"),
             ("last_target_positive_rate", "target_positive_rate"),
+            ("last_cf_positive_rate", "cf_positive_rate"),
             ("last_queue_accept_rate", "queue_accept_rate"),
             ("last_queue_count", "queue_count"),
         ):
             value = getattr(target, attr, None)
             logs[key] = value.item() if value is not None else None
+
+
+@torch.no_grad()
+def prefill_candidate_bank(model, dataset, collator, batch_size, seed, min_token_accuracy):
+    device = next(model.parameters()).device
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True,
+        generator=torch.Generator().manual_seed(seed), collate_fn=collator,
+    )
+    model.eval()
+    seen = 0
+    accepted = 0
+    for batch in loader:
+        batch = {key: value.to(device) for key, value in batch.items()}
+        embeds = model.generate_embs(batch["input_ids"], batch["attention_mask"])
+        positions = model._thought_positions(batch["input_ids"])
+        rows = torch.arange(len(positions), device=device)
+        latent = embeds[rows, positions].float()
+        output = model._run_second_pass(embeds, batch["attention_mask"], None, None, 0)
+        _, example_nll, accuracy = model._loss_and_quality(output.logits, batch["labels"])
+        quality = (accuracy >= min_token_accuracy) & (example_nll <= model.positive_max_nll)
+        model._push_bank(
+            latent, batch["user_hash"], batch["target_hash"], batch["sample_hash"],
+            example_nll, quality, batch.get("target_title_features"),
+            batch.get("target_item_index"),
+        )
+        seen += len(positions)
+        accepted += int(quality.sum().item())
+        if seen % 1024 < batch_size or int(model.bank_count.item()) == model.bank_size:
+            print(f"queue prefill: seen={seen}, accepted={accepted}, bank={int(model.bank_count.item())}", flush=True)
+        if int(model.bank_count.item()) == model.bank_size:
+            break
+    model.train()
+    print(
+        f"queue prefill complete: seen={seen}, accepted={accepted}, "
+        f"bank={int(model.bank_count.item())}/{model.bank_size}", flush=True,
+    )
+    if int(model.bank_count.item()) == 0:
+        raise RuntimeError("No examples met the queue prefill accuracy threshold")
+    return seen, accepted
 
 
 def train(
@@ -65,7 +111,17 @@ def train(
     num_negatives: int = 256,
     positive_min_token_accuracy: float = 1.0,
     positive_max_nll: float = float("inf"),
+    title_cf_positives: bool = False,
+    title_positive_floor: float = 0.25,
+    cf_contrastive_weight: float = 0.1,
+    cf_topk: int = 32,
+    cf_min_common: int = 2,
+    cf_min_cosine: float = 0.1,
+    prefill_queue: bool = False,
+    prefill_batch_size: int = 8,
+    wandb_run_name: str = None,
 ):
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {
         "Office_Products": "office products", "Books": "books",
         "steam": "games", "CDs_and_Vinyl": "musics",
@@ -84,10 +140,21 @@ def train(
             "is intentionally local and unsynchronized."
         )
 
+    if title_cf_positives:
+        item_to_index, title_vectors, cf_neighbors, feature_report = build_pair_features(
+            train_file, cf_topk=cf_topk, cf_min_common=cf_min_common,
+            cf_min_cosine=cf_min_cosine, seed=seed,
+        )
+        print(f"pair features: {feature_report}", flush=True)
+    else:
+        item_to_index = title_vectors = cf_neighbors = None
+
     config = AutoConfig.from_pretrained(base_model)
     config.collaborative_contrastive = {
         "projection_dim": projection_dim,
         "bank_size": bank_size,
+        "title_feature_dim": 0 if title_vectors is None else title_vectors.shape[1],
+        "cf_topk": 0 if cf_neighbors is None else cf_neighbors.shape[1],
     }
     model = CollaborativeContrastiveLatentModel.from_pretrained(
         base_model, config=config, torch_dtype=torch.bfloat16,
@@ -97,6 +164,10 @@ def train(
     model.temperature = temperature
     model.user_contrastive_weight = user_contrastive_weight
     model.target_contrastive_weight = target_contrastive_weight
+    model.cf_contrastive_weight = cf_contrastive_weight if title_cf_positives else 0.0
+    model.title_positive_floor = title_positive_floor
+    if cf_neighbors is not None:
+        model.cf_neighbor_ids = torch.as_tensor(cf_neighbors, dtype=torch.int64)
     model.max_user_positives = max_user_positives
     model.max_target_positives = max_target_positives
     model.num_negatives = num_negatives
@@ -122,10 +193,12 @@ def train(
     train_data = CollaborativeContrastiveDataset(
         train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
         sample=sample, seed=seed, category=category_text, K=K,
+        item_to_index=item_to_index, title_vectors=title_vectors,
     )
     val_data = CollaborativeContrastiveDataset(
         train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
         sample=sample, category=category_text, K=K,
+        item_to_index=item_to_index, title_vectors=title_vectors,
     )
     hf_train_dataset = HFDataset.from_dict(
         {key: [value[key] for value in train_data] for key in train_data[0]}
@@ -133,6 +206,15 @@ def train(
     hf_val_dataset = HFDataset.from_dict(
         {key: [value[key] for value in val_data] for key in val_data[0]}
     )
+    collator = DataCollatorForSeq2Seq(
+        tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True,
+    )
+    if prefill_queue:
+        model.to("cuda")
+        prefill_candidate_bank(
+            model, hf_train_dataset, collator, prefill_batch_size, seed,
+            positive_min_token_accuracy,
+        )
 
     trainer = transformers.Trainer(
         model=model,
@@ -152,17 +234,18 @@ def train(
             eval_strategy="epoch",
             save_strategy="epoch",
             output_dir=output_dir,
-            save_total_limit=3,
+            save_total_limit=1,
             load_best_model_at_end=False,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False,
         ),
-        data_collator=DataCollatorForSeq2Seq(
-            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True,
-        ),
+        data_collator=collator,
         callbacks=[CollaborativeLogCallback()],
     )
+    # Trainer registers reporting integrations before user callbacks. Move W&B
+    # behind CollaborativeLogCallback so it sees the enriched log dictionary.
+    move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     model.save_pretrained(output_dir)

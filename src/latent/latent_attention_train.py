@@ -2,6 +2,7 @@ import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 import fire
 import torch
 
@@ -14,6 +15,11 @@ from transformers import (
 
 from layers import LatentModel
 from reasoning_dataset import LatentRDataset
+from category_alignment_attention import CategoryAlignedLatentModel
+from category_alignment_dataset import CategoryAlignedLatentRDataset
+from side_info_latent import SideInfoLatentModel
+from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
+from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
 def train(
@@ -42,9 +48,39 @@ def train(
     local_rank: int = 0,
     deepspeed: str ="./deepspeed.json",
     category: str="Toys_and_Games",
-    K: int = 0
+    K: int = 0,
+    wandb_run_name: str = None,
+    category_embeddings_file: str = None,
+    category_alignment_weight: float = 0.0,
+    # decoder-insensitivity tests (analysis/document/decoder_insensitivity_to_latent.md)
+    side_info_kind: str = None,  # oracle_category | random_category | sasrec_sequence | none
+    side_info_file: str = None,  # category-embedding .pt, or SASRec checkpoint for sasrec_sequence
+    side_init_norm: float = 30.0,
+    side_token_scale: bool = False,
+    category_text_file: str = None,  # text positive control: category-embedding .pt with "paths"
+    save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
+    save_total_limit: int = 5,
 
 ):
+
+    init_training_run(
+        dataset=category,
+        run_name=wandb_run_name,
+        config={
+            "base_model": base_model,
+            "train_file": train_file,
+            "eval_file": eval_file,
+            "output_dir": output_dir,
+            "dataset": category,
+            "category_embeddings_file": category_embeddings_file,
+            "category_alignment_weight": category_alignment_weight,
+            "side_info_kind": side_info_kind,
+            "side_info_file": side_info_file,
+            "side_init_norm": side_init_norm,
+            "side_token_scale": side_token_scale,
+            "category_text_file": category_text_file,
+        },
+    )
 
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
     print(category)
@@ -61,14 +97,64 @@ def train(
         device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
-    model = LatentModel.from_pretrained(
+    if category_alignment_weight < 0:
+        raise ValueError("category_alignment_weight must be nonnegative")
+    use_category_alignment = category_alignment_weight > 0
+    if use_category_alignment and not category_embeddings_file:
+        raise ValueError("category_embeddings_file is required when category alignment is enabled")
+    category_targets = None
+    model_class = LatentModel
+    model_kwargs = {}
+    if use_category_alignment:
+        category_targets = torch.load(category_embeddings_file, map_location="cpu", weights_only=True)
+        from transformers import AutoConfig
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.category_alignment = {
+            "dimension": int(category_targets["embeddings"].shape[1]),
+            "weight": category_alignment_weight,
+        }
+        model_class = CategoryAlignedLatentModel
+        model_kwargs["config"] = model_config
+
+    use_side_info = side_info_kind is not None
+    if use_side_info and use_category_alignment:
+        raise ValueError("side-information and category alignment cannot be combined")
+    side_table = side_valid = None
+    side_rows = {}
+    if use_side_info:
+        from transformers import AutoConfig
+        if side_info_kind in ("oracle_category", "random_category"):
+            targets = torch.load(side_info_file, map_location="cpu", weights_only=True)
+            side_table, side_valid = targets["embeddings"].float(), targets["valid"].bool()
+        elif side_info_kind == "sasrec_sequence":
+            from sasrec_pair_features import build_sasrec_features
+            _, rows = build_sasrec_features(side_info_file, [train_file, eval_file])
+            side_rows = {train_file: 0, eval_file: len(rows[train_file][0])}
+            side_table = torch.cat([torch.from_numpy(rows[train_file][0]), torch.from_numpy(rows[eval_file][0])])
+        elif side_info_kind != "none":
+            raise ValueError(f"unknown side_info_kind {side_info_kind}")
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_side_info = {
+            "kind": side_info_kind,
+            "source": os.path.abspath(side_info_file) if side_info_file else None,
+            "dimension": int(side_table.shape[1]) if side_table is not None else 1,
+            "init_norm": side_init_norm,
+            "token_scale": side_token_scale,
+        }
+        model_class = SideInfoLatentModel
+        model_kwargs["config"] = model_config
+
+    model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
         torch_dtype=torch.bfloat16,
+        **model_kwargs,
         # device_map=device_map,
     )
     model.attention.end_k = end_k
     model.config.loss_type = "ce"
+    if use_category_alignment:
+        model.set_category_targets(category_targets["embeddings"], category_targets["valid"])
     
     ##############################################################################
     ##################                                 
@@ -84,12 +170,36 @@ def train(
     print("Additional special tokens:", tokenizer.additional_special_tokens)
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")['input_ids'][0] == len(tokenizer) - 1
+    if use_side_info:
+        # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
+        token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
+        model.config.latent_side_info["token_norm"] = token_norm
+        model.side_token_norm = token_norm
+        if side_table is not None:
+            model.set_side_table(side_table, side_valid)
+        print("side information:", model.config.latent_side_info)
     
     ##################
     ##############################################################################
 
-    train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category, K = K)
-    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, category=category, K = K)
+    dataset_class = CategoryAlignedLatentRDataset if use_category_alignment else LatentRDataset
+    extra_train, extra_val = {}, {}
+    if use_side_info and side_info_kind != "none":
+        dataset_class = SideInfoLatentRDataset
+        if side_info_kind == "sasrec_sequence":
+            if sample > 0:
+                raise ValueError("sasrec_sequence side information requires sample=-1 (row-indexed table)")
+            extra_train = {"side_key": "row", "row_offset": side_rows[train_file]}
+            extra_val = {"side_key": "row", "row_offset": side_rows[eval_file]}
+    if category_text_file:
+        if use_side_info or use_category_alignment:
+            raise ValueError("category text control is a plain-R3 run")
+        paths = torch.load(category_text_file, map_location="cpu", weights_only=True)
+        category_paths = {i: p for i, p in enumerate(paths["paths"]) if paths["valid"][i]}
+        dataset_class = CategoryTextLatentRDataset
+        extra_train = extra_val = {"category_paths": category_paths}
+    train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
+    val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
     print("LOAD DATA FINISHED")
 
@@ -126,11 +236,13 @@ def train(
             eval_strategy="epoch",
             save_strategy="epoch",
             output_dir=output_dir,
-            save_total_limit=5,
+            save_total_limit=save_total_limit,
+            save_only_model=save_only_model,
             load_best_model_at_end=True,
+            label_names=["labels"] if (use_category_alignment or use_side_info) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False
         ),
         data_collator=DataCollatorForSeq2Seq(

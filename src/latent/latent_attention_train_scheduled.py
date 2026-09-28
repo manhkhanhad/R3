@@ -16,6 +16,7 @@ import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 import fire
 import torch
 
@@ -27,6 +28,7 @@ from transformers import (
 
 from scheduled_attention import ScheduledLatentModel
 from reasoning_dataset import LatentRDataset
+from experiment_tracking import init_training_run, wandb_report_to
 
 
 class AttentionScheduleCallback(transformers.TrainerCallback):
@@ -113,8 +115,10 @@ def train(
     ramp_epochs: float = -1.0,  # -1 means num_epochs - 1 (default: linear ramp over all but the last epoch)
     alpha_max: float = 1.0,  # <1.0: ramp 0->alpha_max and hold there, never triggering deterministic "both"
     three_way_start_epoch: float = -1.0,
+    wandb_run_name: str = None,
 ):
 
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
     print(category)
     category = category_dict[category]
@@ -198,7 +202,7 @@ def train(
             load_best_model_at_end=False,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False
         ),
         data_collator=DataCollatorForSeq2Seq(

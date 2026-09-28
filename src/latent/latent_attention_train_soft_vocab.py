@@ -5,6 +5,7 @@ import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 
 import fire
 import torch
@@ -19,6 +20,7 @@ from transformers import (
 
 from layers import LatentModel
 from reasoning_dataset import LatentRDataset
+from experiment_tracking import init_training_run, wandb_report_to
 
 
 class SoftVocabularyLogCallback(transformers.TrainerCallback):
@@ -60,7 +62,9 @@ def train(
     K: int = 0,
     soft_vocab_top_k: int = 64,
     soft_vocab_temperature: float = 1.0,
+    wandb_run_name: str = None,
 ):
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {
         "Office_Products": "office products", "Books": "books",
         "steam": "games", "CDs_and_Vinyl": "musics",
@@ -150,7 +154,7 @@ def train(
             load_best_model_at_end=True,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False,
         ),
         data_collator=DataCollatorForSeq2Seq(

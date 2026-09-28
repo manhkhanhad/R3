@@ -5,6 +5,7 @@ import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 
 import fire
 import torch
@@ -14,6 +15,7 @@ from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 
 from ema_verified_vae_attention import EMAVerifiedVAEDecomposedLatentModel
 from reasoning_dataset import LatentRDataset
+from experiment_tracking import init_training_run, wandb_report_to
 
 
 class EMATeacherUpdateCallback(transformers.TrainerCallback):
@@ -77,7 +79,9 @@ def train(
     kl_min_queue_size: int = 0,
     verify_weight: float = 0.05,
     teacher_ema_momentum: float = 0.999,
+    wandb_run_name: str = None,
 ):
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {
         "Office_Products": "office products", "Books": "books",
         "steam": "games", "CDs_and_Vinyl": "musics",
@@ -186,7 +190,7 @@ def train(
             save_total_limit=1,
             load_best_model_at_end=False,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False,
         ),
         data_collator=DataCollatorForSeq2Seq(
