@@ -19,6 +19,7 @@ from category_alignment_attention import CategoryAlignedLatentModel
 from category_alignment_dataset import CategoryAlignedLatentRDataset
 from side_info_latent import SideInfoLatentModel
 from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
+from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
@@ -58,6 +59,11 @@ def train(
     side_init_norm: float = 30.0,
     side_token_scale: bool = False,
     category_text_file: str = None,  # text positive control: category-embedding .pt with "paths"
+    # collaborative candidates (document/collaborative_reasoning_experiments.md)
+    collab_candidates_file: str = None,  # build_candidates.py table: {"train": [n, K], "valid": [n, K], ...}
+    collab_mode: str = "text",  # text: candidate titles in the prompt | slots: <|Cand|> slots with SASRec item vectors
+    collab_item_table: str = None,  # slots: per-item vectors {"embeddings": [n_items, d], "valid": [n_items]}
+    collab_titles_file: str = None,  # text: catalog "<title>\t<item_id>" file (default: data/<category>/info/*.txt)
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -79,6 +85,9 @@ def train(
             "side_init_norm": side_init_norm,
             "side_token_scale": side_token_scale,
             "category_text_file": category_text_file,
+            "collab_candidates_file": collab_candidates_file,
+            "collab_mode": collab_mode,
+            "collab_item_table": collab_item_table,
         },
     )
 
@@ -131,6 +140,10 @@ def train(
             _, rows = build_sasrec_features(side_info_file, [train_file, eval_file])
             side_rows = {train_file: 0, eval_file: len(rows[train_file][0])}
             side_table = torch.cat([torch.from_numpy(rows[train_file][0]), torch.from_numpy(rows[eval_file][0])])
+        elif side_info_kind == "row_table":
+            rows = torch.load(side_info_file, map_location="cpu", weights_only=False)
+            side_rows = {train_file: 0, eval_file: len(rows["train"])}
+            side_table = torch.cat([rows["train"].float(), rows["valid"].float()])
         elif side_info_kind != "none":
             raise ValueError(f"unknown side_info_kind {side_info_kind}")
         model_config = AutoConfig.from_pretrained(base_model)
@@ -142,6 +155,26 @@ def train(
             "token_scale": side_token_scale,
         }
         model_class = SideInfoLatentModel
+        model_kwargs["config"] = model_config
+
+    use_collab = collab_candidates_file is not None
+    if use_collab and (use_side_info or use_category_alignment or category_text_file):
+        raise ValueError("collaborative candidates are a plain-R3 variant")
+    if use_collab and collab_mode not in ("text", "slots"):
+        raise ValueError("collab_mode must be text or slots")
+    if use_collab:
+        collab_candidates = torch.load(collab_candidates_file, map_location="cpu", weights_only=False)
+    if use_collab and collab_mode == "slots":
+        from transformers import AutoConfig
+        item_table = torch.load(collab_item_table, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_candidate_slots = {
+            "k": int(collab_candidates["k"]),
+            "dimension": int(item_table["embeddings"].shape[1]),
+            "source": os.path.abspath(collab_item_table),
+            "candidates": os.path.abspath(collab_candidates_file),
+        }
+        model_class = CandidateSlotLatentModel
         model_kwargs["config"] = model_config
 
     model = model_class.from_pretrained(
@@ -164,6 +197,8 @@ def train(
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     additional_special_tokens = tokenizer.additional_special_tokens
     print("Additional special tokens:", tokenizer.additional_special_tokens)
+    if use_collab and collab_mode == "slots":
+        additional_special_tokens.append(CAND_TOKEN)  # before the thought token, which must stay last
     additional_special_tokens.append("<|Thought|>")
     num_added_toks = tokenizer.add_special_tokens({"additional_special_tokens": additional_special_tokens})
     print("We have added", num_added_toks, "tokens")
@@ -178,6 +213,14 @@ def train(
         if side_table is not None:
             model.set_side_table(side_table, side_valid)
         print("side information:", model.config.latent_side_info)
+    if use_collab and collab_mode == "slots":
+        token_norm = float(model.model.embed_tokens.weight[:-2].float().norm(dim=-1).mean())
+        cand_id = tokenizer.convert_tokens_to_ids(CAND_TOKEN)
+        assert cand_id == len(tokenizer) - 2
+        model.config.latent_candidate_slots.update({"token_norm": token_norm, "cand_token_id": cand_id})
+        model.cand_token_norm, model.cand_token_id = token_norm, cand_id
+        model.set_cand_table(item_table["embeddings"], item_table["valid"])
+        print("candidate slots:", model.config.latent_candidate_slots)
     
     ##################
     ##############################################################################
@@ -186,9 +229,9 @@ def train(
     extra_train, extra_val = {}, {}
     if use_side_info and side_info_kind != "none":
         dataset_class = SideInfoLatentRDataset
-        if side_info_kind == "sasrec_sequence":
+        if side_info_kind in ("sasrec_sequence", "row_table"):
             if sample > 0:
-                raise ValueError("sasrec_sequence side information requires sample=-1 (row-indexed table)")
+                raise ValueError(f"{side_info_kind} side information requires sample=-1 (row-indexed table)")
             extra_train = {"side_key": "row", "row_offset": side_rows[train_file]}
             extra_val = {"side_key": "row", "row_offset": side_rows[eval_file]}
     if category_text_file:
@@ -198,6 +241,17 @@ def train(
         category_paths = {i: p for i, p in enumerate(paths["paths"]) if paths["valid"][i]}
         dataset_class = CategoryTextLatentRDataset
         extra_train = extra_val = {"category_paths": category_paths}
+    if use_collab:
+        if collab_titles_file is None:
+            import glob
+            collab_titles_file = sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(train_file)), "info", "*.txt")))[0]
+        titles = {}
+        for line in open(collab_titles_file):
+            t, i = line.rstrip("\n").rsplit("\t", 1)
+            titles[int(i)] = t.strip(' \n"')
+        dataset_class = CollabCandidateLatentRDataset
+        extra_train = {"candidates": collab_candidates["train"], "titles": titles, "mode": collab_mode}
+        extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -239,7 +293,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),

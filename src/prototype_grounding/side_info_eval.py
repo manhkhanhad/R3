@@ -121,6 +121,8 @@ def load(checkpoint: Path):
         test_file = str(E.SPLIT_FILES["test"])
         _, rows = build_sasrec_features(source, [test_file])
         model.set_side_table(torch.from_numpy(rows[test_file][0]))
+    elif kind == "row_table":
+        model.set_side_table(torch.load(source, map_location="cpu", weights_only=False)["test"].float())
     return model, tokenizer, device, spec
 
 
@@ -162,7 +164,7 @@ def main() -> None:
     for i in range(n):
         j = (i + n // 2) % n
         for _ in range(n):
-            if users[j] != users[i] and (paths.get(targets[j]) != paths.get(targets[i]) or kind == "sasrec_sequence"):
+            if users[j] != users[i] and (paths.get(targets[j]) != paths.get(targets[i]) or kind in ("sasrec_sequence", "row_table")):
                 break
             j = (j + 1) % n
         donor.append(j)
@@ -174,7 +176,7 @@ def main() -> None:
         own_idx = torch.tensor(targets)
     elif kind == "random_category":
         own_idx = torch.tensor(rng.choice(valid_items, size=n))
-    elif kind == "sasrec_sequence":
+    elif kind in ("sasrec_sequence", "row_table"):
         own_idx = torch.arange(n)
     else:
         own_idx = None
@@ -323,7 +325,7 @@ def main() -> None:
         nf = len(full_ds)
         if kind == "oracle_category":
             idx = torch.tensor([r["target_item"] for r in full_ds.rows])
-        elif kind == "sasrec_sequence":
+        elif kind in ("sasrec_sequence", "row_table"):
             idx = torch.arange(nf)
         else:
             idx = None

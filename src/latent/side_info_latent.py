@@ -13,6 +13,9 @@ where ``v`` is a per-example side vector looked up from a caller-provided table:
   information about the example).
 * ``sasrec_sequence``: the frozen SASRec sequence embedding of the row's
   history (collaborative knowledge absent from the title text).
+* ``row_table``: a precomputed per-row vector (e.g. the predicted CF-cluster
+  distribution of collaborative_reasoning_experiments.md, idea 5), indexed by
+  row like ``sasrec_sequence``.
 * ``none``: no side vector; with ``token_scale`` this is plain R3 with the
   thought rescaled to input-embedding norm (the H3 cell).
 
@@ -27,7 +30,7 @@ import torch.nn.functional as F
 
 from layers import LatentModel
 
-KINDS = ("oracle_category", "random_category", "sasrec_sequence", "none")
+KINDS = ("oracle_category", "random_category", "sasrec_sequence", "row_table", "none")
 
 
 class SideInfoLatentModel(LatentModel):
