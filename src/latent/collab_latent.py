@@ -68,7 +68,8 @@ class CandidateSlotLatentModel(LatentModel):
         if not spec:
             raise ValueError("config.latent_candidate_slots is required")
         self.cand_k = int(spec["k"])
-        self.cand_token_id = int(spec["cand_token_id"])
+        # known only after the tokenizer is extended (set by the training script, then saved in the config)
+        self.cand_token_id = int(spec.get("cand_token_id", -1))
         self.cand_token_norm = float(spec.get("token_norm", 1.0))
         dimension = int(spec["dimension"])
         self.cand_projection = nn.Linear(dimension, config.hidden_size)
