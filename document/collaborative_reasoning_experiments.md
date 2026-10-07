@@ -90,17 +90,17 @@ Partition `researchshort`, constraint `3090|a40|l40|l40s|a100|h100`, logs in `R3
 | job | script | depends on | what |
 |---|---|---|---|
 | 315414 | `scripts/collab_sasrec_folds.sbatch` | — | 4 fold SASRec models → `scratchDirectory/R3/collab_reasoning/sasrec_folds/manifest.json` |
-| 315415 | `scripts/collab_smoke.sbatch` | — | every GPU path with tiny limits on padded smoke tables (`BUILD_TAG=smoke_padded`); smoke numbers are not results |
-| 315416 | `scripts/collab_v1_valid_preds.sbatch` | 315415 | R3 v1 top-10 on the validation split |
-| 315417 | `scripts/collab_build.sbatch` | 315414, 315416 | screen + scorers + tables in `data/Musical_Instruments/info/collab_reasoning/*_full.pt` |
-| 315419 | `scripts/collab_degraded_oracle.sbatch full` | 315417 | dose-response p ∈ {0, .1, .2, .3, .5, .7, 1} on 2,000 test rows + plug-in top-1 cluster |
-| 315420 | `scripts/collab_train.sbatch cf_text full` | 315417 | idea 2 |
-| 315421 | `scripts/collab_train.sbatch cf_slots full` | 315417 | idea 3 |
-| 315422 | `scripts/collab_train.sbatch residual_text full` | 315417 | idea 4 (text) |
-| 315423 | `scripts/collab_train.sbatch residual_slots full` | 315417 | idea 4 (slots) |
-| 315424 | `scripts/collab_train.sbatch group_pred full` | 315417 | idea 5 |
+| 315425 | `scripts/collab_smoke.sbatch` | — | every GPU path with tiny limits on padded smoke tables (`BUILD_TAG=smoke_padded`); smoke numbers are not results |
+| 315426 | `scripts/collab_v1_valid_preds.sbatch` | 315425 | R3 v1 top-10 on the validation split |
+| 315427 | `scripts/collab_build.sbatch` | 315414, 315426 | screen + scorers + tables in `data/Musical_Instruments/info/collab_reasoning/*_full.pt` |
+| 315428 | `scripts/collab_degraded_oracle.sbatch full` | 315427 | dose-response p ∈ {0, .1, .2, .3, .5, .7, 1} on 2,000 test rows + plug-in top-1 cluster |
+| 315429 | `scripts/collab_train.sbatch cf_text full` | 315427 | idea 2 |
+| 315430 | `scripts/collab_train.sbatch cf_slots full` | 315427 | idea 3 |
+| 315431 | `scripts/collab_train.sbatch residual_text full` | 315427 | idea 4 (text) |
+| 315432 | `scripts/collab_train.sbatch residual_slots full` | 315427 | idea 4 (slots) |
+| 315433 | `scripts/collab_train.sbatch group_pred full` | 315427 | idea 5 |
 
-Check progress with `squeue -u $USER`. The screen is readable as soon as 315417 finishes: `cat analysis/results/collab_reasoning/full/screen.md`.
+Check progress with `squeue -u $USER`. The screen is readable as soon as 315427 finishes: `cat analysis/results/collab_reasoning/full/screen.md`.
 
 ## Validation before submission
 
@@ -116,7 +116,7 @@ Check progress with `squeue -u $USER`. The screen is readable as soon as 315417 
 - `build_candidates.py` ran end to end on 600 rows (tag `smoke`).
 - My scorer reproduces the baseline SASRec: test HR@1 0.065 vs Cornac's 0.066; HR@10 0.092 vs 0.098, the difference being Cornac dropping the 1.8% of unknown targets.
 - Fold training ran for one CPU epoch.
-- The GPU paths are exercised by job 315415 before any full job starts.
+- The GPU paths are exercised by the smoke job before any full job starts. The first smoke (315415) caught a slot-model init bug (`cand_token_id` read before the tokenizer was extended), fixed in `e712502`. The rerun 315425 passed every step: v1 predictions, all four variant types (train + teacher-forced + generation), and the degraded-oracle sweep (p = 1 gives HR@10 0.50 and p = 0 gives 0, on 16 rows).
 
 ## Results
 
