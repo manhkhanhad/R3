@@ -150,3 +150,33 @@ def test_user_fold_is_stable_and_balanced():
     assert user_fold("user7", 4) == folds[7]
     counts = np.bincount(folds, minlength=4)
     assert counts.min() > 850
+
+
+from cluster_paths_aggregate import aggregate  # noqa: E402
+
+
+def make_record():
+    return {
+        "probs": {"fused": {"7": 0.7, "3": 0.3}},
+        "paths": {
+            "r3": {"titles": ["r"] + [f"x{i}" for i in range(9)], "scores": [0.0] + [-9.0] * 9},
+            "7": {"titles": ["a"] + [f"y{i}" for i in range(9)], "scores": [0.0] + [-9.0] * 9},
+            "3": {"titles": ["b"] + [f"z{i}" for i in range(9)], "scores": [0.0] + [-9.0] * 9},
+        },
+    }
+
+
+def test_aggregate_marginalizes_by_cluster_probability():
+    rec = make_record()
+    assert aggregate(rec, "fused", 2, 1.0, 0.0, 1.0)[:2] == ["a", "b"]
+    top1_only = aggregate(rec, "fused", 1, 1.0, 0.0, 1.0)
+    assert top1_only[0] == "a" and "b" not in top1_only
+    assert "r" not in aggregate(rec, "fused", 2, 1.0, 0.0, 1.0)
+
+
+def test_aggregate_r3_path_weight():
+    rec = make_record()
+    assert aggregate(rec, "fused", 2, 1.0, 0.75, 1.0)[0] == "r"   # 0.75 > 0.25 * 0.7
+    assert aggregate(rec, "fused", 2, 1.0, 0.25, 1.0)[0] == "a"   # 0.75 * 0.7 > 0.25
+    rec["paths"] = {"r3": rec["paths"]["r3"]}                      # no decoded cluster: fall back to R3
+    assert aggregate(rec, "fused", 2, 1.0, 0.0, 1.0)[0] == "r"

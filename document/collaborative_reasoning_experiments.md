@@ -216,3 +216,40 @@ Full test (8,313 rows; v1 HR@10 0.1226, NDCG@10 0.0950):
 - **Text candidates are read.** In `residual_text`, swapping the candidate titles moves the output 0.31× as much as dropping a history item, about 150× the slot models. So the slot design, not the information, is what fails to transmit candidates. Whether reading them improves ranking awaits its full ranking.
 
 - **`cf_text` / `residual_text` decide the question.** If titles in text also leave the output unchanged, the CF candidates carry nothing the decoder can use. If text helps while slots do not, the slot design is the bottleneck.
+
+## Follow-up: cluster as a latent variable (2026-10-09)
+
+**Why.** Cluster correctness and item correctness go together for R3:
+- R3 hits on 71% of the rows where its top item is in the target's cluster.
+- On R3's misses, its implied cluster is right only 3.8% of the time.
+- The fused group predictor is accurate where R3 is already right (top-1: 66.7% on R3 hits, 5.5% on R3 misses).
+- New cluster information exists on only about 1% of rows.
+
+The true cluster is in the predictor's top-5 on 17.8% of R3's misses, so instead of one cluster we keep several as parallel latent hypotheses.
+
+### Idea 1: predict the cluster from the history's cluster ids (`src/collab_reasoning/cluster_seq_predictor.py`)
+
+| predictor (test, k = 150) | top-1 | top-5 | top-1 on R3 hits | top-1 on R3 misses | top-5 on R3 misses |
+|---|---:|---:|---:|---:|---:|
+| cluster Markov | 0.1057 | 0.2321 | 0.5054 | 0.0492 | 0.1571 |
+| GRU over 10 history clusters | 0.1183 | 0.2408 | 0.5937 | 0.0512 | 0.1648 |
+| GRU over the full past's clusters | 0.1172 | 0.2394 | 0.5888 | 0.0506 | 0.1640 |
+| fused item-level predictor | 0.1305 | 0.2569 | 0.6673 | 0.0546 | 0.1776 |
+| mix (GRU-full + fused, averaged) | **0.1341** | **0.2608** | 0.6712 | **0.0582** | **0.1811** |
+| R3's own top-1 item's cluster | 0.1160 | 0.1429 | 0.6683 | 0.0380 | 0.0681 |
+
+Reading the history at cluster granularity does not decorrelate the predictor from R3. A separate model over cluster ids fails on the same rows (5.1% top-1 on R3 misses). The long history adds nothing. Averaging it with the item-level predictor gains half a point.
+
+### Idea 2: parallel cluster paths with marginalization
+
+```
+p(item | x) = (1 - λ) · Σ_{c ∈ top-K} w_c · p(item | x, c)  +  λ · p(item | x, R3)
+w_c ∝ p(c | x)^α,    p(item | x, path) = softmax(beam log-probs / T)
+```
+
+- **p(item | x, c)**: the `oracle_cfcluster150` model with hypothesis cluster c in its slot. It was trained to trust the slot, which is what conditioning on c means.
+- **Paths.** For each of 3,000 test rows we decode the plain R3 path plus every cluster in the union of the top-5 of the fused, GRU-full and mix predictors (`src/prototype_grounding/cluster_paths_decode.py`).
+- **Aggregation** (`src/collab_reasoning/cluster_paths_aggregate.py`). We grid-search predictor, K ∈ {1, 2, 3, 5}, α, λ and T on test rows 0–999 and report rows 1,000–2,999. Validation rows are not used for tuning because the fused predictor was trained on them.
+- **Reported.** The R3 path alone, the top-1 plug-in, the best marginalization per predictor, marginalization without the R3 path, and two upper bounds: the best single cluster path, and any decoded path containing the target.
+
+Jobs: smoke 317368 → full 317369 (`scripts/collab_cluster_paths.sbatch`). Results go to `analysis/results/collab_reasoning/cluster_paths/full/aggregate.md`.
