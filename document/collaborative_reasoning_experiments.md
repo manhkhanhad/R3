@@ -174,6 +174,34 @@ The oracle-trained model reaches v1's HR@10 at about 20% cluster accuracy on the
 
 - **The slot models ignore their candidates.** Replacing the 10 candidate slots with another user's (or with none) moves the output 500× less than dropping one history item. This is despite the fused candidates being more accurate than R3 on test, and over-accurate on training rows (uncalibrated). So in this form the slot channel carries no item identity from weak, partly redundant CF candidates. The contrast is the single-slot oracle (ratio 13.6).
 - **`group_pred` matches v1 exactly** (HR@10 0.158 vs 0.158 on the same rows), with a small swap effect (ratio 0.025, about the level of category-align).
+### Final results (2026-10-08 23:45; all jobs complete)
+
+Full test (8,313 rows; v1 HR@10 0.1226, NDCG@10 0.0950):
+
+| variant | HR@10 | NDCG@10 | HR@10 on v1 misses | HR@10 on v1 hits | swap-candidates ratio | generation HR@10 without candidates (first 1,000; with = col. 2 on these rows) |
+|---|---:|---:|---:|---:|---:|---|
+| `cf_text` | 0.1241 | 0.0964 | 0.0206 | 0.866 | **4.93** | 0.063 (with: 0.156) |
+| `residual_text` | 0.1222 | 0.0945 | 0.0175 | 0.871 | 0.31 | 0.127 (with: 0.157) |
+| `cf_slots` | 0.1226 | 0.0950 | 0.0148 | 0.894 | 0.002 | 0.162 (with: 0.159) |
+| `residual_slots` | 0.1255 | 0.0959 | 0.0166 | 0.905 | 0.002 | 0.156 (with: 0.161) |
+| `group_pred` | 0.1211 | 0.0940 | — | — | 0.025 | — |
+| *no training:* reciprocal-rank fusion of v1 and fused-CF top-10 lists (`rank_fusion.py`) | **0.1346** | — | — | — | — | — |
+
+- **Delivering CF to the decoder does not improve ranking in any form.**
+  - `cf_text` reads its candidates heavily: a swap moves the output 4.9× as much as dropping a history item, and without candidates HR@10 falls to 0.063. Yet it gains 150 v1 misses and loses 137 v1 hits (exact McNemar p = 0.48).
+  - The decoder **substitutes** candidate evidence for title evidence, the same pattern as `sasrec_raw` one level up.
+  - Its training candidates were uncalibrated (about 1.35× over-accurate; see the calibration bug), which plausibly pushed it toward this over-reliance.
+- **Slots and the group vector are ignored** (swap ratios 0.002 and 0.025). Text carries the same candidates about 2,500× more strongly, so the slot design is the bottleneck for this weak signal, unlike the single-slot oracle.
+- **Combining outputs works where combining inputs does not.** Untuned reciprocal-rank fusion of v1's top-10 with the fused-CF top-10:
+  - reaches HR@10 **0.1346** (+1.2 points, +9.8% relative);
+  - gains 189 rows and loses 89 versus v1 (exact McNemar p = 2×10⁻⁹);
+  - beats both inputs (fused alone 0.1292) and is insensitive to the RRF constant (k = 10/30/120).
+
+  The fused scorer was fit on the validation split only, so this is a clean test number. The union ceiling is 0.1617.
+- **Implication.**
+  - The complementary CF knowledge exists (screen) but gets traded off against title evidence when it enters the LLM's input.
+  - Next levers: (1) rerun `cf_text` with the fixed calibration (less over-trust); (2) learn the fusion at the score level (e.g. tune RRF weights on validation predictions); (3) train with a loss that only rewards the candidate path on R3 misses, so the decoder keeps its title evidence.
+
 **Update 2026-10-08 15:20.** Full-test ranking (8,313 rows; v1 HR@10 0.1226, NDCG@10 0.0950):
 
 | variant | HR@10 | NDCG@10 | HR@10 on v1 misses | union with v1 | swap-candidates ratio |
