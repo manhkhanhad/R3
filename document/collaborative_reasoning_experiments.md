@@ -174,4 +174,17 @@ The oracle-trained model reaches v1's HR@10 at about 20% cluster accuracy on the
 
 - **The slot models ignore their candidates.** Replacing the 10 candidate slots with another user's (or with none) moves the output 500× less than dropping one history item. This is despite the fused candidates being more accurate than R3 on test, and over-accurate on training rows (uncalibrated). So in this form the slot channel carries no item identity from weak, partly redundant CF candidates. The contrast is the single-slot oracle (ratio 13.6).
 - **`group_pred` matches v1 exactly** (HR@10 0.158 vs 0.158 on the same rows), with a small swap effect (ratio 0.025, about the level of category-align).
+**Update 2026-10-08 15:20.** Full-test ranking (8,313 rows; v1 HR@10 0.1226, NDCG@10 0.0950):
+
+| variant | HR@10 | NDCG@10 | HR@10 on v1 misses | union with v1 | swap-candidates ratio |
+|---|---:|---:|---:|---:|---:|
+| `cf_slots` | 0.1226 | 0.0950 | 0.0148 | 0.1356 | 0.002 |
+| `residual_slots` | 0.1255 | 0.0959 | 0.0166 | 0.1371 | 0.002 |
+| `group_pred` | 0.1211 | 0.0940 | — | — | 0.025 |
+| `residual_text` | eval running | | | | **0.306** (no candidates: 0.355) |
+| `cf_text` | training (epoch 3 eval) | | | | |
+
+- The slot models are statistically indistinguishable from v1: the +0.3 points of `residual_slots` comes with a decoder that ignores the slots.
+- **Text candidates are read.** In `residual_text`, swapping the candidate titles moves the output 0.31× as much as dropping a history item, about 150× the slot models. So the slot design, not the information, is what fails to transmit candidates. Whether reading them improves ranking awaits its full ranking.
+
 - **`cf_text` / `residual_text` decide the question.** If titles in text also leave the output unchanged, the CF candidates carry nothing the decoder can use. If text helps while slots do not, the slot design is the bottleneck.
