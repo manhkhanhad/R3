@@ -120,4 +120,58 @@ Check progress with `squeue -u $USER`. The screen is readable as soon as 315427 
 
 ## Results
 
-*Pending (jobs submitted 2026-10-07).*
+*Interim, 2026-10-08. `cf_text` and `residual_text` are still training; the slot runs are still generating.*
+
+### Screen (job 315427; test split, R3 v1 HR@10 = 0.1226)
+
+| source | HR@10 | HR@10 on R3 misses | union with R3 | P(R3 hit given source hit) | train HR@10 (leave-user-out) | valid HR@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| sasrec | 0.0921 | 0.0197 | 0.1399 | 0.81 | 0.1277 | 0.0989 |
+| itemknn | 0.0988 | 0.0256 | 0.1451 | 0.77 | 0.1307 | 0.0982 |
+| longknn | 0.0989 | 0.0262 | 0.1456 | 0.77 | 0.1325 | 0.0976 |
+| markov | 0.1019 | 0.0236 | 0.1433 | 0.80 | 0.1491 | 0.1085 |
+| pop | 0.0694 | 0.0140 | 0.1348 | 0.82 | 0.0886 | 0.0751 |
+| trend | 0.0725 | 0.0170 | 0.1375 | 0.79 | 0.0883 | 0.0758 |
+| donor | 0.1010 | 0.0250 | 0.1445 | 0.78 | 0.1351 | 0.1076 |
+| titlesim | 0.0801 | 0.0251 | 0.1446 | 0.73 | 0.0992 | 0.0858 |
+| **fused** | **0.1292** | **0.0446** | **0.1617** | 0.70 | 0.1737 | — |
+| residual | 0.0692 | 0.0418 | 0.1593 | **0.47** | 0.0971 | — |
+
+- **Every single source overlaps heavily with R3.**
+  - 73–82% of a source's hits are also R3 hits.
+  - A source finds only 1.4–2.6% of R3's misses.
+  - Time- and long-history signals (`trend`, `longknn`) are no more complementary than plain item-kNN.
+- **The fused scorer is the first CF signal that beats R3 alone** (HR@10 0.1292 vs 0.1226). It doubles the coverage of R3's misses (4.5%), and its union with R3 is 0.1617, a ceiling of +3.9 points.
+- **The residual scorer does what it was built for.**
+  - Only 47% of its hits are R3 hits.
+  - Its misses coverage (4.2%) is close to fused at half the overall HR.
+- **In-sample SASRec confirms the leak.** The baseline SASRec hits 59.8% of training-row targets, versus 9.2% on test. The leave-user-out and fold sources are at 9–15% on training rows.
+- **Calibration bug.** The held-out validation rate used for calibration was computed only on rows whose target was in the pool (0.36). So q = 0, and the training-row tables used by the five runs are **uncalibrated**: training candidates hit 0.174 (fused) and 0.097 (residual), versus 0.129 and 0.069 on test, about 1.35× over-accurate. Fixed in `build_candidates.py` (held-out rows now drawn from all rows; smoke: q ≈ 0.74). The current runs were not rebuilt.
+- **Group predictor.** Top-1 cluster accuracy is 13.0% (top-5 25.7%), versus 8.1% for the last item's cluster and 4.4% for the majority cluster.
+
+### Degraded CF-cluster oracle (job 315428; first 2,000 test rows, where v1 has HR@10 0.1575, NDCG@10 0.1248)
+
+| p (true cluster) | cluster accuracy | HR@10 | NDCG@10 |
+|---:|---:|---:|---:|
+| 0 | 0.007 | 0.035 | 0.022 |
+| 0.1 | 0.111 | 0.100 | 0.066 |
+| 0.2 | 0.215 | 0.163 | 0.103 |
+| 0.3 | 0.294 | 0.215 | 0.139 |
+| 0.5 | 0.496 | 0.321 | 0.210 |
+| 0.7 | 0.699 | 0.455 | 0.295 |
+| 1.0 | 1.0 | 0.627 | 0.408 |
+| plug-in (group predictor top-1) | 0.149 | 0.1225 | 0.108 |
+
+The oracle-trained model reaches v1's HR@10 at about 20% cluster accuracy on these rows. The realistic predictor (15%) falls short (0.1225 vs 0.1575). This model trusts the slot fully: a wrong cluster drops HR@10 to 0.035. So 20% is the requirement for a model that fully trusts the slot; a model trained on predicted groups could learn to discount them.
+
+### LLM variants so far
+
+| variant | best epoch (eval loss) | swap ratio (candidates / side info) | swap_r ratio | generation HR@10 (first 1,000; v1 = 0.158) |
+|---|---|---:|---:|---|
+| `cf_slots` | 2 (0.397) | 0.0020 | 0.0037 | running |
+| `residual_slots` | 2 (0.400) | 0.0019 | 0.0020 | running |
+| `group_pred` | 2 (0.399) | 0.0254 | 0.0111 | 0.158 (swap: 0.154) |
+
+- **The slot models ignore their candidates.** Replacing the 10 candidate slots with another user's (or with none) moves the output 500× less than dropping one history item. This is despite the fused candidates being more accurate than R3 on test, and over-accurate on training rows (uncalibrated). So in this form the slot channel carries no item identity from weak, partly redundant CF candidates. The contrast is the single-slot oracle (ratio 13.6).
+- **`group_pred` matches v1 exactly** (HR@10 0.158 vs 0.158 on the same rows), with a small swap effect (ratio 0.025, about the level of category-align).
+- **`cf_text` / `residual_text` decide the question.** If titles in text also leave the output unchanged, the CF candidates carry nothing the decoder can use. If text helps while slots do not, the slot design is the bottleneck.

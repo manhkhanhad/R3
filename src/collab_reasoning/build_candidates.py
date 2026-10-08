@@ -120,14 +120,18 @@ class Scorer(nn.Module):
 
 
 def train_scorer(items, F, target, seed=0, epochs=60):
-    """Listwise softmax over the pool; 20% of rows held out for early stopping."""
+    """Listwise softmax over the pool; 20% of rows held out for early stopping.
+
+    The held-out rows are drawn from *all* rows, including those whose target is not
+    in the pool, so held-out hit rates (used for calibration) are true hit rates.
+    Only rows with the target in the pool can be trained on.
+    """
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     has = (items == target[:, None]).any(1)
-    idx = np.nonzero(has)[0]
-    rng.shuffle(idx)
+    idx = rng.permutation(len(items))
     cut = int(0.8 * len(idx))
-    tr, ho = idx[:cut], idx[cut:]
+    tr, ho = idx[:cut][has[idx[:cut]]], idx[cut:]
     X = torch.from_numpy(F)
     M = torch.from_numpy(items >= 0)
     Y = torch.from_numpy((items == target[:, None]).argmax(1))
@@ -146,7 +150,7 @@ def train_scorer(items, F, target, seed=0, epochs=60):
         with torch.no_grad():
             lg = model(X[ho]).masked_fill(~M[ho], -1e9)
             rank = (lg > lg.gather(1, Y[ho][:, None])).sum(1)
-            hr = float((rank < 10).float().mean())
+            hr = float(((rank < 10) & torch.from_numpy(has[ho])).float().mean())
         if hr > best:
             best, best_state, wait = hr, {k: v.clone() for k, v in model.state_dict().items()}, 0
         else:
@@ -154,7 +158,7 @@ def train_scorer(items, F, target, seed=0, epochs=60):
             if wait >= 6:
                 break
     model.load_state_dict(best_state)
-    return model, {"heldout_hr10_within_pool": best, "train_rows": int(len(tr)), "heldout_rows": int(len(ho)),
+    return model, {"heldout_hr10": best, "train_rows": int(len(tr)), "heldout_rows": int(len(ho)),
                    "pool_recall": float(has.mean()), "heldout_idx": ho.tolist()}
 
 
