@@ -163,8 +163,23 @@ class VerifiedEvidenceLatentModel(SideInfoLatentModel):
                 self._log(logits[ok].detach(), y[ok], loss_v.detach())
         else:
             loss_v = output.loss.new_zeros(())
-        output.loss = output.loss + self.evidence_weight * loss_v
+        output.loss = output.loss + self.evidence_weight * loss_v * self._accumulation_share(kwargs)
         return output
+
+    @staticmethod
+    def _accumulation_share(kwargs):
+        """This micro-batch's share of the accumulated batch.
+
+        With ``num_items_in_batch`` (passed by the HF Trainer under gradient
+        accumulation) the LM loss is summed over micro-batches, not averaged, so a
+        per-micro-batch mean must be weighted by its share of the label tokens.
+        """
+        total = kwargs.get("num_items_in_batch")
+        labels = kwargs.get("labels")
+        if total is None or labels is None:
+            return 1.0
+        tokens = (labels[..., 1:] != -100).sum()
+        return tokens.to(torch.float32) / torch.as_tensor(total, device=tokens.device, dtype=torch.float32)
 
     def _log(self, logits, y, loss_v, every=200):
         probs = logits.softmax(-1)

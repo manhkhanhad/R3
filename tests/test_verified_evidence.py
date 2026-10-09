@@ -107,3 +107,20 @@ def test_eval_mode_ignores_labels_for_the_slot_and_zero_override():
     expected = latent + model.last_evidence["component"]  # last_evidence from the zero call is zero
     assert torch.allclose(b, expected)
     assert not torch.allclose(a, latent)  # the verifier's evidence (not the oracle) is added in eval
+
+
+def test_verifier_loss_scaled_under_gradient_accumulation():
+    model, _ = tiny_model()
+    model.train()
+    ids, mask, labels = batch()
+    items = torch.tensor([0, 3])
+    tokens = int((labels[:, 1:] != -100).sum())
+    with torch.no_grad():
+        aux = (model(input_ids=ids, attention_mask=mask, labels=labels, evidence_item_id=items).loss
+               - model(input_ids=ids, attention_mask=mask, labels=labels).loss)
+        total = 4 * tokens  # this micro-batch holds a quarter of the accumulated label tokens
+        aux_acc = (model(input_ids=ids, attention_mask=mask, labels=labels, evidence_item_id=items,
+                         num_items_in_batch=total).loss
+                   - model(input_ids=ids, attention_mask=mask, labels=labels, num_items_in_batch=total).loss)
+    assert aux > 0
+    torch.testing.assert_close(aux_acc, aux / 4, rtol=1e-4, atol=1e-5)
