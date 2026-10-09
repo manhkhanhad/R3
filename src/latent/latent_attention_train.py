@@ -21,6 +21,7 @@ from side_info_latent import SideInfoLatentModel
 from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
 from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
+from vrec_group_latent import VRecGroupLatentModel
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
@@ -67,6 +68,7 @@ def train(
     collab_titles_file: str = None,  # text: catalog "<title>\t<item_id>" file (default: data/<category>/info/*.txt)
     # trained evidence verifier (document/collaborative_reasoning_experiments.md)
     verified_evidence_from: str = None,  # oracle_category side-info checkpoint to start from (replaces base_model)
+    vrec_groups_file: str = None,  # VRec-style nudge toward coarse groups: build_group_table.py table (base_model = an R3 checkpoint)
     evidence_weight: float = 0.5,  # weight of the verifier cross-entropy
     evidence_gate: str = "entropy",  # entropy | none
     evidence_label_smoothing: float = 0.1,
@@ -97,6 +99,7 @@ def train(
             "collab_mode": collab_mode,
             "collab_item_table": collab_item_table,
             "verified_evidence_from": verified_evidence_from,
+            "vrec_groups_file": vrec_groups_file,
             "evidence_weight": evidence_weight,
             "evidence_gate": evidence_gate,
             "evidence_oracle_mix_start": evidence_oracle_mix_start,
@@ -217,6 +220,24 @@ def train(
         model_class = VerifiedEvidenceLatentModel
         model_kwargs["config"] = model_config
 
+    use_vrec = vrec_groups_file is not None
+    if use_vrec:
+        if use_evidence or use_side_info or use_category_alignment or use_collab or category_text_file:
+            raise ValueError("the VRec-style verifier is added to a plain R3 checkpoint and nothing else")
+        from transformers import AutoConfig
+        evidence_table = torch.load(vrec_groups_file, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_vrec = {
+            "k": int(evidence_table["cluster_id"].max()) + 1,
+            "source": os.path.abspath(vrec_groups_file),
+            "weight": evidence_weight,
+            "gate": evidence_gate,
+            "label_smoothing": evidence_label_smoothing,
+            "start_checkpoint": os.path.abspath(base_model),
+        }
+        model_class = VRecGroupLatentModel
+        model_kwargs["config"] = model_config
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -230,6 +251,10 @@ def train(
         model.reset_verifier(seed)
         model.set_evidence_table(evidence_table)
         print("evidence verifier:", model.config.latent_evidence)
+    if use_vrec:
+        model.reset_verifier(seed)
+        model.set_group_table(evidence_table)
+        print("VRec-style verifier:", model.config.latent_vrec)
     if use_category_alignment:
         model.set_category_targets(category_targets["embeddings"], category_targets["valid"])
     
@@ -297,7 +322,7 @@ def train(
         dataset_class = CollabCandidateLatentRDataset
         extra_train = {"candidates": collab_candidates["train"], "titles": titles, "mode": collab_mode}
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
-    if use_evidence:
+    if use_evidence or use_vrec:
         dataset_class = EvidenceLatentRDataset
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
@@ -344,7 +369,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),

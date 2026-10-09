@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Evaluate a trained evidence-verifier checkpoint (src/latent/verified_evidence_latent.py).
+"""Evaluate a trained verifier checkpoint: src/latent/verified_evidence_latent.py (CF-cluster
+evidence added to the slot) or src/latent/vrec_group_latent.py (VRec-style nudge toward coarse groups).
 
 1. Verifier on the full test split: top-1/top-5 accuracy of the predicted evidence
    (target's CF cluster), confidence, and a selective table (accuracy and coverage
@@ -24,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from scipy.stats import binomtest
-from transformers import AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
+from transformers import AutoConfig, AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
 
 import experiment as E
 from decoder_sensitivity import ci, compare, target_log_probs
@@ -36,6 +37,7 @@ sys.path.insert(0, str(E.ROOT / "src" / "latent"))
 sys.path.insert(0, str(E.ROOT / "src" / "collab_reasoning"))
 import data as D  # noqa: E402
 from verified_evidence_latent import VerifiedEvidenceLatentModel, evidence_component  # noqa: E402
+from vrec_group_latent import VRecGroupLatentModel  # noqa: E402
 
 THRESHOLDS = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
 
@@ -45,13 +47,15 @@ def load(checkpoint: Path):
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    model, info = VerifiedEvidenceLatentModel.from_pretrained(checkpoint, torch_dtype=torch.bfloat16, output_loading_info=True)
+    config = AutoConfig.from_pretrained(checkpoint)
+    cls = VRecGroupLatentModel if getattr(config, "latent_vrec", None) else VerifiedEvidenceLatentModel
+    model, info = cls.from_pretrained(checkpoint, torch_dtype=torch.bfloat16, output_loading_info=True)
     missing = [k for k in info["missing_keys"] if k != "lm_head.weight"]  # tied to embed_tokens
     if missing:
         raise RuntimeError(f"missing keys when loading {checkpoint}: {missing}")
     model = model.to(device).eval()
     model.config.use_cache = False
-    model.set_evidence_table(torch.load(model.config.latent_evidence["source"], map_location="cpu", weights_only=False))
+    model.load_tables_from_config()
     return model, tokenizer, device
 
 
@@ -82,7 +86,8 @@ def main() -> None:
     E.seed_all(42)
     model, tokenizer, device = load(a.checkpoint)
     out_dir = D.RESULTS / "verified_evidence" / a.tag
-    summary = {"checkpoint": str(a.checkpoint), "evidence_spec": model.config.latent_evidence}
+    spec = getattr(model.config, "latent_vrec", None) or model.config.latent_evidence
+    summary = {"checkpoint": str(a.checkpoint), "model": type(model).__name__, "evidence_spec": spec}
 
     full_ds = VariantPromptDataset("test", tokenizer, -1)
     n = len(full_ds)
@@ -95,8 +100,6 @@ def main() -> None:
     tc = item_cluster[test_rows.target]
     pad = tokenizer.pad_token_id
     collate = lambda x: E.collate(x, pad)
-    evidence = model.evidence_vectors()
-    gain = model.side_gain.float()
 
     def batches(ds, count):
         for s in range(0, count, a.batch_size):
@@ -148,22 +151,19 @@ def main() -> None:
     oracle_probs = torch.nn.functional.one_hot(torch.as_tensor(np.maximum(tc, 0)), probs.shape[1]).float()
     results = {}
 
-    def comp(pr):
-        return evidence_component(pr.to(device), evidence, gain, model.evidence_gate)[0]
-
     with torch.no_grad():
         for s, (ids, mask, labels, pos) in batches(full_ds, lim):
             sl = slice(s, s + len(ids))
             dn = torch.tensor(donor[sl])
             rb = r_base[sl].to(device)
             _, embeds = E.thought_embeds(model, ids, mask, pos)
-            own = comp(probs[sl])
-            raw_lp = target_log_probs(model, E.substitute(embeds, pos, model.combine(rb, own)), mask, labels)
+            slot = model.slot_from_probs
+            raw_lp = target_log_probs(model, E.substitute(embeds, pos, slot(rb, probs[sl])), mask, labels)
             variants = {
-                "swap_evidence": model.combine(rb, comp(probs[dn])),
-                "zero_evidence": model.combine(rb, None),
-                "oracle_evidence": model.combine(rb, comp(oracle_probs[sl])),
-                "swap_r": model.combine(r_base[dn].to(device), own),
+                "swap_evidence": slot(rb, probs[dn]),
+                "zero_evidence": slot(rb, None),
+                "oracle_evidence": slot(rb, oracle_probs[sl]),
+                "swap_r": slot(r_base[dn].to(device), probs[sl]),  # donor's r, own verifier output
             }
             for name, vec in variants.items():
                 lp = target_log_probs(model, E.substitute(embeds, pos, vec), mask, labels)
@@ -171,7 +171,7 @@ def main() -> None:
                     results.setdefault(name, {}).setdefault(k, []).append(v)
             _, (ids_d, mask_d, labels_d, pos_d) = next(it_drop)
             rd, emb_d = E.thought_embeds(model, ids_d, mask_d, pos_d)
-            vec = model.combine(rd, comp(model.verifier_logits(rd).softmax(-1).cpu()))
+            vec = model.slot_from_probs(rd, model.verifier_logits(rd).softmax(-1))
             lp = target_log_probs(model, E.substitute(emb_d, pos_d, vec), mask_d, labels_d)
             for k, v in compare(raw_lp, lp, labels, labels_d).items():
                 results.setdefault("drop_last_recomputed", {}).setdefault(k, []).append(v)

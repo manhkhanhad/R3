@@ -112,6 +112,17 @@ class VerifiedEvidenceLatentModel(SideInfoLatentModel):
         self.evidence_centroids = (sums / counts).to(device)
         self.item_cluster = cid.to(device)
 
+    def load_tables_from_config(self):
+        self.set_evidence_table(torch.load(self.config.latent_evidence["source"], map_location="cpu", weights_only=False))
+
+    def slot_from_probs(self, latent, probs):
+        """r + g c(p) sum_j p_j u_j; ``probs=None`` adds no evidence."""
+        if probs is None:
+            return self.combine(latent, None)
+        component, _ = evidence_component(probs.to(latent.device).float(), self.evidence_vectors(),
+                                          self.side_gain.float(), self.evidence_gate)
+        return self.combine(latent, component)
+
     def evidence_vectors(self):
         """Unit evidence directions normalize(P(e_j)), shape [k, hidden]."""
         vec = self.evidence_centroids.to(self.side_projection.weight.dtype)
