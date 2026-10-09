@@ -160,15 +160,17 @@ def main() -> None:
                            "slot": torch.load(d / "slot.pt", weights_only=True),
                            "meta": pd.read_csv(d / "metadata.csv"),
                            "verifier": torch.load(d / "verifier.pt", weights_only=True) if (d / "verifier.pt").exists() else None}
+            ids = data[split]["meta"].sample_id.to_numpy()  # extraction may cover a prefix (--limit)
+            data[split]["labels"] = {k: v[ids] for k, v in lab[split].items()}
         same_slot = all(torch.equal(v["r"], v["slot"]) for v in data.values())
         entry["slot_equals_r"] = same_slot
         for comp in (("r",) if same_slot else ("r", "slot")):
             res = {}
             if "train" in data:
                 res["geometry_train"] = geometry(data["train"][comp])
-                res["eta2_train"] = {k: eta2(data["train"][comp], v) for k, v in lab["train"].items()}
+                res["eta2_train"] = {k: eta2(data["train"][comp], v) for k, v in data["train"]["labels"].items()}
             if "train" in data and "test" in data:
-                res["probe"] = {k: probe(data["train"][comp], lab["train"][k], data["test"][comp], lab["test"][k])
+                res["probe"] = {k: probe(data["train"][comp], data["train"]["labels"][k], data["test"][comp], data["test"]["labels"][k])
                                 for k in LABEL_FILES}
             entry[comp] = res
         if "test" in data:
@@ -186,7 +188,7 @@ def main() -> None:
                        "slot_shift": float(((data["test"]["slot"].float() - data["test"]["r"].float()).norm(dim=1)
                                             / data["test"]["r"].float().norm(dim=1).clamp_min(1e-6)).mean())}
                 for j, k in enumerate(LABEL_FILES):
-                    y = lab["test"][k]
+                    y = data["test"]["labels"][k]
                     arg = v["argmax"][:, j].numpy()
                     ver[f"verifier_acc_{k}"] = float((arg == y)[y >= 0].mean())
                     ver[f"prototype_top1_share_{k}"] = float(np.bincount(arg).max() / len(arg))
