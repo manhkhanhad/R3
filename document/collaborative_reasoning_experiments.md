@@ -253,3 +253,37 @@ w_c ∝ p(c | x)^α,    p(item | x, path) = softmax(beam log-probs / T)
 - **Reported.** The R3 path alone, the top-1 plug-in, the best marginalization per predictor, marginalization without the R3 path, and two upper bounds: the best single cluster path, and any decoded path containing the target.
 
 Jobs: smoke 317368 → full 317369 (`scripts/collab_cluster_paths.sbatch`). Results go to `analysis/results/collab_reasoning/cluster_paths/full/aggregate.md`.
+
+### Results: parallel cluster paths (job 317369; tuned on test rows 0–999, reported on rows 1,000–2,999)
+
+On average 8.0 cluster paths are decoded per row. The true cluster is among them on 32.7% of rows (23.2% of R3's misses), and some path contains the target on 24.4%.
+
+| method | HR@10 | NDCG@10 | HR@10 on R3 misses | gained / lost vs R3 |
+|---|---:|---:|---:|---:|
+| R3 path | 0.1450 | 0.1138 | 0 | — |
+| top-1 cluster plug-in (mix) | 0.1190 | 0.1006 | 0.022 | 38 / 90 |
+| marginalization, selected on the tune rows (fused, K=5, λ=0.5) | 0.1445 | 0.1152 | 0.000 | 0 / 1 |
+| marginalization without the R3 path (mix, K=5) | 0.1275 | 0.1048 | 0.023 | 40 / 75 |
+| + decoder confidence in the path weights (best on the tune rows) | 0.1445 | — | — | 0 / 1 |
+| **upper bound: best cluster path, chosen with the target known** | **0.2275** | 0.1479 | **0.116** | 198 / 33 |
+
+- **The paths contain the answer, but no rule picks them.**
+  - The best-path bound is +8.3 points over R3: on 11.6% of R3's misses, the target is in the right path's top-10.
+  - Every tuned marginalization either collapses back to R3 (λ = 0.5 makes R3's peaked beam distribution dominate) or loses more R3 hits than it gains.
+- **Verifiers: accuracy at picking the true-cluster path among the decoded ones** (`src/collab_reasoning/cluster_paths_verifiers.py`; R3-miss rows where it was decoded, n = 396, chance 0.129):
+
+  | verifier | accuracy on R3 misses | accuracy on all rows |
+  |---|---:|---:|
+  | p(c \| x), mix predictor | **0.227** | 0.436 |
+  | decoder top-beam log-prob (self-verification) | 0.073 (below chance) | 0.294 |
+  | mean top-3 log-prob | 0.098 | 0.093 |
+  | overlap with R3's top-10 | 0.179 | 0.234 |
+  | overlap with the fused CF top-10 | 0.169 | 0.175 |
+  | CF reciprocal-rank mass (4 sources, top-100) | 0.152 | 0.259 |
+  | p(c \| x) × (1 + CF mass) | 0.199 | 0.418 |
+
+  Self-verification is anti-informative on R3's misses: the decoder is most confident under the hypothesis R3 already believes. Independent CF evidence is only marginally above chance. The cluster predictor itself remains the best selector.
+- **Conclusion.**
+  - Parallel latent hypotheses turn "predict the cluster among 150" into "pick among about 8 decoded paths". The candidate set holds the answer often enough to be worth +8 points.
+  - But picking is the same problem again: none of the available signals separates the right path on the rows R3 gets wrong.
+  - The bottleneck is a verifier with evidence the predictor and the decoder do not already share. A learned verifier trained on decoded validation paths, with the features above plus path-item CF scores, is the remaining test; its target is better than 22.7% selection accuracy on R3 misses.
