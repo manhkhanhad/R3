@@ -287,3 +287,32 @@ On average 8.0 cluster paths are decoded per row. The true cluster is among them
   - Parallel latent hypotheses turn "predict the cluster among 150" into "pick among about 8 decoded paths". The candidate set holds the answer often enough to be worth +8 points.
   - But picking is the same problem again: none of the available signals separates the right path on the rows R3 gets wrong.
   - The bottleneck is a verifier with evidence the predictor and the decoder do not already share. A learned verifier trained on decoded validation paths, with the features above plus path-item CF scores, is the remaining test; its target is better than 22.7% selection accuracy on R3 misses.
+
+## Follow-up: trained evidence verifier (VRec-style, 2026-10-09)
+
+**Reframing.** Instead of generating a reasoning latent and trusting it, the model retrieves evidence from a fixed corpus and a *trained* verifier decides how much of it enters the thought slot (after VRec, arXiv 2603.07725: a verifier over group-level classes, entropy as confidence, prototype guidance, trained jointly with the recommender).
+
+**Why a trained verifier.** Statistical confidence is not enough. On the full test split (8,313 rows; 7,298 R3 misses) the existing cluster predictors are well calibrated (`mix`: 88% top-1 accuracy at max-prob ≥ 0.5) but confident almost only on rows R3 already gets right. On R3 misses, only 74 rows are confident (≥ 0.3) and right (138 at ≥ 0.2), worth at most about +0.5 pt. `group_pred` (the predicted distribution in the slot, from a fixed predictor) behaved accordingly: swap ratio 0.025, HR@10 0.1211.
+
+**Model** (`src/latent/verified_evidence_latent.py`). Evidence corpus: the 150 SASRec cluster centroids, read through the side projection of `oracle_cfcluster150`, whose decoder already reads them (swap ratio ≈ 13).
+
+```
+p  = softmax(verifier(RMSnorm(r)))                 verifier: MLP 1536 → 512 → 150
+c  = 1 − H(p) / log 150                            entropy gate
+r' = r + 30 · c · Σ_j p_j · normalize(P(e_j))
+L  = L_rec + w · CE(p, cluster(target))            label smoothing 0.1, w = 0.5
+```
+
+- Confident verifier → one evidence vector in the slot, exactly what the oracle decoder was trained on. Uncertain → a short blend the decoder learns to ignore.
+- End to end: the recommendation loss reaches the verifier through p and c, so it learns where its evidence helps the decoder, not only which cluster the target is in.
+- Curriculum: rows get the true cluster as one-hot p with probability 0.5, decaying linearly to 0 over the first epoch, so the decoder keeps reading the slot while the verifier is untrained.
+- Starts from the `oracle_cfcluster150` checkpoint; the verifier is freshly initialised.
+
+**Evaluation** (`src/prototype_grounding/evidence_eval.py`):
+1. verifier top-1/top-5, confidence, and the selective table on all rows and on R3 misses (the number of misses where it is confident and right bounds the gain);
+2. teacher-forced KL ratios: swap_evidence, zero_evidence, oracle_evidence, swap_r vs the one-item history drop;
+3. full-test ranking vs R3 v1 on the same rows (gained/lost, exact McNemar), plus a zero-evidence ablation on the first 2,000 rows.
+
+**Jobs.** `scripts/collab_evidence.sbatch [full|smoke] [weight] [gate]`: smoke 318241, full 318242 (after the smoke). Results: `analysis/results/collab_reasoning/verified_evidence/<mode>_evidence_w0.5_entropy/`.
+
+**Risk.** The verifier is trained on the same rows as the backbone, so it can be more confident on training rows than on test rows and teach the decoder to over-trust it. Early stopping on validation loss is the only guard; the selective table on test shows whether it happened.

@@ -20,6 +20,7 @@ from category_alignment_dataset import CategoryAlignedLatentRDataset
 from side_info_latent import SideInfoLatentModel
 from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
+from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
@@ -64,6 +65,13 @@ def train(
     collab_mode: str = "text",  # text: candidate titles in the prompt | slots: <|Cand|> slots with SASRec item vectors
     collab_item_table: str = None,  # slots: per-item vectors {"embeddings": [n_items, d], "valid": [n_items]}
     collab_titles_file: str = None,  # text: catalog "<title>\t<item_id>" file (default: data/<category>/info/*.txt)
+    # trained evidence verifier (document/collaborative_reasoning_experiments.md)
+    verified_evidence_from: str = None,  # oracle_category side-info checkpoint to start from (replaces base_model)
+    evidence_weight: float = 0.5,  # weight of the verifier cross-entropy
+    evidence_gate: str = "entropy",  # entropy | none
+    evidence_label_smoothing: float = 0.1,
+    evidence_oracle_mix_start: float = 0.5,  # fraction of rows given the true evidence at the start
+    evidence_oracle_mix_epochs: float = 1.0,  # linear decay of that fraction to 0
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -88,6 +96,11 @@ def train(
             "collab_candidates_file": collab_candidates_file,
             "collab_mode": collab_mode,
             "collab_item_table": collab_item_table,
+            "verified_evidence_from": verified_evidence_from,
+            "evidence_weight": evidence_weight,
+            "evidence_gate": evidence_gate,
+            "evidence_oracle_mix_start": evidence_oracle_mix_start,
+            "evidence_oracle_mix_epochs": evidence_oracle_mix_epochs,
         },
     )
 
@@ -177,6 +190,33 @@ def train(
         model_class = CandidateSlotLatentModel
         model_kwargs["config"] = model_config
 
+    use_evidence = verified_evidence_from is not None
+    evidence_table = None
+    if use_evidence:
+        if use_side_info or use_category_alignment or use_collab or category_text_file:
+            raise ValueError("the evidence verifier starts from an oracle side-info checkpoint and adds nothing else")
+        from transformers import AutoConfig
+        base_model = verified_evidence_from
+        model_config = AutoConfig.from_pretrained(base_model)
+        spec = getattr(model_config, "latent_side_info", None)
+        if not spec or spec.get("kind") != "oracle_category" or spec.get("token_scale"):
+            raise ValueError("verified_evidence_from must be a raw-scale oracle_category checkpoint")
+        evidence_table = torch.load(spec["source"], map_location="cpu", weights_only=False)
+        if "cluster_id" not in evidence_table:
+            raise ValueError("the oracle side table has no cluster_id: evidence must be clusters")
+        model_config.latent_evidence = {
+            "k": int(evidence_table["cluster_id"].max()) + 1,
+            "source": spec["source"],
+            "weight": evidence_weight,
+            "gate": evidence_gate,
+            "label_smoothing": evidence_label_smoothing,
+            "oracle_mix_start": evidence_oracle_mix_start,
+            "oracle_mix_examples": 0,  # set below from the training-set size
+            "start_checkpoint": os.path.abspath(verified_evidence_from),
+        }
+        model_class = VerifiedEvidenceLatentModel
+        model_kwargs["config"] = model_config
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -186,6 +226,10 @@ def train(
     )
     model.attention.end_k = end_k
     model.config.loss_type = "ce"
+    if use_evidence:
+        model.reset_verifier(seed)
+        model.set_evidence_table(evidence_table)
+        print("evidence verifier:", model.config.latent_evidence)
     if use_category_alignment:
         model.set_category_targets(category_targets["embeddings"], category_targets["valid"])
     
@@ -199,7 +243,8 @@ def train(
     print("Additional special tokens:", tokenizer.additional_special_tokens)
     if use_collab and collab_mode == "slots":
         additional_special_tokens.append(CAND_TOKEN)  # before the thought token, which must stay last
-    additional_special_tokens.append("<|Thought|>")
+    if "<|Thought|>" not in additional_special_tokens:  # already there when starting from an R3 checkpoint
+        additional_special_tokens.append("<|Thought|>")
     num_added_toks = tokenizer.add_special_tokens({"additional_special_tokens": additional_special_tokens})
     print("We have added", num_added_toks, "tokens")
     print("Additional special tokens:", tokenizer.additional_special_tokens)
@@ -252,10 +297,16 @@ def train(
         dataset_class = CollabCandidateLatentRDataset
         extra_train = {"candidates": collab_candidates["train"], "titles": titles, "mode": collab_mode}
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
+    if use_evidence:
+        dataset_class = EvidenceLatentRDataset
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
     print("LOAD DATA FINISHED")
+    if use_evidence:
+        mix_examples = int(evidence_oracle_mix_epochs * len(train_data))
+        model.evidence_mix_examples = mix_examples
+        model.config.latent_evidence["oracle_mix_examples"] = mix_examples
 
     if resume_from_checkpoint:
         # Check the available weights and load them
@@ -293,7 +344,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
