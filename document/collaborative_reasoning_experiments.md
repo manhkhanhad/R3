@@ -316,3 +316,44 @@ L  = L_rec + w · CE(p, cluster(target))            label smoothing 0.1, w = 0.5
 **Jobs.** `scripts/collab_evidence.sbatch [full|smoke] [weight] [gate]`: smoke 318241, full 318242 (after the smoke). Results: `analysis/results/collab_reasoning/verified_evidence/<mode>_evidence_w0.5_entropy/`.
 
 **Risk.** The verifier is trained on the same rows as the backbone, so it can be more confident on training rows than on test rows and teach the decoder to over-trust it. Early stopping on validation loss is the only guard; the selective table on test shows whether it happened.
+
+### Results: trained evidence verifier (job 318248; smoke 318247 after the loss-scaling fix)
+
+Bug found in the first smoke (318241): under gradient accumulation the HF Trainer (4.48) passes `num_items_in_batch` and sums micro-batch LM losses, so a per-micro-batch auxiliary mean is counted 64× (train loss 168 vs ~5). Fixed by weighting it by the micro-batch's share of label tokens (11a676a). `CategoryAlignedLatentModel` adds its alignment loss the same way, so the earlier category-alignment run likely trained with that loss ~64× heavier than intended.
+
+Validation loss 2.831 → 2.708 → 2.650 (epochs 1–3; includes 0.5 × verifier CE).
+
+| verifier (test, 8,313 rows) | trained verifier | `mix` predictor (statistical) |
+|---|---:|---:|
+| top-1 cluster, all rows | 12.0% | 13.3% |
+| top-1 on R3 hits / misses | 58.1% / **5.5%** | — / 5.8% |
+| R3 misses confident (c ≥ 0.3) and right | **60** | 74 (max-prob ≥ 0.3) |
+| accuracy at c ≥ 0.5 | 91% | 88% |
+
+Training-row top-1 reached 15–20% in epoch 3 vs 12% on test (mild overfitting).
+
+Teacher-forced KL ratios (to the one-item history drop): oracle evidence **0.137** (≈ 13 for the starting oracle model, 4.06 after the 2-step smoke), swap evidence 0.006, zero evidence 0.0045, swap base r 0.036. **The decoder unlearned the slot**: after the curriculum ended, the evidence was nearly empty on most rows (mean c = 0.14), and the trainable decoder learned to ignore it.
+
+| ranking (full test) | HR@1 | HR@5 | HR@10 | NDCG@10 | gained / lost vs R3 | McNemar p |
+|---|---:|---:|---:|---:|---:|---:|
+| R3 v1 | 0.0747 | 0.1020 | 0.1221 | 0.0950 | — | — |
+| trained evidence verifier | 0.0670 | 0.0943 | **0.1160** | 0.0876 | 159 / 210 | 0.009 |
+
+- On rows with c ≥ 0.3: 0.605 vs R3 0.616.
+- Zero-evidence ablation (rows 0–1,999): 0.1470 vs 0.1475 with evidence (R3 0.1575). The evidence contributes nothing; the drop vs R3 comes from the extra fine-tuning.
+
+**Reading.** The verifier is calibrated but, like every predictor so far, is confident almost only where R3 is already right; its uncertainty marks the rows that are hard for the recommender too. Gating by confidence cannot recover misses, and an evidence channel that is mostly empty is unlearned by a trainable decoder.
+
+**Group granularity** (`mix` predictor aggregated to coarser spherical k-means groups of the 150 centroids, R3 misses = 7,298):
+
+| groups | verifier right on misses | R3 top-1 in right group | verifier right, R3 wrong | …and max-prob ≥ 0.5 |
+|---:|---:|---:|---:|---:|
+| 5 | 45.8% | 39.0% | 1,082 | 236 |
+| 10 | 30.5% | 24.9% | 985 | 56 |
+| 20 | 20.0% | 16.1% | 657 | 14 |
+| 50 | 10.3% | 6.9% | 477 | 7 |
+| 150 | 5.8% | 3.8% | 292 | 2 |
+
+## Follow-up: VRec-style coarse groups (2026-10-10)
+
+`src/latent/vrec_group_latent.py`, `scripts/collab_vrec.sbatch [full|smoke] [k] [weight]`: k = 20 CF groups (`build_group_table.py`; sizes 105–390, test-target entropy 4.25 bits); linear verifier whose weight rows are the prototypes; `r* = (1 − c)·r + c·‖r‖·normalize(Σ p_j W_j)` keeps R3's own reasoning when uncertain; starts from R3 v1; L = L_rec + 0.5·CE. Not included: VRec's stage-1 pretraining on the recommender's successes/failures (needs R3 predictions on training rows), the multi-step monotonicity loss, extra verifier views. Smoke 318921 (train loss 2.08, eval 2.20), full 318922.
