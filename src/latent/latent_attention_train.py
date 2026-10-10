@@ -22,6 +22,7 @@ from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
 from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
 from vrec_group_latent import VRecGroupLatentModel
+from mux_latent import MuxLatentModel, MuxLatentRDataset, mux_table
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
@@ -74,6 +75,12 @@ def train(
     evidence_label_smoothing: float = 0.1,
     evidence_oracle_mix_start: float = 0.5,  # fraction of rows given the true evidence at the start
     evidence_oracle_mix_epochs: float = 1.0,  # linear decay of that fraction to 0
+    # MUX-style latent supervision (document/mux_latent_experiments.md)
+    latent_builder: str = None,  # pool (R3 attention pooling) | codi (MLP+LayerNorm on h[thought-1]); enables MuxLatentModel
+    mux_category_file: str = None,  # category table with "paths" and "valid" (target of the mux loss)
+    mux_weight: float = 0.0,  # weight of KL(mux(category tokens) || softmax(W r / tau)); 0 = no supervision
+    mux_tau: float = 1.0,
+    mux_rho: float = 0.9,  # geometric decay of the mux weights, leaf-first
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -100,6 +107,11 @@ def train(
             "collab_item_table": collab_item_table,
             "verified_evidence_from": verified_evidence_from,
             "vrec_groups_file": vrec_groups_file,
+            "latent_builder": latent_builder,
+            "mux_category_file": mux_category_file,
+            "mux_weight": mux_weight,
+            "mux_tau": mux_tau,
+            "mux_rho": mux_rho,
             "evidence_weight": evidence_weight,
             "evidence_gate": evidence_gate,
             "evidence_oracle_mix_start": evidence_oracle_mix_start,
@@ -238,6 +250,26 @@ def train(
         model_class = VRecGroupLatentModel
         model_kwargs["config"] = model_config
 
+    use_mux = latent_builder is not None
+    if use_mux:
+        if use_vrec or use_evidence or use_side_info or use_category_alignment or use_collab or category_text_file:
+            raise ValueError("the MUX latent is a plain-R3 variant")
+        if mux_weight > 0 and not mux_category_file:
+            raise ValueError("mux_category_file is required when mux_weight > 0")
+        from transformers import AutoConfig
+        model_config = AutoConfig.from_pretrained(base_model)
+        if not getattr(model_config, "tie_word_embeddings", False):
+            raise ValueError("the mux loss decodes r with the tied unembedding; this backbone is untied")
+        model_config.latent_mux = {
+            "builder": latent_builder,
+            "weight": mux_weight,
+            "tau": mux_tau,
+            "rho": mux_rho,
+            "category_file": os.path.abspath(mux_category_file) if mux_category_file else None,
+        }
+        model_class = MuxLatentModel
+        model_kwargs["config"] = model_config
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -251,6 +283,8 @@ def train(
         model.reset_verifier(seed)
         model.set_evidence_table(evidence_table)
         print("evidence verifier:", model.config.latent_evidence)
+    if use_mux:
+        model.reset_latent_builder(seed)
     if use_vrec:
         model.reset_verifier(seed)
         model.set_group_table(evidence_table)
@@ -324,6 +358,13 @@ def train(
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
     if use_evidence or use_vrec:
         dataset_class = EvidenceLatentRDataset
+    if use_mux:
+        dataset_class = MuxLatentRDataset
+        if mux_category_file:
+            cats = torch.load(mux_category_file, map_location="cpu", weights_only=False)
+            mux_ids, mux_w = mux_table(cats["paths"], cats["valid"], tokenizer, rho=mux_rho)
+            model.set_mux_table(mux_ids, mux_w)
+            print("mux targets:", int((mux_w.sum(-1) > 0).sum()), "items; example", tokenizer.decode(mux_ids[1][mux_w[1] > 0]))
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -369,7 +410,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_mux) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
