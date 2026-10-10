@@ -357,3 +357,25 @@ Teacher-forced KL ratios (to the one-item history drop): oracle evidence **0.137
 ## Follow-up: VRec-style coarse groups (2026-10-10)
 
 `src/latent/vrec_group_latent.py`, `scripts/collab_vrec.sbatch [full|smoke] [k] [weight]`: k = 20 CF groups (`build_group_table.py`; sizes 105–390, test-target entropy 4.25 bits); linear verifier whose weight rows are the prototypes; `r* = (1 − c)·r + c·‖r‖·normalize(Σ p_j W_j)` keeps R3's own reasoning when uncertain; starts from R3 v1; L = L_rec + 0.5·CE. Not included: VRec's stage-1 pretraining on the recommender's successes/failures (needs R3 predictions on training rows), the multi-step monotonicity loss, extra verifier views. Smoke 318921 (train loss 2.08, eval 2.20), full 318922.
+
+### Results: VRec-style coarse groups (job 318922)
+
+Validation loss 1.772 → **1.723** → 1.882 (epochs 1–3; best checkpoint = epoch 2 is evaluated). Training-row verifier top-1 rose to 45–50% in epoch 3 vs 25% on test: the verifier memorized training rows, and validation loss turned up.
+
+| verifier (test, k = 20, chance 5%) | value |
+|---|---:|
+| top-1 / top-5 group | 25.1% / 56.9% |
+| top-1 on R3 hits / misses | 75.9% / **18.0%** (R3's own top-1 group on misses: 16.1%) |
+| mean confidence c (right / wrong) | 0.35 / 0.17 |
+| R3 misses with c ≥ 0.3 and right | 321 (34% accuracy among confident misses) |
+
+Teacher-forced KL ratios: oracle group (r moved fully to the true prototype) **0.33**, swap verifier output 0.0046, zero nudge 0.0032, swap base r 0.0013. Joint training made the decoder respond to r more than R3 v1 does (v1 swap ratio 0.006; smoke 0.07), but even the true group moves the output only a third as much as dropping one history item, and the realistic nudge (mean c 0.21) barely moves it.
+
+| ranking (full test) | HR@1 | HR@5 | HR@10 | NDCG@10 | gained / lost vs R3 | McNemar p |
+|---|---:|---:|---:|---:|---:|---:|
+| R3 v1 | 0.0747 | 0.1020 | 0.1221 | 0.0950 | — | — |
+| VRec-style, k = 20 | 0.0725 | 0.1033 | **0.1227** | 0.0944 | 144 / 139 | 0.81 |
+
+Zero-nudge ablation (rows 0–1,999): 0.1575 without the nudge vs 0.1540 with it (R3 0.1575).
+
+**Reading.** Coarse groups make the verifier right far more often (321 confident-and-right misses vs 60 at k = 150), and keeping r avoids the run-1 collapse, so the model no longer loses to R3. But the result is R3: a correct 250-item group rarely becomes a hit (R3's own top-1 is already in the target group on 16% of its misses), and the decoder responds only weakly to r even when it points at the true group. Consistent with the prediction made before the run.
