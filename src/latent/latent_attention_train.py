@@ -22,6 +22,7 @@ from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
 from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
 from vrec_group_latent import VRecGroupLatentModel
+from larec_latent import LaRecLatentModel, LaRecLatentRDataset
 from rationale_latent import RationaleCollator, RationaleLatentModel, RationaleLatentRDataset, load_rationales
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
@@ -78,6 +79,13 @@ def train(
     # latent distillation (document/latent_distillation.md)
     rationale_dir: str = None,  # generate_rationales.py output: <dir>/{train,valid}.json
     rationale_mode: str = "latent",  # latent: only the pooler reads the rationale | text: it is in the decoder prompt
+    # LaRec-style latent pre-training (document/latent_distillation.md)
+    larec_states: str = None,  # teacher_states.py output for the training split
+    larec_k: int = 6,  # latent reasoning steps
+    larec_alpha: float = 1.0,  # step-level alignment (InfoNCE) weight
+    larec_gamma: float = 1.0,  # process-direction alignment weight
+    larec_tau: float = 0.1,
+    larec_negatives: int = 255,
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -110,6 +118,10 @@ def train(
             "evidence_oracle_mix_epochs": evidence_oracle_mix_epochs,
             "rationale_dir": rationale_dir,
             "rationale_mode": rationale_mode,
+            "larec_states": larec_states,
+            "larec_k": larec_k,
+            "larec_alpha": larec_alpha,
+            "larec_gamma": larec_gamma,
         },
     )
 
@@ -251,6 +263,21 @@ def train(
         if rationale_mode == "latent":
             model_class = RationaleLatentModel
 
+    use_larec = larec_states is not None
+    larec_teacher = None
+    if use_larec:
+        if use_rationale or use_evidence or use_vrec or use_side_info or use_category_alignment or use_collab or category_text_file:
+            raise ValueError("LaRec latent pre-training is plain R3 with K latent steps")
+        from transformers import AutoConfig
+        larec_teacher = torch.load(larec_states, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_larec = {
+            "k": larec_k, "alpha": larec_alpha, "gamma": larec_gamma, "tau": larec_tau,
+            "negatives": larec_negatives, "states": os.path.abspath(larec_states),
+        }
+        model_class = LaRecLatentModel
+        model_kwargs["config"] = model_config
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -259,6 +286,9 @@ def train(
         # device_map=device_map,
     )
     model.attention.end_k = end_k
+    if use_larec:
+        model.head.reset(seed)
+        model.set_teacher_states(larec_teacher["states"], larec_teacher["valid"])
     if use_rationale:
         model.config.latent_rationale = {"dir": os.path.abspath(rationale_dir), "mode": rationale_mode}
     model.config.loss_type = "ce"
@@ -290,6 +320,11 @@ def train(
     print("Additional special tokens:", tokenizer.additional_special_tokens)
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")['input_ids'][0] == len(tokenizer) - 1
+    if use_larec:
+        token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
+        model.config.latent_larec["token_norm"] = token_norm
+        model.token_norm = token_norm
+        print("LaRec latent pre-training:", model.config.latent_larec)
     if use_side_info:
         # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
         token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
@@ -339,6 +374,14 @@ def train(
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
     if use_evidence or use_vrec:
         dataset_class = EvidenceLatentRDataset
+    if use_larec:
+        dataset_class = LaRecLatentRDataset
+        if sample > 0:
+            raise ValueError("LaRec teacher states are row-indexed: use sample=-1")
+        import pandas as pd
+        if len(larec_teacher["valid"]) != len(pd.read_csv(train_file, usecols=["item_id"])):
+            raise ValueError("teacher states do not match the training CSV")
+        extra_train = extra_val = {"k": larec_k}
     if use_rationale:
         dataset_class = RationaleLatentRDataset
         extra_train = {"rationales": load_rationales(rationale_dir, train_file), "mode": rationale_mode}
@@ -388,7 +431,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_rationale) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_rationale or use_larec) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),

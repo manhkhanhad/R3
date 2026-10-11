@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
 
+from larec_latent import LaRecLatentModel, LaRecLatentRDataset
 from layers import LatentModel
 from LogitProcesser import CFEnhancedLogitsProcessor, get_hash, get_prefix_data
 from rationale_latent import RationaleLatentModel, RationaleLatentRDataset
@@ -36,17 +37,21 @@ def left_pad(rows, value):
 def main(base_model: str, info_file: str, test_data_path: str, result_json_data: str,
          rationale_file: str = None, mode: str = "latent", rationale_override: str = None,
          category: str = "Musical_Instruments", batch_size: int = 8, num_beams: int = 10,
-         limit: int = -1, seed: int = 0):
+         limit: int = -1, seed: int = 0, latent_override: str = None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_class = RationaleLatentModel if mode == "latent" else LatentModel
+    model_class = {"latent": RationaleLatentModel, "larec": LaRecLatentModel}.get(mode, LatentModel)
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(base_model)
+    if latent_override == "swap":  # larec: each user gets the latent chain of the next user in the batch
+        model.swap_shift = num_beams
+    elif latent_override is not None:
+        raise ValueError("latent_override must be swap")
     tokenizer.pad_token, tokenizer.pad_token_id = tokenizer.eos_token, tokenizer.eos_token_id
     tokenizer.padding_side = "left"
     model.config.pad_token_id = model.config.eos_token_id = tokenizer.eos_token_id
 
     rationales = None
-    if mode != "none":
+    if mode not in ("none", "larec"):
         with open(rationale_file) as handle:
             rationales = json.load(handle)["rationales"]
         if rationale_override == "shuffle":
@@ -56,9 +61,13 @@ def main(base_model: str, info_file: str, test_data_path: str, result_json_data:
             rationales = [""] * len(rationales)
         elif rationale_override is not None:
             raise ValueError("rationale_override must be shuffle or empty")
-    dataset = RationaleLatentRDataset(train_file=test_data_path, tokenizer=tokenizer, max_len=2560,
-                                      category=CATEGORIES[category], test=True, sample=-1,
-                                      rationales=rationales, mode=mode)
+    if mode == "larec":
+        dataset = LaRecLatentRDataset(train_file=test_data_path, tokenizer=tokenizer, max_len=2560,
+                                      category=CATEGORIES[category], test=True, sample=-1, k=model.k)
+    else:
+        dataset = RationaleLatentRDataset(train_file=test_data_path, tokenizer=tokenizer, max_len=2560,
+                                          category=CATEGORIES[category], test=True, sample=-1,
+                                          rationales=rationales, mode=mode)
     encodings = [dataset[i] for i in range(len(dataset))]
     test_data = dataset.get_all()
     if limit > 0:
@@ -66,8 +75,18 @@ def main(base_model: str, info_file: str, test_data_path: str, result_json_data:
 
     hash_dict = get_prefix_data(info_file, tokenizer)
 
+    # The first decoding step is keyed on the prompt's last 5 tokens ("### Response: \n" + thought);
+    # with K consecutive thought slots those are all thought tokens, so map them to that key.
+    thought = len(tokenizer) - 1
+    first = encodings[0]["input_ids"]
+    at = first.index(thought)
+    first_key = get_hash(first[at - 4:at + 1])
+
     def prefix_allowed_tokens_fn(batch_id, input_ids):
-        return hash_dict.get(get_hash(input_ids), [])
+        key = get_hash(input_ids)
+        if key not in hash_dict and len(input_ids) == 5 and all(int(t) == thought for t in input_ids):
+            key = first_key
+        return hash_dict.get(key, [])
 
     outputs, scores = [], []
     for start in range(0, len(encodings), batch_size):
