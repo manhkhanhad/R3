@@ -186,5 +186,8 @@ split (66,500 / 8,312 / 8,313 rows): HR@10 0.1238, NDCG@10 0.0964, against R3 v1
 | 319865 / 319866 | smoke (first head): CoT → states → train → generate → swap | pipeline ran; eval loss 10.8 exposed the head problem |
 | 319868 / 319869 | initial target CE: R3 4.59, LaRec raw head 15.33, soft head 5.70 | done |
 | 319878 | smoke, soft head | done: eval loss 5.34 after 4 steps; step InfoNCE 3.81 vs chance 5.55 |
-| 319876 | full: 6-step CoT (redacted) for 66,500 training rows + teacher states | running |
-| 319877 | full: LaRec pre-training + test eval + swap control | queued (after 319876) |
+| 319876 | full: 6-step CoT (redacted) for 66,500 training rows + teacher states | done in 1 h 22 min: 125 unparsed, 37,374 redacted, 30 still leaking (dropped); 66,345 usable rows |
+| 319877 | full run 1 | cancelled at step 84: step InfoNCE flat at chance (5.54). Teacher states are anisotropic: random rows have cosine 0.98–0.99 (≈ 0 after centring) |
+| 319980 | full run 2: teacher standardised; student centred + projected | cancelled at step 37: still at chance (5.56) |
+| 319994 | alignment probe: ridge map from the frozen history-only state to the standardised teacher state, 5,000 / 1,000 rows, 255 negatives | **learnable**: InfoNCE 3.67 / 4.13 / 4.53 / 5.02 / 5.64 / 5.01 for steps 1–6 (chance 5.55); top-1 33.5% at step 1 (chance 0.4%) |
+| 319995 | full run 3: student also standardised per dimension (as in the probe) | running: step InfoNCE 5.32 → 4.94 → 4.71 at steps 31–37 (below chance); direction 1.0 → 0.81 |
