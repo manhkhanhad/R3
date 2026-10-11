@@ -78,7 +78,7 @@ already reads `r`. Its loss:
 | 319657 / 319658 | smoke: latent / text teacher on those rows | done: train → save → constrained generation → metrics run end to end; predictions are valid catalog titles |
 | 319662 | full rationales, Qwen2.5-7B-Instruct, train/valid/test (~83k rows) | done in 1 h 42 min; 6.3–7.1% hit the 192-token cap |
 | 319663 | full latent teacher | done (results below) |
-| 319664 | full text teacher | training done (best epoch 2, eval loss 0.3984); test eval running |
+| 319664 | full text teacher | done: HR@10 0.1243, NDCG@10 0.0947 (vs v1: 129 hits gained / 115 lost) |
 | 319665 | sanity: `rationale_eval.py --mode none` on R3 v1, first 1,000 test rows, vs v1's standard eval | done: HR@10 0.158 vs 0.158, NDCG@10 0.1257 vs 0.1248, identical top-1 on 93.7% of rows (batch padding / bf16). The new eval is comparable to the standard numbers |
 
 ## Results: stage 1
@@ -99,6 +99,7 @@ The rationale does not make the target more likely, **even when it is written in
 |---|---:|---:|---:|---:|---|
 | R3 v1 | 8,313 | 0.1226 | 0.0950 | — | — |
 | latent teacher, true rationale | 8,313 | 0.1240 | 0.0949 | 0.1226 | 126 / 114 |
+| text teacher (rationale in the decoder prompt) | 8,313 | 0.1243 | 0.0947 | 0.1226 | 129 / 115 |
 | latent teacher, **shuffled** rationale (another row's) | 2,000 | 0.1560 | 0.1246 | 0.1575 | 29 / 32 |
 | latent teacher, **empty** rationale | 2,000 | 0.1540 | 0.1239 | 0.1575 | 25 / 32 |
 
@@ -147,3 +148,43 @@ frozen the policy gradient on the pooler is ~0. RL on R3's latent cannot work wh
 decoder does not read `r`. **RL needs samples whose outcomes differ.** Two ways to get them:
 - sampled *recommendations* (outcome-level GRPO, the whole model trainable);
 - sampled *text reasoning* (R²ec-style).
+
+## LaRec-style latent pre-training (2026-10-11)
+
+LaRec (Xia et al., arXiv 2607.24617) reports latent pre-training on the same Instruments
+split (66,500 / 8,312 / 8,313 rows): HR@10 0.1238, NDCG@10 0.0964, against R3 v1's
+0.1226 / 0.0950 here. It differs from the distillation above in three ways:
+
+1. **The teacher CoT sees the target.** It is written to derive the purchase from the
+   history without naming it, so it carries information the history lacks. Our
+   history-only rationales carried none.
+2. **K = 6 sequential latent steps** instead of one pooled vector.
+3. **Supervision for each latent step.**
+   - Step-level InfoNCE to the teacher's hidden state after each CoT step.
+   - A direction loss pushing successive latent differences toward the target's embedding.
+
+### Implementation (`src/latent/larec_latent.py`, `src/latent_distill/{generate_cot,teacher_states}.py`)
+
+| component | LaRec | here | why |
+|---|---|---|---|
+| teacher CoT | Qwen-72B, history + target, K steps | Qwen2.5-7B-Instruct (largest available), same prompt idea, exactly 6 "Step k:" lines | |
+| target leaks in CoT | "must not contain the target" (no procedure given) | **redaction**: the full title or any ≥4-word title run → "the product"; model numbers and brands absent from the history removed | the 7B named the target in 54% of rows, often verbatim in step 6. Dropping those rows would lose most of the data; after redaction 0/512 smoke rows still leak |
+| teacher states h_k | final layer of the pre-training LLM after steps 1..k | frozen Qwen2.5-1.5B-Instruct, final normed state at the last token of step k | |
+| latent steps | z_k from z_<k and history; "reasoning head" into embedding space (unspecified) | K = 6 slots; z_k = softmax(lm_head(s + MLP(s))) @ E, where s is the state before slot k (soft token, Soft-Thinking style) | the raw state rescaled to token norm gave initial target CE 15.3; the soft token gives 5.7 (R3: 4.6) |
+| L_SA | InfoNCE, in-batch negatives, τ unreported | InfoNCE on the student state after reading z_k vs h_k, cosine, τ = 0.1, 255 negatives = same-step teacher states of random training rows | R3's micro-batch of 2 would give one negative |
+| L_PA | 1 − cos(z_k − z_{k−1}, mean title-token embedding) | same | |
+| weights | α = γ = 1 | α = γ = 1; auxiliary terms in training only, weighted by micro-batch token share | |
+| recipe | lr ∈ {3e-4, 5e-5, 1e-5}, early stopping | R3 v1's: Qwen2.5-1.5B-Instruct, lr 3e-4, batch 128, 3 epochs, early stopping, cutoff 512 | fixed hyperparameters |
+
+**Evaluation.**
+- Standard constrained 10-beam ranking on the full test set.
+- The first decoding step is keyed on the standard "### Response:" + thought prefix.
+- **Swap control** on the first 2,000 rows: each user receives the next user's whole latent chain. It tests whether predictions depend on the latent content.
+
+| job | what | status |
+|---|---|---|
+| 319865 / 319866 | smoke (first head): CoT → states → train → generate → swap | pipeline ran; eval loss 10.8 exposed the head problem |
+| 319868 / 319869 | initial target CE: R3 4.59, LaRec raw head 15.33, soft head 5.70 | done |
+| 319878 | smoke, soft head | done: eval loss 5.34 after 4 steps; step InfoNCE 3.81 vs chance 5.55 |
+| 319876 | full: 6-step CoT (redacted) for 66,500 training rows + teacher states | running |
+| 319877 | full: LaRec pre-training + test eval + swap control | queued (after 319876) |
