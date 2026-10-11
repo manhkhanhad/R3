@@ -118,3 +118,32 @@ On the first 2,000 rows, the true rationale gives HR@10 0.1555. Shuffling it giv
   - reasoning grounded in information beyond the titles (item descriptions, reviews, other users' behaviour).
 
   A larger zero-shot writer is not enough on its own.
+
+## Why R3's RL stage cannot help (2026-10-11)
+
+R3's second stage (`src/grpo_attention_tuning`) works as follows:
+- it samples 8 noisy copies of `r` per row (r + N(0, 1.5²I), the first copy noise-free);
+- the reward is the teacher-forced likelihood of the target title, exp(−mean token NLL);
+- the advantage is measured against the noise-free copy;
+- **only the pooler is trained**: backbone and LM head are frozen.
+
+**Our runs never actually applied it.**
+- The last Musical Instruments RL launch crashed at start-up: global batch 2×2 is not divisible by 8 generations.
+- The merge step then picked up the SFT shard files left in the same directory, so `nomul_attn_lr_5e-5/final_result.json` is byte-identical to the SFT result.
+- **0.1226 is the SFT number.**
+- An earlier partial run (checkpoint-1800 of 2078 steps) logged KL = 0.0000 and clip ratio = 0.0000 on every step: the policy never moved.
+
+**Signal probe** (`src/latent_distill/rl_signal_probe.py`, job 319847; R3 v1 SFT, 512 training rows, 8 samples per row):
+
+| perturbation of `r` | within-group reward std / mean | groups with any \|advantage\| > 0.01 |
+|---|---:|---:|
+| RL noise, ‖noise‖ ≈ 0.90 ‖r‖ | 0.18% | 0.4% |
+| replace `r` by other rows' `r` | 0.22% | 3.9% |
+| (reference) reward std between rows | 0.14 on a mean of 0.75 | — |
+
+Even replacing `r` outright moves the reward by 0.2%: the decoder ignores `r`, so every
+sample in a group gets the same reward. The advantages are noise, and with the decoder
+frozen the policy gradient on the pooler is ~0. RL on R3's latent cannot work while the
+decoder does not read `r`. **RL needs samples whose outcomes differ.** Two ways to get them:
+- sampled *recommendations* (outcome-level GRPO, the whole model trainable);
+- sampled *text reasoning* (R²ec-style).
