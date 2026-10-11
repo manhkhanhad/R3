@@ -74,5 +74,8 @@ already reads `r`. Its loss:
 
 | job | what | status |
 |---|---|---|
-| 319656 | smoke: rationales for the first 512 rows of each split | submitted |
-| 319657 / 319658 | smoke: latent / text teacher on those rows | submitted (after 319656) |
+| 319656 | smoke: rationales for the first 512 rows of each split | done: 512 rationales in 32 s on one GPU; 6% hit the 192-token cap |
+| 319657 / 319658 | smoke: latent / text teacher on those rows | done: train → save → constrained generation → metrics run end to end; predictions are valid catalog titles |
+| 319662 | full rationales, Qwen2.5-7B-Instruct, train/valid/test (~83k rows) | submitted |
+| 319663 / 319664 | full latent / text teacher (3 epochs, test eval; latent also shuffle/empty on 2,000 rows) | submitted (after 319662) |
+| 319665 | sanity: `rationale_eval.py --mode none` on R3 v1, first 1,000 test rows, vs v1's standard eval | submitted |
