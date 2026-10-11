@@ -288,6 +288,7 @@ def train(
     model.attention.end_k = end_k
     if use_larec:
         model.head.reset(seed)
+        model.reset_alignment()
         model.set_teacher_states(larec_teacher["states"], larec_teacher["valid"])
     if use_rationale:
         model.config.latent_rationale = {"dir": os.path.abspath(rationale_dir), "mode": rationale_mode}

@@ -25,6 +25,7 @@ def tiny(**spec):
     torch.manual_seed(0)
     model = LaRecLatentModel(config)
     model.head.reset(0)
+    model.reset_alignment()
     with torch.no_grad():
         model.head.down.weight.normal_(0, 0.1)  # non-trivial head for the tests
     model.set_teacher_states(torch.randn(20, K, HIDDEN), torch.tensor([True] * 19 + [False]))
@@ -125,3 +126,17 @@ def test_cot_parsing_and_leak_filter():
     clean = redact(steps, target)
     assert clean == ["Next they buy the the product.", "Nylon strings fit."] and not leaks(clean, target)
     assert redact(["A D'Addario EJ45 set."], target, ["D'Addario EJ16"]) == ["A D'Addario set."]
+
+
+def test_anisotropic_teacher_states_are_standardised_and_learnable():
+    model = tiny(negatives=7)
+    shared = torch.randn(HIDDEN) * 50  # a dominant common direction, as in final-layer states
+    raw = shared + torch.randn(20, K, HIDDEN)
+    model.set_teacher_states(raw, torch.ones(20, dtype=torch.bool))
+    t = model.teacher_states.float()
+    cos = torch.nn.functional.cosine_similarity(t[0], t[1], dim=-1).abs().mean()
+    assert cos < 0.5  # raw rows would have cosine ~1
+    model.reset_alignment()
+    model.train()
+    student = (shared + raw[[0, 1]] - shared).clone()  # the student carries the same shared direction
+    assert model.step_alignment(student, torch.tensor([0, 1])) < model.step_alignment(student, torch.tensor([1, 0]))

@@ -17,6 +17,11 @@ Re-implements stage 1 ("Latent Reasoning Pre-training") of LaRec (Xia et al., ar
   (``teacher_states.py``), cosine similarity, temperature ``tau``.  Negatives are the
   same step's teacher states of ``negatives`` random other training rows (LaRec uses the
   mini-batch; with R3's micro-batch of 2 that would be a single negative).
+  Final-layer states are highly anisotropic (random rows' teacher states have cosine
+  0.94-0.99), which left the InfoNCE at chance.  So, as is standard for contrastive
+  alignment (LaRec does not specify), teacher states are standardised per step and per
+  dimension over the training rows, and student states are centred by a running mean
+  and passed through a learned linear projection (identity at init) before the cosine.
 * Process direction alignment (LaRec Eq. 5-6): 1 - cos(z_k - z_{k-1}, e_tgt) for
   k = 2..K, with e_tgt the mean input embedding of the target title's tokens.
 * L = L_rec + alpha * L_SA + gamma * L_PA (alpha = gamma = 1 in LaRec).  The auxiliary
@@ -67,6 +72,10 @@ class LaRecLatentModel(LatentModel):
         self.negatives = int(spec.get("negatives", 255))
         self.token_norm = float(spec.get("token_norm", 1.0))
         self.head = ReasoningHead(config.hidden_size)
+        self.align_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        self.register_buffer("student_mean", torch.zeros(self.k, config.hidden_size), persistent=False)
+        self.register_buffer("student_mean_ready", torch.zeros((), dtype=torch.bool), persistent=False)
+        self.mean_momentum = float(spec.get("mean_momentum", 0.99))
         self.teacher_states = None  # [N, K, H] on CPU, set by set_teacher_states
         self.teacher_valid = None
         self._rows = None
@@ -74,11 +83,20 @@ class LaRecLatentModel(LatentModel):
         self._stats = []
         self.swap_shift = 0  # eval control: give each row the latent chain of the row `swap_shift` later
 
+    def reset_alignment(self):
+        with torch.no_grad():
+            self.align_proj.weight.copy_(torch.eye(self.align_proj.in_features, dtype=self.align_proj.weight.dtype))
+            self.align_proj.bias.zero_()
+
     def set_teacher_states(self, states, valid):
+        """Standardise each step's states (per dimension) over the valid rows."""
         if states.shape[1] != self.k:
             raise ValueError(f"teacher states have {states.shape[1]} steps, config says {self.k}")
-        self.teacher_states = states
-        self.teacher_valid = valid.bool()
+        valid = valid.bool()
+        x = states[valid].float()
+        mean, std = x.mean(0), x.std(0).clamp_min(1e-3)
+        self.teacher_states = ((states.float() - mean) / std).to(torch.bfloat16)
+        self.teacher_valid = valid
 
     def soft_token(self, state):
         """Expected input embedding under the next-token distribution (thought token excluded)."""
@@ -150,6 +168,15 @@ class LaRecLatentModel(LatentModel):
             return student.new_zeros(())
         pool = torch.nonzero(self.teacher_valid).squeeze(1)
         neg_ids = pool[torch.randint(len(pool), (self.negatives,))]
+        if self.training:
+            with torch.no_grad():
+                batch_mean = student.detach().mean(0)
+                if not bool(self.student_mean_ready):
+                    self.student_mean.copy_(batch_mean)
+                    self.student_mean_ready.fill_(True)
+                else:
+                    self.student_mean.mul_(self.mean_momentum).add_(batch_mean, alpha=1 - self.mean_momentum)
+        student = self.align_proj((student - self.student_mean).to(self.align_proj.weight.dtype)).float()
         pos = self.teacher_states[ids[ok]].to(student.device).float()  # [b, K, H]
         neg = self.teacher_states[neg_ids].to(student.device).float()  # [N, K, H]
         s = F.normalize(student[ok.to(student.device)], dim=-1)
