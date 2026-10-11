@@ -20,8 +20,12 @@ Re-implements stage 1 ("Latent Reasoning Pre-training") of LaRec (Xia et al., ar
   Final-layer states are highly anisotropic (random rows' teacher states have cosine
   0.94-0.99), which left the InfoNCE at chance.  So, as is standard for contrastive
   alignment (LaRec does not specify), teacher states are standardised per step and per
-  dimension over the training rows, and student states are centred by a running mean
-  and passed through a learned linear projection (identity at init) before the cosine.
+  dimension over the training rows, and student states are standardised per dimension by
+  running (EMA) mean and variance and passed through a learned linear projection
+  (identity at init) before the cosine.  Without the per-dimension scaling, a few
+  massive-activation dimensions dominate the cosine and the InfoNCE stays at chance,
+  although a linear probe from the history-only state reaches 3.7 vs chance 5.5
+  (alignment_probe.py).
 * Process direction alignment (LaRec Eq. 5-6): 1 - cos(z_k - z_{k-1}, e_tgt) for
   k = 2..K, with e_tgt the mean input embedding of the target title's tokens.
 * L = L_rec + alpha * L_SA + gamma * L_PA (alpha = gamma = 1 in LaRec).  The auxiliary
@@ -74,6 +78,7 @@ class LaRecLatentModel(LatentModel):
         self.head = ReasoningHead(config.hidden_size)
         self.align_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.register_buffer("student_mean", torch.zeros(self.k, config.hidden_size), persistent=False)
+        self.register_buffer("student_var", torch.ones(self.k, config.hidden_size), persistent=False)
         self.register_buffer("student_mean_ready", torch.zeros((), dtype=torch.bool), persistent=False)
         self.mean_momentum = float(spec.get("mean_momentum", 0.99))
         self.teacher_states = None  # [N, K, H] on CPU, set by set_teacher_states
@@ -171,12 +176,17 @@ class LaRecLatentModel(LatentModel):
         if self.training:
             with torch.no_grad():
                 batch_mean = student.detach().mean(0)
+                batch_var = (student.detach() - self.student_mean).square().mean(0)
                 if not bool(self.student_mean_ready):
                     self.student_mean.copy_(batch_mean)
+                    self.student_var.copy_(student.detach().var(0, unbiased=False).clamp_min(1e-2)
+                                           if student.shape[0] > 1 else torch.ones_like(batch_mean))
                     self.student_mean_ready.fill_(True)
                 else:
                     self.student_mean.mul_(self.mean_momentum).add_(batch_mean, alpha=1 - self.mean_momentum)
-        student = self.align_proj((student - self.student_mean).to(self.align_proj.weight.dtype)).float()
+                    self.student_var.mul_(self.mean_momentum).add_(batch_var, alpha=1 - self.mean_momentum)
+        normed = (student - self.student_mean) * torch.rsqrt(self.student_var.clamp_min(1e-2))
+        student = self.align_proj(normed.to(self.align_proj.weight.dtype)).float()
         pos = self.teacher_states[ids[ok]].to(student.device).float()  # [b, K, H]
         neg = self.teacher_states[neg_ids].to(student.device).float()  # [N, K, H]
         s = F.normalize(student[ok.to(student.device)], dim=-1)
