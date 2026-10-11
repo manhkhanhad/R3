@@ -78,4 +78,4 @@ already reads `r`. Its loss:
 | 319657 / 319658 | smoke: latent / text teacher on those rows | done: train → save → constrained generation → metrics run end to end; predictions are valid catalog titles |
 | 319662 | full rationales, Qwen2.5-7B-Instruct, train/valid/test (~83k rows) | submitted |
 | 319663 / 319664 | full latent / text teacher (3 epochs, test eval; latent also shuffle/empty on 2,000 rows) | submitted (after 319662) |
-| 319665 | sanity: `rationale_eval.py --mode none` on R3 v1, first 1,000 test rows, vs v1's standard eval | submitted |
+| 319665 | sanity: `rationale_eval.py --mode none` on R3 v1, first 1,000 test rows, vs v1's standard eval | done: HR@10 0.158 vs 0.158, NDCG@10 0.1257 vs 0.1248, identical top-1 on 93.7% of rows (batch padding / bf16). The new eval is comparable to the standard numbers |
