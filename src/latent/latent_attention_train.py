@@ -22,6 +22,7 @@ from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateLatentRDataset
 from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
 from vrec_group_latent import VRecGroupLatentModel
+from rationale_latent import RationaleCollator, RationaleLatentModel, RationaleLatentRDataset, load_rationales
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
@@ -74,6 +75,9 @@ def train(
     evidence_label_smoothing: float = 0.1,
     evidence_oracle_mix_start: float = 0.5,  # fraction of rows given the true evidence at the start
     evidence_oracle_mix_epochs: float = 1.0,  # linear decay of that fraction to 0
+    # latent distillation (document/latent_distillation.md)
+    rationale_dir: str = None,  # generate_rationales.py output: <dir>/{train,valid}.json
+    rationale_mode: str = "latent",  # latent: only the pooler reads the rationale | text: it is in the decoder prompt
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -104,6 +108,8 @@ def train(
             "evidence_gate": evidence_gate,
             "evidence_oracle_mix_start": evidence_oracle_mix_start,
             "evidence_oracle_mix_epochs": evidence_oracle_mix_epochs,
+            "rationale_dir": rationale_dir,
+            "rationale_mode": rationale_mode,
         },
     )
 
@@ -238,6 +244,13 @@ def train(
         model_class = VRecGroupLatentModel
         model_kwargs["config"] = model_config
 
+    use_rationale = rationale_dir is not None
+    if use_rationale:
+        if use_evidence or use_vrec or use_side_info or use_category_alignment or use_collab or category_text_file:
+            raise ValueError("rationale runs are plain R3 plus a rationale")
+        if rationale_mode == "latent":
+            model_class = RationaleLatentModel
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -246,6 +259,8 @@ def train(
         # device_map=device_map,
     )
     model.attention.end_k = end_k
+    if use_rationale:
+        model.config.latent_rationale = {"dir": os.path.abspath(rationale_dir), "mode": rationale_mode}
     model.config.loss_type = "ce"
     if use_evidence:
         model.reset_verifier(seed)
@@ -324,6 +339,10 @@ def train(
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
     if use_evidence or use_vrec:
         dataset_class = EvidenceLatentRDataset
+    if use_rationale:
+        dataset_class = RationaleLatentRDataset
+        extra_train = {"rationales": load_rationales(rationale_dir, train_file), "mode": rationale_mode}
+        extra_val = {"rationales": load_rationales(rationale_dir, eval_file), "mode": rationale_mode}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -369,13 +388,13 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_rationale) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
             remove_unused_columns=False
         ),
-        data_collator=DataCollatorForSeq2Seq(
+        data_collator=RationaleCollator(tokenizer) if use_rationale else DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
         callbacks = [EarlyStoppingCallback(early_stopping_patience=1)],
