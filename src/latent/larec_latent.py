@@ -7,9 +7,11 @@ Re-implements stage 1 ("Latent Reasoning Pre-training") of LaRec (Xia et al., ar
   K ``<|Thought|>`` slots; slot k's input is z_k = head(s_{k-1}), where s_{k-1} is the
   final-layer state at the position just before slot k (the last prompt token for k = 1,
   slot k-1 otherwise), so each step conditions on the history and all earlier steps
-  (Coconut-style feedback).  The head is a residual MLP whose output is rescaled to the
-  mean input-embedding norm (LaRec maps latents into the input-embedding space but does
-  not specify the head).
+  (Coconut-style feedback).  LaRec maps latents into the input-embedding space without
+  specifying the head; here it is a soft token (Soft Thinking): a zero-initialised residual
+  MLP on the state, then z = softmax(lm_head(.)) @ E, the expected input embedding of the
+  predicted next token.  This keeps z on the input manifold: feeding back the raw state
+  rescaled to token norm raised the initial target CE from 4.0 to 15.3.
 * Step-level alignment (LaRec Eq. 4): InfoNCE between the student state after reading
   z_k (final layer, slot k) and the teacher state h_k after CoT step k
   (``teacher_states.py``), cosine similarity, temperature ``tau``.  Negatives are the
@@ -48,9 +50,8 @@ class ReasoningHead(nn.Module):
             self.down.weight.zero_()  # starts as the identity map of the (rescaled) state
             self.down.bias.zero_()
 
-    def forward(self, state, norm):
-        x = state + self.down(F.gelu(self.up(state)))
-        return F.normalize(x.float(), dim=-1).to(state.dtype) * norm
+    def forward(self, state):
+        return state + self.down(F.gelu(self.up(state)))
 
 
 class LaRecLatentModel(LatentModel):
@@ -79,6 +80,12 @@ class LaRecLatentModel(LatentModel):
         self.teacher_states = states
         self.teacher_valid = valid.bool()
 
+    def soft_token(self, state):
+        """Expected input embedding under the next-token distribution (thought token excluded)."""
+        logits = self.lm_head(state).float()
+        logits[..., -1] = float("-inf")
+        return logits.softmax(-1).to(self.model.embed_tokens.weight.dtype) @ self.model.embed_tokens.weight
+
     def slot_positions(self, input_ids):
         thought = self.model.embed_tokens.num_embeddings - 1
         where = torch.nonzero(input_ids == thought)
@@ -101,7 +108,7 @@ class LaRecLatentModel(LatentModel):
             state = hidden[rows, pos[:, k] - 1]
             if k > 0:
                 states.append(state)  # state after reading z_k-1
-            z = self.head(state, self.token_norm)
+            z = self.soft_token(self.head(state))
             embeds = embeds.index_put((rows, pos[:, k]), z.to(embeds.dtype))
             latents.append(z)
         chain = torch.stack(latents, 1)

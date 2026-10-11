@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src" / "latent"))
 sys.path.insert(0, str(ROOT / "src" / "latent_distill"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from generate_cot import leaks, parse_steps  # noqa: E402
+from generate_cot import leaks, parse_steps, redact  # noqa: E402
 from larec_latent import LaRecLatentModel, LaRecLatentRDataset  # noqa: E402
 from test_rationale_latent import FakeTokenizer  # noqa: E402
 
@@ -45,7 +45,11 @@ def test_latents_are_sequential_and_scaled():
     with torch.no_grad():
         embeds = model.generate_embs(ids, mask)
         z = model._trace["latents"]
-        assert torch.allclose(z.norm(dim=-1), torch.full((2, K), 2.0), atol=1e-4)
+        # z_1 is the expected embedding of the next-token distribution at the last prompt token
+        state = model.model(input_ids=ids[:, :3]).last_hidden_state[:, -1]
+        logits = model.lm_head(model.head(state))
+        logits[:, -1] = float("-inf")
+        torch.testing.assert_close(z[:, 0], logits.softmax(-1) @ model.model.embed_tokens.weight)
         torch.testing.assert_close(embeds[:, 3:6], z)
         # z_1 depends only on the prompt: changing the target leaves the chain unchanged
         ids2 = ids.clone()
@@ -111,5 +115,13 @@ def test_cot_parsing_and_leak_filter():
     text = "Step 1: plays guitar.\nStep 2: needs strings.\nStep 3: nylon for classical."
     assert parse_steps(text, 3) == ["plays guitar.", "needs strings.", "nylon for classical."]
     assert parse_steps(text, 4) is None
-    assert leaks(["they want D'Addario strings"], "D'Addario EJ45 Nylon Strings")
-    assert not leaks(["they want nylon strings"], "D'Addario EJ45 Nylon Strings")
+    target = "D'Addario EJ45 Pro-Arte Nylon Classical Guitar Strings"
+    assert leaks(["they want D'Addario strings"], target)  # brand not in the history
+    assert not leaks(["they like D'Addario strings"], target, ["D'Addario EJ16 Phosphor Bronze"])  # brand in history
+    assert leaks(["next: EJ45 strings"], target, ["D'Addario EJ16"])  # model number
+    assert not leaks(["next: classical guitar strings"], target)  # a 3-word product type is allowed
+    assert leaks(["so they buy Pro-Arte Nylon Classical Guitar strings"], target)  # 4-word title run
+    steps = ["Next they buy the D'Addario EJ45 Pro-Arte Nylon Classical Guitar Strings.", "Nylon strings fit."]
+    clean = redact(steps, target)
+    assert clean == ["Next they buy the the product.", "Nylon strings fit."] and not leaks(clean, target)
+    assert redact(["A D'Addario EJ45 set."], target, ["D'Addario EJ16"]) == ["A D'Addario set."]

@@ -41,7 +41,9 @@ def main(cot: str, csv: str, out: str, model: str = "Qwen/Qwen2.5-1.5B-Instruct"
     import ast
     with open(cot) as handle:
         spec = json.load(handle)
-    steps, k = spec["steps"], int(spec["k"])
+    k = int(spec["k"])
+    leak = spec.get("leak", [False] * len(spec["steps"]))
+    steps = [s if s is not None and not l else None for s, l in zip(spec["steps"], leak)]
     frame = pd.read_csv(csv, usecols=["history_item_title", "item_title"])
     if len(frame) != len(steps):
         raise ValueError(f"{csv} has {len(frame)} rows, {cot} has {len(steps)}")
