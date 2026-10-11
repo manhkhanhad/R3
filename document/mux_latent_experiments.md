@@ -40,4 +40,22 @@
 - **The decoder still ignores r's content.** Swapping in another user's r moves the output 0.001–0.002 of a history-item drop in every run, supervised or not; injecting the *true* category barely differs from a donor's. Category content in r is derived from the history, which the decoder reads directly, so it has no reason to read r (H1 of `decoder_insensitivity_to_latent.md`).
 - **Presence vs content.** pool_mux0.5 depends heavily on *something* being in the slot (zero r: 14.4) but not on which user's r it is (swap 0.0018): the anchor pattern of R3 v0. The large injection ratios of the unsupervised models (3.6, 7.4, true ≈ donor) are out-of-distribution disruption, not category reading.
 - **Ranking is unchanged.** All six runs are within ±0.25 pt HR@10 of R3 v1 and of each other (no McNemar p < 0.15); the R3 retrain with this script (pool_none) scores 0.1241, so seed-level variation is ≈ 0.2 pt.
+## Geometric collapse (job 319695; `src/prototype_grounding/latent_geometry.py`, first 2,000 test rows)
+
+| | R3 v1 | pool_none | pool_mux0.1 | pool_mux0.5 | codi_none | codi_mux0.1 | codi_mux0.5 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| near-duplicate share (NN cosine > 0.999) | 36.2% | 8.6% | 6.3% | 7.2% | **60.6%** | 5.9% | 7.7% |
+| sample-specific share ‖r − μ‖/‖r‖ | 0.73 | 0.65 | 0.32 | 0.33 | **0.07** | 0.34 | 0.32 |
+| cosine to mean | 0.72 | 0.77 | 0.94 | 0.94 | 0.996 | 0.93 | 0.94 |
+| participation ratio | 12.3 | 60.9 | 10.4 | 10.3 | 4.7 | 10.0 | 9.9 |
+| top-10 PC variance share | 68% | 30% | 75% | 75% | 73% | 77% | 79% |
+
+- MUX removes the template collapse of the unsupervised CODI latent (61% → 6–8% near-duplicates; sample-specific share 0.07 → 0.33).
+- All four MUX runs converge to the same geometry regardless of builder: a large shared component plus ~10 effective directions of sample-specific variation, few templates. The supervision sets the geometry.
+- For the pooled latent, MUX trades spread (60 effective directions) for structure (a stronger shared component and ~10 directions).
+- Unsupervised R3 geometry varies a lot between runs of the same recipe (v1 36% vs retrain 9% near-duplicates).
+- **MUX fixes geometric collapse but not utilization collapse**: these structured latents are still ignored by the decoder (swap ratio 0.001–0.002).
+
+## Conclusion
+
 - **Conclusion.** Self-predicted aspect supervision makes the latent *interpretable* (it carries the category) but not *used*: the information is redundant with the prompt. To create dependence, the latent must carry information the decoder cannot get elsewhere during training — e.g. withholding part of the history from the decoding pass, or distilling information the model does not have (teacher rationales, retrieved collaborative evidence).
