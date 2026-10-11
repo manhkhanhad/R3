@@ -1,0 +1,26 @@
+import pandas as pd, numpy as np
+D=pd.read_pickle('/common/home/users/m/mk.ngohuu.2024/.claude/jobs/f205c9d9/tmp/miss/rows.pkl')
+H,M=D[D.hit],D[~D.hit]
+print(f'hits {len(H)}  misses {len(M)}')
+def cmp(col,f='{:.3f}'):
+    print(f'{col:22s} hit {f.format(H[col].mean())}  miss {f.format(M[col].mean())}  | HR when True {D[D[col]].hit.mean() if D[col].dtype==bool else float("nan"):.3f} (n={int(D[col].sum()) if D[col].dtype==bool else 0}) False {D[~D[col]].hit.mean() if D[col].dtype==bool else float("nan"):.3f}')
+for c in ['repeat','tgt_cold','brand_in_hist','top_eq_last','l2_eq_last','l3_eq_last','leaf_eq_last','l3_in_hist','leaf_in_hist','leaf_pred_any','l3_pred_any','brand_pred_any','brand_leaf_pred']: cmp(c)
+for c in ['hist_len','tgt_pop','tgt_anypop','pred_pop','leaf_pred_frac','l3_pred_frac','pred_in_hist']: cmp(c,'{:.2f}')
+print('\n== miss taxonomy (leaf category) ==')
+t=np.select([M.leaf_pred_any & M.brand_leaf_pred, M.leaf_pred_any, M.leaf_in_hist, M.l2_in_hist],
+            ['A right leaf+brand predicted, wrong item','B right leaf, wrong item','C leaf seen in history, not predicted','D only L2 area in history'],'E novel area (L2 not in history)')
+print(pd.Series(t).value_counts(normalize=True).round(3).to_string())
+print('\n== HR by target popularity (train target count) ==')
+b=pd.cut(D.tgt_pop,[-1,0,2,5,10,20,50,1e9],labels=['0','1-2','3-5','6-10','11-20','21-50','>50'])
+print(D.groupby(b,observed=True).agg(n=('hit','size'),HR=('hit','mean'),pred_pop=('pred_pop','median')).round(3).to_string())
+print('\n== HR by history length ==')
+print(D.groupby('hist_len').hit.agg(['size','mean']).round(3).T.to_string())
+print('\n== L2 category: n, HR, share of misses ==')
+g=D.groupby('l2_tgt').agg(n=('hit','size'),HR=('hit','mean'),leafpred=('leaf_pred_any','mean')); g['miss_share']=(g.n*(1-g.HR))/len(M)
+print(g.sort_values('n',ascending=False).head(15).round(3).to_string())
+print('\n== leaf categories with most misses ==')
+g=D.groupby('leaf_tgt').agg(n=('hit','size'),HR=('hit','mean'),leaf_pred=('leaf_pred_any','mean')); g['misses']=g.n*(1-g.HR)
+print(g.sort_values('misses',ascending=False).head(15).round(3).to_string())
+print('\n== top brands by misses ==')
+g=D.groupby('brand').agg(n=('hit','size'),HR=('hit','mean'),in_hist=('brand_in_hist','mean')); g['misses']=g.n*(1-g.HR)
+print(g.sort_values('misses',ascending=False).head(12).round(3).to_string())
