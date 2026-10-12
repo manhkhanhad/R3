@@ -190,4 +190,29 @@ split (66,500 / 8,312 / 8,313 rows): HR@10 0.1238, NDCG@10 0.0964, against R3 v1
 | 319877 | full run 1 | cancelled at step 84: step InfoNCE flat at chance (5.54). Teacher states are anisotropic: random rows have cosine 0.98–0.99 (≈ 0 after centring) |
 | 319980 | full run 2: teacher standardised; student centred + projected | cancelled at step 37: still at chance (5.56) |
 | 319994 | alignment probe: ridge map from the frozen history-only state to the standardised teacher state, 5,000 / 1,000 rows, 255 negatives | **learnable**: InfoNCE 3.67 / 4.13 / 4.53 / 5.02 / 5.64 / 5.01 for steps 1–6 (chance 5.55); top-1 33.5% at step 1 (chance 0.4%) |
-| 319995 | full run 3: student also standardised per dimension (as in the probe) | running: step InfoNCE 5.32 → 4.94 → 4.71 at steps 31–37 (below chance); direction 1.0 → 0.81 |
+| 319995 | full run 3: student also standardised per dimension (as in the probe) | done (results below) |
+
+### Results: LaRec-style latent pre-training (job 319995)
+
+**Training.**
+- Best validation CE at epoch 3: 0.4071. The per-epoch values were 0.5115 / 0.4115 / 0.4071; R3 v1's best is 0.3982.
+- The auxiliary objectives were learned well:
+  - step InfoNCE 2.45 at the end (chance 5.55; the linear probe from the frozen state reached 3.7–5.0);
+  - direction loss 0.36, down from 1.0.
+
+| model | rows | HR@10 | NDCG@10 | vs R3 v1 |
+|---|---:|---:|---:|---|
+| R3 v1 | 8,313 | 0.1226 | 0.0950 | — |
+| LaRec paper (same split, their numbers) | 8,313 | 0.1238 | 0.0964 | — |
+| **LaRec-style pre-training (ours)** | 8,313 | **0.1214** | **0.0945** | 167 hits gained / 177 lost, McNemar p = 0.63 |
+| same, each user given the **next user's latent chain** | first 2,000 | 0.1525 | 0.1240 | vs its own true chain (0.1535): 2 gained / 4 lost, p = 0.69; identical top-1 on 93.2% of rows |
+
+**Reading.**
+- **Ranking: a tie with R3.** The model is no better than R3, and its validation CE is worse (0.407 vs 0.398). The paper's own number on this split (0.1238) is also within noise of R3, so this result is consistent with the paper.
+- **The latent chain is still ignored.**
+  - The student's six latent states match the target-aware teacher's states well (InfoNCE 2.45 vs chance 5.55).
+  - Yet giving every user another user's whole chain leaves the recommendations unchanged: 93% identical top-1, ΔHR@10 −0.001.
+- **The auxiliary losses shape the latents but do not make the decoder read them.**
+  - Alignment puts teacher-like information into the latent states.
+  - The decoder still predicts from the history tokens, which it sees directly. This is the redundancy of decoder_insensitivity_to_latent.md (H1), now with K = 6 supervised steps.
+  - Unlike the oracle side information, the aligned content is either not more predictive of the target than the history, or it is not in a form the decoder benefits from reading.
