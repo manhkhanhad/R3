@@ -115,3 +115,22 @@ def test_rollout_replay_and_truncation():
     assert title_rewards('"Capo X"', "Capo X") == (1.0, 1.0, 1.0)
     hit, prefix, f1 = title_rewards("Capo Y", "Capo X")
     assert hit == 0 and 0 < prefix < 1 and f1 == 0.5
+
+
+def test_quantizer_main_runs_from_cached_user_states(tmp_path):
+    import json
+
+    import pandas as pd
+    from hilar_quantizer import main
+    n = 40
+    pd.DataFrame({"history_item_id": [str([i % 7, (i + 1) % 7, (i + 2) % 7]) for i in range(n)],
+                  "history_item_title": [str(["a", "b", "c"])] * n,
+                  "history_timestamp": [str([1, 2, 3])] * n,
+                  "item_id": [(i + 3) % 11 for i in range(n)]}).to_csv(tmp_path / "train.csv", index=False)
+    torch.save({"h": torch.randn(n, D).to(torch.bfloat16)}, tmp_path / "hu.pt")
+    main(csv=str(tmp_path / "train.csv"), out=str(tmp_path), levels=K, codes=4, epochs=1, batch_size=16,
+         negatives=3, holdout=0.25, device="cpu")
+    stats = json.load(open(tmp_path / "stats.json"))
+    assert 0 <= stats["holdout_levelK_hr10"] <= 1 and stats["n_items"] == 11
+    t = torch.load(tmp_path / "targets.pt", weights_only=False)
+    assert t["e"].shape == (n, K, D) and t["codes"].shape == (n, K)

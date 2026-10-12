@@ -142,7 +142,7 @@ def temporal_loss(model, e, targets, n_items, negatives, g):
 
 def main(csv: str, out: str, model: str = "Qwen/Qwen2.5-1.5B-Instruct", levels: int = 4, codes: int = 256,
          epochs: int = 20, batch_size: int = 512, lr: float = 1e-3, negatives: int = 100, holdout: float = 0.05,
-         seed: int = 0, limit: int = -1):
+         seed: int = 0, limit: int = -1, device: str = "cuda"):
     torch.manual_seed(seed)
     frame = pd.read_csv(csv, usecols=["history_item_id", "history_item_title", "history_timestamp", "item_id"])
     if limit > 0:
@@ -156,20 +156,20 @@ def main(csv: str, out: str, model: str = "Qwen/Qwen2.5-1.5B-Instruct", levels: 
         torch.save({"h": h_raw, "model": model, "csv": os.path.abspath(csv)}, hu_path)
     h = h_raw.float()
     mean, std = h.mean(0), h.std(0).clamp_min(1e-3)
-    h = ((h - mean) / std).cuda()
+    h = ((h - mean) / std).to(device)
     n_items = int(max(frame.item_id.max(), max(max(ast.literal_eval(x)) for x in frame.history_item_id))) + 1
     targets = [window_targets(ast.literal_eval(hist), t, levels) for hist, t in zip(frame.history_item_id, frame.item_id)]
 
-    g = torch.Generator(device="cuda").manual_seed(seed)
-    perm = torch.randperm(len(h), generator=g, device="cuda")
+    g = torch.Generator(device=device).manual_seed(seed)
+    perm = torch.randperm(len(h), generator=g, device=device)
     n_hold = int(holdout * len(h))
     hold, train = perm[:n_hold], perm[n_hold:]
 
-    rq = ResidualQuantizer(h.shape[1], levels, codes, n_items).cuda()
+    rq = ResidualQuantizer(h.shape[1], levels, codes, n_items).to(device)
     rq.kmeans_init(h[train[:8192]])
     opt = torch.optim.Adam(rq.parameters(), lr=lr)
     for epoch in range(epochs):
-        order = train[torch.randperm(len(train), generator=g, device="cuda")]
+        order = train[torch.randperm(len(train), generator=g, device=device)]
         sums = np.zeros(3)
         for start in range(0, len(order), batch_size):
             idx = order[start:start + batch_size]
@@ -200,7 +200,7 @@ def main(csv: str, out: str, model: str = "Qwen/Qwen2.5-1.5B-Instruct", levels: 
             resid = h.cpu() - e_all[:, k]
             stats[f"level{k + 1}_recon_r2"] = float(1 - resid.square().sum() / (h.cpu() - h.cpu().mean(0)).square().sum())
         # held-out rows: does the level-K code predict the next item better than popularity?
-        logits = rq.decoders[-1](e_all[hold.cpu()].cuda())
+        logits = rq.decoders[-1](e_all[hold.cpu(), -1].to(device))
         top = logits.topk(10, dim=1).indices.cpu()
         tgt = torch.tensor([targets[i][-1][0] for i in hold.tolist()])
         stats["holdout_levelK_hr10"] = float((top == tgt[:, None]).any(1).float().mean())
