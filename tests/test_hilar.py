@@ -1,0 +1,86 @@
+import sys
+from pathlib import Path
+
+import torch
+from transformers import Qwen2Config
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src" / "latent"))
+sys.path.insert(0, str(ROOT / "src" / "latent_distill"))
+
+from hilar_latent import HiLaRLatentModel  # noqa: E402
+from hilar_quantizer import ResidualQuantizer, temporal_loss, time_prompt, window_targets  # noqa: E402
+
+VOCAB, HIDDEN, K, D = 40, 32, 4, 16
+THOUGHT = VOCAB - 1
+
+
+def test_window_targets_are_chronological_suffix_unions_and_next_item():
+    assert window_targets([1, 2, 3, 4, 5, 6, 7, 8], 9, 4) == [[1, 2, 3, 4, 5, 6, 7, 8], [3, 4, 5, 6, 7, 8], [5, 6, 7, 8], [9]]
+    assert window_targets([1], 9, 4) == [[1], [], [], [9]]  # short history: later windows are empty
+
+
+def test_time_prompt_has_dates_in_order():
+    p = time_prompt(["Capo", "Strings"], [1420070400, 1450000000])
+    assert p.index("[2015-01-01] Capo") < p.index("Strings")
+
+
+def test_residual_quantizer_cumulates_and_trains_codebooks():
+    torch.manual_seed(0)
+    h = torch.randn(256, D)
+    rq = ResidualQuantizer(D, levels=3, codes=8, items=10)
+    rq.kmeans_init(h, iters=5)
+    e, codes, vq = rq(h)
+    assert e.shape == (256, 3, D) and codes.shape == (256, 3)
+    errs = [(h - e[:, k]).square().mean().item() for k in range(3)]
+    assert errs[0] > errs[1] > errs[2]  # each level reduces the residual
+    g = torch.Generator().manual_seed(0)
+    targets = [[[1, 2], [2], [3]] for _ in range(256)]
+    loss = temporal_loss(rq, e, targets, 10, 4, g) + vq + (h - e[:, -1]).square().mean()
+    loss.backward()
+    assert rq.codebooks.grad.abs().sum() > 0 and rq.decoders[0].weight.grad.abs().sum() > 0
+
+
+def tiny():
+    config = Qwen2Config(vocab_size=VOCAB, hidden_size=HIDDEN, intermediate_size=64, num_hidden_layers=1,
+                         num_attention_heads=2, num_key_value_heads=1, max_position_embeddings=64, eos_token_id=1)
+    config.latent_larec = {"k": K, "alpha": 0.0, "gamma": 0.0}
+    config.latent_hilar = {"lambda_align": 0.1, "target_dim": D}
+    torch.manual_seed(0)
+    model = HiLaRLatentModel(config)
+    model.head.reset(0)
+    model.reset_projection(0)
+    model.set_targets(torch.randn(10, K, D))
+    return model
+
+
+def batch():
+    ids = torch.tensor([[2, 3, 4] + [THOUGHT] * K + [5, 6, 1], [7, 8, 9] + [THOUGHT] * K + [10, 11, 1]])
+    labels = ids.clone()
+    labels[:, :3 + K] = -100
+    return ids, torch.ones_like(ids), labels
+
+
+def test_alignment_only_in_training_and_reaches_latents():
+    model = tiny()
+    ids, mask, labels = batch()
+    rows = torch.tensor([3, 7])
+    model.eval()
+    plain = model(input_ids=ids, attention_mask=mask, labels=labels, larec_row=rows).loss
+    model.train()
+    out = model(input_ids=ids, attention_mask=mask, labels=labels, larec_row=rows)
+    tau = model._trace["heads"]
+    expected = torch.nn.functional.mse_loss(model.align_proj_q(tau), model.targets[rows])
+    torch.testing.assert_close(out.loss, plain + 0.1 * expected, rtol=1e-4, atol=1e-4)
+    out.loss.backward()
+    assert model.align_proj_q.weight.grad.abs().sum() > 0
+    assert model.head.down.weight.grad.abs().sum() > 0  # the alignment shapes the latent states
+    assert model.model.layers[0].mlp.up_proj.weight.grad.abs().sum() > 0
+
+
+def test_latent_steps_match_levels():
+    model = tiny().eval()
+    ids, mask, _ = batch()
+    with torch.no_grad():
+        model.generate_embs(ids, mask)
+    assert model._trace["heads"].shape == (2, K, HIDDEN)

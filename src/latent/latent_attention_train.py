@@ -23,6 +23,7 @@ from collab_latent import CAND_TOKEN, CandidateSlotLatentModel, CollabCandidateL
 from verified_evidence_latent import EvidenceLatentRDataset, VerifiedEvidenceLatentModel
 from vrec_group_latent import VRecGroupLatentModel
 from larec_latent import LaRecLatentModel, LaRecLatentRDataset
+from hilar_latent import HiLaRLatentModel
 from rationale_latent import RationaleCollator, RationaleLatentModel, RationaleLatentRDataset, load_rationales
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
@@ -86,6 +87,9 @@ def train(
     larec_gamma: float = 1.0,  # process-direction alignment weight
     larec_tau: float = 0.1,
     larec_negatives: int = 255,
+    # HiLaR stage 2 (document/hilar.md)
+    hilar_targets: str = None,  # hilar_quantizer.py targets.pt for the training split
+    hilar_lambda: float = 0.1,  # lambda_align
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -122,6 +126,8 @@ def train(
             "larec_k": larec_k,
             "larec_alpha": larec_alpha,
             "larec_gamma": larec_gamma,
+            "hilar_targets": hilar_targets,
+            "hilar_lambda": hilar_lambda,
         },
     )
 
@@ -263,6 +269,20 @@ def train(
         if rationale_mode == "latent":
             model_class = RationaleLatentModel
 
+    use_hilar = hilar_targets is not None
+    hilar_table = None
+    if use_hilar:
+        if larec_states is not None:
+            raise ValueError("HiLaR and LaRec latent training are separate runs")
+        from transformers import AutoConfig
+        hilar_table = torch.load(hilar_targets, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        levels = int(hilar_table["e"].shape[1])
+        model_config.latent_larec = {"k": levels, "alpha": 0.0, "gamma": 0.0}
+        model_config.latent_hilar = {"lambda_align": hilar_lambda, "target_dim": int(hilar_table["e"].shape[2]),
+                                     "targets": os.path.abspath(hilar_targets)}
+        model_class = HiLaRLatentModel
+        model_kwargs["config"] = model_config
     use_larec = larec_states is not None
     larec_teacher = None
     if use_larec:
@@ -286,6 +306,11 @@ def train(
         # device_map=device_map,
     )
     model.attention.end_k = end_k
+    if use_hilar:
+        model.head.reset(seed)
+        model.reset_projection(seed)
+        model.set_targets(hilar_table["e"])
+        print("HiLaR alignment:", model.config.latent_hilar)
     if use_larec:
         model.head.reset(seed)
         model.reset_alignment()
@@ -375,6 +400,14 @@ def train(
         extra_val = {"candidates": collab_candidates["valid"], "titles": titles, "mode": collab_mode}
     if use_evidence or use_vrec:
         dataset_class = EvidenceLatentRDataset
+    if use_hilar:
+        dataset_class = LaRecLatentRDataset
+        if sample > 0:
+            raise ValueError("HiLaR targets are row-indexed: use sample=-1")
+        import pandas as pd
+        if len(hilar_table["e"]) != len(pd.read_csv(train_file, usecols=["item_id"])):
+            raise ValueError("HiLaR targets do not match the training CSV")
+        extra_train = extra_val = {"k": int(hilar_table["e"].shape[1])}
     if use_larec:
         dataset_class = LaRecLatentRDataset
         if sample > 0:
@@ -432,7 +465,7 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_rationale or use_larec) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or use_collab or use_evidence or use_vrec or use_rationale or use_larec or use_hilar) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),

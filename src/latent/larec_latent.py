@@ -124,14 +124,16 @@ class LaRecLatentModel(LatentModel):
         pos = self.slot_positions(input_ids)
         rows = torch.arange(input_ids.shape[0], device=input_ids.device)
         embeds = self.model.embed_tokens(input_ids)
-        latents, states = [], []
+        latents, states, heads = [], [], []
         for k in range(self.k):
             upto = int(pos[:, k].max())
             hidden = self.model(inputs_embeds=embeds[:, :upto], attention_mask=attention_mask[:, :upto]).last_hidden_state
             state = hidden[rows, pos[:, k] - 1]
             if k > 0:
                 states.append(state)  # state after reading z_k-1
-            z = self.soft_token(self.head(state))
+            head = self.head(state)
+            heads.append(head)
+            z = self.soft_token(head)
             embeds = embeds.index_put((rows, pos[:, k]), z.to(embeds.dtype))
             latents.append(z)
         chain = torch.stack(latents, 1)
@@ -139,7 +141,7 @@ class LaRecLatentModel(LatentModel):
             swapped = chain.roll(self.swap_shift, dims=0)
             for k in range(self.k):
                 embeds = embeds.index_put((rows, pos[:, k]), swapped[:, k].to(embeds.dtype))
-        self._trace = {"pos": pos, "latents": chain, "states": states}
+        self._trace = {"pos": pos, "latents": chain, "states": states, "heads": torch.stack(heads, 1)}
         return embeds
 
     def forward(self, larec_row=None, **kwargs):
