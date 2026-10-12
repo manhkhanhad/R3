@@ -76,4 +76,9 @@ per level; held-out HR@10 of the level-4 decoder vs popularity.
 
 | job | what | status |
 |---|---|---|
-| 320269 | smoke: quantizer (512 rows, 2 epochs) → stage 2 (512 rows, 1 epoch) → eval 16 rows + swap | submitted |
+| 320269 | smoke stage 1–2 | failed: the held-out diagnostic fed all 4 levels to the decoder (top-10 over levels); fixed, end-to-end test added |
+| 320568 | smoke stage 1–2, rerun | passed (4 min). Initial alignment MSE 22 vs unit-variance targets, from a standard-init projection on unnormalised states, so the projection is now initialised near zero |
+| 320569 / 320570 | smoke GRPO probe / train | failed: `forward` cleared the sampled chain on every decoding step; the chain now persists in `last_chain` (test added) |
+| 321364 / 321365 | smoke GRPO probe / train, rerun | passed. Latent noise changes the decoded title (1.75–3.5 distinct titles per 6 rollouts); within-group reward std 0.001–0.02 (no hits on a 4-step model); latent KL to stage 2 grows ~73 per update (summed over 4 × 1,536 dims, σ down to 0.025): to monitor |
+| 321366 | **full stage 1–2** (quantizer on 66,500 rows, 20 epochs; stage 2 with R3 v1 hyperparameters; test eval + swap control) | submitted |
+| 321367 | full GRPO probe (50 batches, no updates) on the stage-2 checkpoint | queued after 321366 |
