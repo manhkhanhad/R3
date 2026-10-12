@@ -117,6 +117,18 @@ def test_rollout_replay_and_truncation():
     assert hit == 0 and 0 < prefix < 1 and f1 == 0.5
 
 
+def test_sampled_chain_survives_generate():
+    model = tiny().eval()
+    ids, mask, _ = batch()
+    ids, mask = ids[:, :3 + K], mask[:, :3 + K]
+    model.rollout_sigma = torch.tensor([0.12, 0.08, 0.05, 0.025])
+    model.rollout_eps = torch.randn(2, K, HIDDEN)
+    with torch.no_grad():
+        model.generate(ids, attention_mask=mask, max_new_tokens=3, do_sample=False, pad_token_id=0)
+    model.rollout_sigma = model.rollout_eps = None
+    assert model.last_chain is not None and model.last_chain["heads"].shape == (2, K, HIDDEN)
+
+
 def test_quantizer_main_runs_from_cached_user_states(tmp_path):
     import json
 

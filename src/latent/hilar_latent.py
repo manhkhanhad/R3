@@ -39,6 +39,7 @@ class HiLaRLatentModel(LaRecLatentModel):
         self.rollout_eps = None  # [N, K, H] noise for the next prompt pass
         self.replay_tau = None  # [N, K, H]: feed these latents; mu_k recomputed (grad only via the head)
         self.keep_levels = None  # int: slots after the first `keep_levels` get the plain thought embedding
+        self.last_chain = None
 
     def generate_embs(self, input_ids, attention_mask):
         """LaRec's K-step chain with HiLaR's stochastic policy: tau_k = mu_k + sigma_k eps_k,
@@ -81,6 +82,7 @@ class HiLaRLatentModel(LaRecLatentModel):
                     embeds = embeds.index_put((rows, pos[:, k]), swapped[:, k].to(embeds.dtype))
             self._trace = {"pos": pos, "heads": heads, "mus": torch.stack(mus, 1), "states": states,
                            "head_inputs": torch.stack(inputs, 1)}
+            self.last_chain = self._trace  # survives later forward calls (e.g. decoding steps of generate)
         return embeds
 
     def set_targets(self, e):
@@ -91,7 +93,9 @@ class HiLaRLatentModel(LaRecLatentModel):
     def reset_projection(self, seed=0):
         g = torch.Generator().manual_seed(seed)
         with torch.no_grad():
-            w = torch.empty(self.align_proj_q.weight.shape).normal_(0, self.align_proj_q.in_features ** -0.5, generator=g)
+            # CHOICE: near-zero init. tau has unnormalised final-layer scale (a few huge dimensions);
+            # a standard init gave an initial alignment MSE of ~22 against unit-variance targets.
+            w = torch.empty(self.align_proj_q.weight.shape).normal_(0, 1e-3 * self.align_proj_q.in_features ** -0.5, generator=g)
             self.align_proj_q.weight.copy_(w.to(self.align_proj_q.weight))
             self.align_proj_q.bias.zero_()
 

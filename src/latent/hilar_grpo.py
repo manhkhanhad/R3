@@ -199,7 +199,7 @@ def main(checkpoint: str, targets: str, train_csv: str, info_file: str, output_d
                                                                     max_new_tokens=max_new_tokens,
                                                                     pad_token_id=tok.pad_token_id,
                                                                     eos_token_id=tok.eos_token_id))
-        taus = model._trace["heads"].detach()
+        taus = model.last_chain["heads"].detach()
         model.rollout_sigma, model.rollout_eps = None, None
         titles = tok.batch_decode(out[:, ids.shape[1]:], skip_special_tokens=True)
 
