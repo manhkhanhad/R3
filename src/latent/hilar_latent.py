@@ -34,6 +34,54 @@ class HiLaRLatentModel(LaRecLatentModel):
         self.align_weight = float(spec.get("lambda_align", 0.1))
         self.align_proj_q = nn.Linear(config.hidden_size, int(spec["target_dim"]))
         self.targets = None  # [N, K, D] standardised cumulative code embeddings, CPU
+        # Stage 3 (hilar_grpo.py) controls, all off for SFT and evaluation:
+        self.rollout_sigma = None  # [K]: sample tau_k = mu_k + sigma_k * eps_k
+        self.rollout_eps = None  # [N, K, H] noise for the next prompt pass
+        self.replay_tau = None  # [N, K, H]: feed these latents; mu_k recomputed (grad only via the head)
+        self.keep_levels = None  # int: slots after the first `keep_levels` get the plain thought embedding
+
+    def generate_embs(self, input_ids, attention_mask):
+        """LaRec's K-step chain with HiLaR's stochastic policy: tau_k = mu_k + sigma_k eps_k,
+        mu_k = head(state before slot k); slot k's input is the soft token of tau_k."""
+        pos = self.slot_positions(input_ids)
+        rows = torch.arange(input_ids.shape[0], device=input_ids.device)
+        embeds = self.model.embed_tokens(input_ids)
+        empty = embeds[rows, pos[:, 0]].clone()
+        mus, taus, states, inputs = [], [], [], []
+        for k in range(self.k):
+            if self.keep_levels is not None and k >= self.keep_levels:
+                embeds = embeds.index_put((rows, pos[:, k]), empty)
+                continue
+            upto = int(pos[:, k].max())
+            if self.replay_tau is not None:
+                with torch.no_grad():
+                    hidden = self.model(inputs_embeds=embeds[:, :upto], attention_mask=attention_mask[:, :upto]).last_hidden_state
+            else:
+                hidden = self.model(inputs_embeds=embeds[:, :upto], attention_mask=attention_mask[:, :upto]).last_hidden_state
+            state = hidden[rows, pos[:, k] - 1]
+            if k > 0:
+                states.append(state)
+            mu = self.head(state)
+            inputs.append(state)
+            if self.replay_tau is not None:
+                tau = self.replay_tau[:, k].to(mu.dtype)
+            elif self.rollout_sigma is not None:
+                tau = mu + float(self.rollout_sigma[k]) * self.rollout_eps[:, k].to(mu.dtype)
+            else:
+                tau = mu
+            z = self.soft_token(tau)
+            embeds = embeds.index_put((rows, pos[:, k]), z.to(embeds.dtype))
+            mus.append(mu)
+            taus.append(tau)
+        if taus:
+            heads = torch.stack(taus, 1)
+            if self.swap_shift:
+                swapped = torch.stack([self.soft_token(t) for t in taus], 1).roll(self.swap_shift, dims=0)
+                for k in range(len(taus)):
+                    embeds = embeds.index_put((rows, pos[:, k]), swapped[:, k].to(embeds.dtype))
+            self._trace = {"pos": pos, "heads": heads, "mus": torch.stack(mus, 1), "states": states,
+                           "head_inputs": torch.stack(inputs, 1)}
+        return embeds
 
     def set_targets(self, e):
         if e.shape[1] != self.k:

@@ -84,3 +84,34 @@ def test_latent_steps_match_levels():
     with torch.no_grad():
         model.generate_embs(ids, mask)
     assert model._trace["heads"].shape == (2, K, HIDDEN)
+
+
+def test_rollout_replay_and_truncation():
+    from hilar_grpo import title_rewards
+    model = tiny().eval()
+    ids, mask, _ = batch()
+    ids = ids[:, :3 + K]
+    mask = mask[:, :3 + K]
+    with torch.no_grad():
+        model.generate_embs(ids, mask)
+        mu = model._trace["heads"].clone()
+        sigma = torch.tensor([0.12, 0.08, 0.05, 0.025])
+        eps = torch.randn(2, K, HIDDEN)
+        model.rollout_sigma, model.rollout_eps = sigma, eps
+        sampled = model.generate_embs(ids, mask)
+        taus = model._trace["heads"].clone()
+        model.rollout_sigma = model.rollout_eps = None
+    torch.testing.assert_close(taus[:, 0], mu[:, 0] + 0.12 * eps[:, 0])  # first step: same state, added noise
+    model.replay_tau = taus  # replaying the sampled chain reproduces its inputs and its means
+    replayed = model.generate_embs(ids, mask)
+    torch.testing.assert_close(replayed, sampled)
+    assert model._trace["mus"].requires_grad
+    model.replay_tau, model.keep_levels = taus, 1
+    with torch.no_grad():
+        partial = model.generate_embs(ids, mask)
+    model.replay_tau = model.keep_levels = None
+    torch.testing.assert_close(partial[:, 3], sampled[:, 3])
+    torch.testing.assert_close(partial[:, 4:3 + K], model.model.embed_tokens(ids)[:, 4:3 + K])  # later slots empty
+    assert title_rewards('"Capo X"', "Capo X") == (1.0, 1.0, 1.0)
+    hit, prefix, f1 = title_rewards("Capo Y", "Capo X")
+    assert hit == 0 and 0 < prefix < 1 and f1 == 0.5
