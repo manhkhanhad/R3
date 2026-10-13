@@ -9,6 +9,7 @@
 #SBATCH --qos=research-1-qos
 #SBATCH --time=48:00:00
 #SBATCH --chdir=/common/home/users/m/mk.ngohuu.2024/research/R3/.claude/worktrees/HiLaR
+#SBATCH --requeue
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=mk.ngohuu.2024@phdcs.smu.edu.sg
 #SBATCH --output=/common/home/users/m/mk.ngohuu.2024/research/R3/run_logs/%x.%j.out
@@ -44,12 +45,15 @@ echo "[$(date --iso-8601=seconds)] stage 1 done"
 export WANDB_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(4))')"
 export WANDB_NAME="R3_${name}_${mode}"
 if [[ ! -f "$out/model.safetensors" ]]; then
-  python src/latent/latent_attention_train.py \
+  # Preemption: resume from the newest epoch checkpoint (saved with optimizer state).
+  resume=$(ls -d "$out"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+  resume_args=(); [[ -n "$resume" ]] && { echo "resuming from $resume"; resume_args=(--resume_from_checkpoint "$resume"); }
+  python src/latent/latent_attention_train.py "${resume_args[@]}" \
     --base_model Qwen/Qwen2.5-1.5B-Instruct --hilar_targets "$quant/targets.pt" --hilar_lambda "$lambda" \
     --train_file "$train_csv" --eval_file "$(ls ${data_root}/valid/*.csv)" \
     --output_dir "$out" --category "$category" \
     --sample -1 --micro_batch_size 2 --batch_size 128 --num_epochs "$epochs" --cutoff_len 512 \
-    --save_only_model True --save_total_limit 1
+    --save_only_model False --save_total_limit 1
 fi
 echo "[$(date --iso-8601=seconds)] stage 2 done; evaluating"
 
