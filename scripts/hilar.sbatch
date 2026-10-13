@@ -46,7 +46,7 @@ export WANDB_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(4))')"
 export WANDB_NAME="R3_${name}_${mode}"
 if [[ ! -f "$out/model.safetensors" ]]; then
   # Preemption: resume from the newest epoch checkpoint (saved with optimizer state).
-  resume=$(ls -d "$out"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+  resume=$(ls -d "$out"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
   resume_args=(); [[ -n "$resume" ]] && { echo "resuming from $resume"; resume_args=(--resume_from_checkpoint "$resume"); }
   python src/latent/latent_attention_train.py "${resume_args[@]}" \
     --base_model Qwen/Qwen2.5-1.5B-Instruct --hilar_targets "$quant/targets.pt" --hilar_lambda "$lambda" \
