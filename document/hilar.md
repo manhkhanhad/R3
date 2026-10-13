@@ -80,5 +80,63 @@ per level; held-out HR@10 of the level-4 decoder vs popularity.
 | 320568 | smoke stage 1–2, rerun | passed (4 min). Initial alignment MSE 22 vs unit-variance targets, from a standard-init projection on unnormalised states, so the projection is now initialised near zero |
 | 320569 / 320570 | smoke GRPO probe / train | failed: `forward` cleared the sampled chain on every decoding step; the chain now persists in `last_chain` (test added) |
 | 321364 / 321365 | smoke GRPO probe / train, rerun | passed. Latent noise changes the decoded title (1.75–3.5 distinct titles per 6 rollouts); within-group reward std 0.001–0.02 (no hits on a 4-step model); latent KL to stage 2 grows ~73 per update (summed over 4 × 1,536 dims, σ down to 0.025): to monitor |
-| 321366 | **full stage 1–2** (quantizer on 66,500 rows, 20 epochs; stage 2 with R3 v1 hyperparameters; test eval + swap control) | submitted |
-| 321367 | full GRPO probe (50 batches, no updates) on the stage-2 checkpoint | queued after 321366 |
+| 321366 | full stage 1–2 | stage 1 done; **preempted** at stage-2 step 134 (no checkpoint) |
+| 321654 | resubmission with `--requeue` + resume from epoch checkpoints | failed in 1 s: `ls` of the (absent) checkpoints aborted under `pipefail`; fixed |
+| 321667 | **full stage 2** + test eval + swap control | done (14 h 16 min); results below |
+| 321668 | **GRPO probe** on the stage-2 checkpoint (50 batches × 4 users × 6 rollouts, no updates) | done; results below |
+
+## Results (2026-10-14)
+
+### Stage 1: quantizer (66,500 training rows, 20 epochs)
+
+| level | codes used / 256 | perplexity | reconstruction R² of h_u |
+|---:|---:|---:|---:|
+| 1 | 256 | 232 | 0.74 |
+| 2 | 254 | 162 | 0.80 |
+| 3 | 253 | 106 | 0.84 |
+| 4 | 249 | 23 | 0.86 |
+
+The hierarchy is well used, and each level reconstructs more of the user state. But **the
+level-4 ("next item") decoder predicts held-out next items worse than popularity: HR@10 0.057
+vs 0.100**. Its training loss was still falling (0.52 → 0.45 over the last 8 epochs). The code
+for a user's history is not a good predictor of their next purchase for unseen users.
+
+### Stage 2: alignment SFT (job 321667)
+
+Validation CE per epoch: 0.4613 / **0.3995** / 0.4231 (R3 v1: 0.4632 / 0.3982 / 0.4212). The
+alignment MSE fell from about 1 to about 0.4.
+
+| model (test, 8,313 rows) | HR@1 | HR@5 | HR@10 | NDCG@10 |
+|---|---:|---:|---:|---:|
+| R3 v1 | 0.0747 | 0.1020 | **0.1226** | **0.0950** |
+| HiLaR stage 2 (ours) | 0.0294 | 0.0869 | 0.1205 | 0.0713 |
+| *paper: LatentR3 / HiLaR (after GRPO)* | — | *0.1032 / 0.1129* | *0.1241 / 0.1320* | *0.0981 / 0.1038* |
+
+- **HR@10 is unchanged** (gained 119 / lost 136 hits vs v1), but **NDCG@10 drops 25%**.
+  - Hits move down the list: hits by rank 1/2 are 244/243 for HiLaR vs 621/74 for R3. Mean rank on common hits is 3.64 vs 2.23.
+  - When the target is at rank 2, rank 1 is usually a sibling with a near-identical title: "D'Addario EXL120-7 …" (76 rows), "D'Addario EJ26 …" (70). The model reaches the right product family but loses the final fine-grained choice.
+  - It is not a decoding artefact: beams are in descending score order for every row.
+- **The latents' content is not used.** Swapping in another user's whole latent chain on the first 2,000 rows gives HR@10 0.1550 → 0.1540, with 88.9% identical top-1. This is the same picture as R3's single latent.
+
+### Stage 3 gate: GRPO signal probe (job 321668, paper's σ = 0.12/0.08/0.05/0.025)
+
+| 5-batch window | 1–5 | 6–10 | 11–15 | 16–20 | 21–25 | 26–30 | 31–35 | 36–40 | 41–45 | 46–50 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| distinct titles per user (of 6 rollouts) | 1.15 | 1.00 | 1.20 | 1.05 | 1.15 | 1.00 | 1.00 | 1.00 | 1.20 | 1.10 |
+| within-group std of the final reward | 0.012 | 0.000 | 0.015 | 0.003 | 0.012 | 0.000 | 0.000 | 0.000 | 0.010 | 0.002 |
+
+- With the paper's noise scale, the 6 rollouts of a user almost always decode to the **same title**. In half of the windows the final reward has zero within-group variance, so the advantages are noise.
+- The process reward varies little too: align ≈ 0.90 throughout.
+- The large "gain" term (target log-likelihood −0.95 → −0.30) compares latents against *empty* slots. That shows the model needs something in the slots, not which latent it gets.
+- **Conclusion: GRPO at the paper's settings has almost no learning signal on this model.** This is the same failure mode as R3's own RL (latent_distillation.md). Running the 2,000-step GRPO is not justified as is.
+
+### Reading
+
+On our R3 setup, HiLaR's stages 1–2 do not reproduce the paper's gains:
+- HR@10 matches R3, NDCG@10 is worse, and the latents' content is unused.
+- The paper's GRPO stage has no reward variance to work with.
+
+Likely reasons:
+1. The stage-1 teacher's next-item level generalises worse than popularity, so aligning to it adds no predictive information.
+2. As with every variant so far, information derived from the same history is redundant for the decoder.
+3. Our stage 2 fine-tunes the whole model with R3's recipe, while the paper trains only the latent module (unreleased code, details unknown).
