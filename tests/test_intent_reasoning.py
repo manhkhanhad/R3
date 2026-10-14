@@ -133,3 +133,25 @@ def test_paths_start_distinct():
     cos = unit @ unit.transpose(1, 2)
     off_diagonal = cos[:, ~torch.eye(K, dtype=torch.bool)]
     assert off_diagonal.abs().mean() < 0.5
+
+
+def test_credit_follows_the_item_not_a_confident_prior():
+    layer = make_model().attention
+    r0 = torch.randn(1, 16)
+    target = torch.tensor([2])
+    best = layer._target_log_probs(layer.paths(r0), target).argmax(-1).item()
+    wrong = (best + 1) % K
+    with torch.no_grad():
+        layer.prior[-1].weight.zero_()
+        layer.prior[-1].bias.fill_(-50.0)
+        layer.prior[-1].bias[wrong] = 50.0
+
+    class FixedLatent(torch.nn.Module):
+        def forward(self, **_):
+            return r0
+
+    layer.base_attention = FixedLatent()
+    layer.train()
+    layer.target_item = target
+    layer(hidden_states=None, attention_mask=None, thought_id_idx=None)
+    assert layer.last_selected.item() == best

@@ -69,6 +69,7 @@ def train(
     margin: float = 0.2,
     margin_weight: float = 0.0,
     explore_epochs: float = 0.1,
+    posterior_uses_prior: bool = False,
     gradient_checkpointing: bool = False,
     wandb_run_name: str = None,
 ):
@@ -97,7 +98,7 @@ def train(
         "n_intents": n_intents, "path_hidden": path_hidden,
         "init_scale": init_scale, "tau_item": tau_item, "mixture_weight": mixture_weight,
         "prior_weight": prior_weight, "balance_weight": balance_weight, "margin": margin,
-        "margin_weight": margin_weight, "n_items": int(item_table.size(0)),
+        "margin_weight": margin_weight, "posterior_uses_prior": posterior_uses_prior, "n_items": int(item_table.size(0)),
         "item_dim": int(item_table.size(1)), "item_emb_file": os.path.abspath(item_emb_file),
     }
     model = IntentLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)

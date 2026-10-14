@@ -8,7 +8,7 @@ among K reasoning paths:
     r0        = R3 pooling over the history
     r_k       = r0 + g * ||r0|| * normalize(U_k trunk(r0) + b_k)  k = 1..K
     p(k | x)  = softmax(prior(r0))                                (inference)
-    q(k | x,y) ∝ p(k | x) * p_item(y | r_k)                       (training only)
+    q(k | x,y) ∝ p_item(y | r_k)  [optionally × p(k | x)]           (training only)
 
 ``p_item`` is a cheap catalogue scorer.  Training is winner-takes-all: the
 decoder sees only the path the posterior credits with the observed item, the
@@ -51,6 +51,9 @@ class IntentReasoningLayer(nn.Module):
         n_items, item_dim = int(spec["n_items"]), int(spec["item_dim"])
         self.tau_item = float(spec.get("tau_item", 0.07))
         self.balance_momentum = float(spec.get("balance_momentum", 0.99))
+        # Credit the path that explains the observed item; including the prior lets an
+        # early, confident prior confirm its own choice regardless of the item.
+        self.posterior_uses_prior = bool(spec.get("posterior_uses_prior", False))
 
         # Shared trunk over the history latent, one output head per intent: independent
         # heads start near-orthogonal, so paths are distinct before training specialises
@@ -130,7 +133,7 @@ class IntentReasoningLayer(nn.Module):
             joint = prior_logp + lp_y
             mixture_loss = -torch.logsumexp(joint, dim=-1).mean()
             with torch.no_grad():
-                posterior = joint.softmax(-1)
+                posterior = (joint if self.posterior_uses_prior else lp_y).softmax(-1)
                 selected = (torch.multinomial(posterior, 1).squeeze(1) if self.explore
                             else posterior.argmax(-1))
             prior_loss = F.nll_loss(prior_logp, selected)
@@ -170,7 +173,8 @@ class IntentReasoningLayer(nn.Module):
                 if self.target_item is None:
                     raise ValueError("oracle intent needs target_item")
                 target = self._expand(self.target_item, batch, r0.device)
-                selected = (prior_logp + self._target_log_probs(paths, target)).argmax(-1)
+                credit = self._target_log_probs(paths, target)
+                selected = (credit + prior_logp if self.posterior_uses_prior else credit).argmax(-1)
             else:
                 selected = prior_logp.argmax(-1)
         self.last_selected = selected
