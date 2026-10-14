@@ -167,6 +167,11 @@ class LatentModel(Qwen2ForCausalLM):
                     self.attention, config.hidden_size, neighbor
                 )
 
+        grounded = getattr(config, "latent_grounded_reasoning", None)
+        if grounded:
+            from grounded_reasoning import GroundedReasoningLayer
+            self.attention = GroundedReasoningLayer(self.attention, config.hidden_size, grounded)
+
         self.last_soft_vocab_entropy = None
         self.last_soft_vocab_max_probability = None
         self.last_soft_vocab_raw_norm = None

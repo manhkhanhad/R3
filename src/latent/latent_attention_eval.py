@@ -154,7 +154,17 @@ def main(
         new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
     scores = []
     seq_scores = []
+    grounded = getattr(model.config, "latent_grounded_reasoning", None)
+    if grounded:
+        from grounded_reasoning import row_metadata
+        if not bool(model.attention.bank_ready):
+            raise RuntimeError("grounded reasoning checkpoint has no inference bank")
+        meta = [row_metadata(val_dataset.data.iloc[i]) for i in range(len(val_dataset.data))]
     for idx, encodings in enumerate(tqdm(new_encodings)):
+        if grounded:
+            rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
+            model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)
+            model.attention.query_user = torch.tensor([m["query_user"] for m in rows], device=device)
         output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
         if idx == 0:
             print(output)
