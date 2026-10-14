@@ -20,10 +20,15 @@ RUNS = [
     ("L4", "Musical", "knn", f"{R3}/output_dir/Musical_Instruments_R3_grounded/eval_knn.json"),
 ]
 K = (1, 3, 5, 10, 20)
-print("| run | data | mode | n | " + " | ".join(f"HR@{k}" for k in K) + " | " + " | ".join(f"NDCG@{k}" for k in K) + " |")
-print("|---|---|---|---:|" + "---:|" * (2 * len(K)))
-for run, data, mode, path in RUNS:
-    m = calculate_ranking_metrics(json.load(open(path)), INFO[data])
-    hr = " | ".join(f"{m[f'hr@{k}']:.4f}" for k in K)
-    nd = " | ".join(f"{m[f'ndcg@{k}']:.4f}" for k in K)
-    print(f"| {run} | {data} | {mode} | {m['samples']} | {hr} | {nd} |")
+for dataset in INFO:
+    rows = [r for r in RUNS if r[1] == dataset]
+    if not rows:
+        continue
+    print(f"\n### {dataset}\n")
+    print("| run | mode | n | " + " | ".join(f"HR@{k}" for k in K) + " | " + " | ".join(f"NDCG@{k}" for k in K) + " |")
+    print("|---|---|---:|" + "---:|" * (2 * len(K)))
+    for run, _, mode, path in rows:
+        m = calculate_ranking_metrics(json.load(open(path)), INFO[dataset])
+        hr = " | ".join(f"{m[f'hr@{k}']:.4f}" for k in K)
+        nd = " | ".join(f"{m[f'ndcg@{k}']:.4f}" for k in K)
+        print(f"| {run} | {mode} | {m['samples']} | {hr} | {nd} |")
