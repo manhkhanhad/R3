@@ -155,3 +155,66 @@ def test_credit_follows_the_item_not_a_confident_prior():
     layer.target_item = target
     layer(hidden_states=None, attention_mask=None, thought_id_idx=None)
     assert layer.last_selected.item() == best
+
+
+# ------------------------------------------------- literature fixes (MIMA, Re4, REMI)
+def make_fixed_model(**spec):
+    torch.manual_seed(0)
+    config = Qwen2Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+                         num_attention_heads=2, num_key_value_heads=2)
+    config.latent_intent_reasoning = {"n_intents": K, "path_hidden": 16, "n_items": N_ITEMS,
+                                      "item_dim": 4, **spec}
+    model = IntentLatentModel(config)
+    model.attention.reset_new_parameters()
+    model.attention.item_emb.copy_(F.normalize(torch.randn(N_ITEMS, 4), dim=-1).half())
+    return model
+
+
+def test_later_items_follow_the_user_in_time_and_skip_the_current_target(tmp_path):
+    import pandas as pd
+    from intent_reasoning import later_items_by_row
+    path = tmp_path / "rows.csv"
+    pd.DataFrame({"user_id": ["a", "a", "a", "b", "a"], "item_id": [1, 2, 1, 7, 3],
+                  "timestamp": [10, 20, 30, 5, 40]}).to_csv(path, index=False)
+    later = later_items_by_row(path, 2)
+    assert later[0] == [2, 3]      # row 0 (item 1): next distinct items, item 1 again skipped
+    assert later[1] == [1, 3]
+    assert later[4] == []          # last event of user a
+    assert later[3] == []          # user b has one row
+
+
+def test_hungarian_gives_each_positive_its_own_path():
+    from scipy.optimize import linear_sum_assignment
+    layer = make_fixed_model(assignment="hungarian").attention
+    lp_all = torch.log_softmax(torch.randn(2, K, N_ITEMS), -1)
+    target = torch.tensor([0, 1])
+    later = torch.tensor([[2, 3], [4, -1]])
+    selected, loss, n_pos = layer._hungarian(lp_all, target, later)
+    assert torch.isfinite(loss) and n_pos.item() == 2.5
+    rows, cols = linear_sum_assignment(-lp_all[0][:, [0, 2, 3]].numpy())
+    assert selected[0].item() == rows[list(cols).index(0)]
+    assert len(set(rows.tolist())) == 3            # three positives, three distinct paths
+
+
+def test_routing_regularization_penalises_collapse_onto_one_item():
+    layer = make_fixed_model().attention
+    mask = torch.tensor([[True, True, True, True]])
+    uniform = torch.full((1, K, 4), 0.25)
+    collapsed = torch.zeros(1, K, 4)
+    collapsed[..., 0] = 1.0
+    assert layer._routing_regularization(uniform, mask).item() < 1e-8
+    assert layer._routing_regularization(collapsed, mask).item() > 0.5
+
+
+def test_full_step_with_all_fixes_trains_heads():
+    model = make_fixed_model(assignment="hungarian", recontrast_weight=0.1, routing_reg_weight=1.0)
+    model.train()
+    data = batch(2)
+    data["history_items"] = torch.tensor([[0, 1, 2, -1], [3, 4, -1, -1]])
+    data["later_items"] = torch.tensor([[2, 3], [-1, -1]])
+    out = model(**data)
+    assert torch.isfinite(out.loss)
+    assert {"assign_loss", "recontrast_loss", "routing_reg_loss", "routing_max"} <= set(model.last_losses)
+    out.loss.backward()
+    assert model.attention.intent_heads.grad.abs().sum() > 0
+    assert model.attention.item_head[1].weight.grad.abs().sum() > 0

@@ -70,6 +70,13 @@ def train(
     margin_weight: float = 0.0,
     explore_epochs: float = 0.1,
     posterior_uses_prior: bool = False,
+    assignment: str = "argmax",
+    n_later: int = 0,
+    assign_weight: float = 0.2,
+    recontrast_weight: float = 0.0,
+    routing_reg_weight: float = 0.0,
+    route_tau: float = 0.1,
+    recontrast_tau: float = 0.1,
     gradient_checkpointing: bool = False,
     wandb_run_name: str = None,
 ):
@@ -86,7 +93,8 @@ def train(
     tokenizer.add_special_tokens({"additional_special_tokens": special})
     text = CATEGORY_TEXT[category]
     train_data = IntentDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
-                               sample=sample, seed=seed, category=text, K=K)
+                               sample=sample, seed=seed, category=text, K=K,
+                               n_later=n_later if assignment == "hungarian" else 0)
     val_data = IntentDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
                              sample=sample if eval_sample is None else eval_sample, category=text, K=K)
     to_hf = lambda data: HFDataset.from_dict({k: [row[k] for row in data] for k in data[0]})
@@ -98,7 +106,10 @@ def train(
         "n_intents": n_intents, "path_hidden": path_hidden,
         "init_scale": init_scale, "tau_item": tau_item, "mixture_weight": mixture_weight,
         "prior_weight": prior_weight, "balance_weight": balance_weight, "margin": margin,
-        "margin_weight": margin_weight, "posterior_uses_prior": posterior_uses_prior, "n_items": int(item_table.size(0)),
+        "margin_weight": margin_weight, "posterior_uses_prior": posterior_uses_prior,
+        "assignment": assignment, "assign_weight": assign_weight, "recontrast_weight": recontrast_weight,
+        "routing_reg_weight": routing_reg_weight, "route_tau": route_tau, "recontrast_tau": recontrast_tau,
+        "n_items": int(item_table.size(0)),
         "item_dim": int(item_table.size(1)), "item_emb_file": os.path.abspath(item_emb_file),
     }
     model = IntentLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)

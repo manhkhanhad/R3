@@ -15,6 +15,8 @@
 
 # Disentangled-interest R3: K reasoning paths per history; the decoder is trained on the
 # path the item-aware posterior credits. Ranking under intent modes on one checkpoint.
+# Collapse fixes: ASSIGNMENT=hungarian N_LATER=3 (MIMA), RECONTRAST_WEIGHT (Re4),
+# ROUTING_REG_WEIGHT (REMI).
 # Env: CATEGORY, CODE_ROOT, OUTPUT_SUFFIX, N_INTENTS, MARGIN_WEIGHT, TRAIN_SAMPLE,
 #      EVAL_SAMPLE, TEST_SAMPLE, NUM_EPOCHS, MODES.
 
@@ -63,6 +65,8 @@ python "$code_root/src/latent/latent_attention_train_intent.py" \
   --micro_batch_size "$micro_batch_size" --batch_size 128 \
   --num_epochs "${NUM_EPOCHS:-3}" --cutoff_len 512 \
   --n_intents "${N_INTENTS:-4}" --margin_weight "${MARGIN_WEIGHT:-0}" \
+  --assignment "${ASSIGNMENT:-argmax}" --n_later "${N_LATER:-0}" \
+  --recontrast_weight "${RECONTRAST_WEIGHT:-0}" --routing_reg_weight "${ROUTING_REG_WEIGHT:-0}" \
   --mixture_weight 0.2 --prior_weight 0.1 --balance_weight 0.01 --explore_epochs 0.1
 
 echo "[$(date --iso-8601=seconds)] Training finished; ranking under intent modes"
