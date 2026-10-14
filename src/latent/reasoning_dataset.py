@@ -102,13 +102,17 @@ class LatentRDataset(Dataset):
                 "output": target_item + '\n',
                 "dedup": target_item_id == last_history_item_id}
     
-    def pre(self, idx):
+    def instruction_tokens(self):
+        """Fixed, user-independent prompt prefix shared by every row."""
         instruction =  f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request. 
 
 ### Instruction:
 {self.instructs[0]}
 """
-        tokens = self.tokenizer.encode(instruction, bos=True, eos=False)
+        return self.tokenizer.encode(instruction, bos=True, eos=False)
+
+    def pre(self, idx):
+        tokens = self.instruction_tokens()
 
         history = self.get_history(self.data.iloc[idx])
         target_item = history['output']

@@ -227,6 +227,33 @@ class LatentModel(Qwen2ForCausalLM):
         return input_embs
 
 
+    def _latent_bottleneck_inputs(self, spec, prompt_ids, attention_mask, input_ids, inputs_embeds):
+        """Swap the 2D padding mask for the latent-only 4D mask (latent_bottleneck.py).
+
+        ``prompt_ids`` is the full prompt (prefill, or an explicit
+        ``latent_bottleneck_ids`` for inputs_embeds-only scoring); ``None`` means a
+        KV-cache decode step, which reuses the block cached at prefill.
+        """
+        from latent_bottleneck import prompt_block, bottleneck_mask_and_positions
+
+        thought_token_id = self.model.embed_tokens.num_embeddings - 1
+        if prompt_ids is not None:
+            block, thought_pos = prompt_block(
+                prompt_ids, attention_mask, thought_token_id, spec["visible_prefix_ids"]
+            )
+            self._bottleneck_block, self._bottleneck_thought_pos = block, thought_pos
+        else:
+            block = getattr(self, "_bottleneck_block", None)
+            thought_pos = getattr(self, "_bottleneck_thought_pos", None)
+            if block is None or block.size(0) != attention_mask.size(0):
+                raise RuntimeError(
+                    "latent bottleneck: decode step without a matching prefill "
+                    "(pass latent_bottleneck_ids for inputs_embeds-only calls)"
+                )
+        query_len = (input_ids if input_ids is not None else inputs_embeds).size(1)
+        dtype = inputs_embeds.dtype if inputs_embeds is not None else self.model.embed_tokens.weight.dtype
+        return bottleneck_mask_and_positions(attention_mask, block, thought_pos, query_len, dtype)
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -243,8 +270,20 @@ class LatentModel(Qwen2ForCausalLM):
         num_logits_to_keep: int = 0,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        if input_ids is not None and inputs_embeds is None and input_ids.size() == attention_mask.size():
-            inputs_embeds = self.generate_embs(input_ids, attention_mask)
+        bottleneck_ids = kwargs.pop("latent_bottleneck_ids", None)
+        is_prefill = (
+            input_ids is not None and inputs_embeds is None
+            and attention_mask is not None and input_ids.size() == attention_mask.size()
+        )
+        plain_attention_mask = attention_mask
+        bottleneck = getattr(self.config, "latent_bottleneck", None)
+        if bottleneck and attention_mask is not None and attention_mask.dim() == 2:
+            attention_mask, position_ids = self._latent_bottleneck_inputs(
+                bottleneck, input_ids if is_prefill else bottleneck_ids,
+                attention_mask, input_ids, inputs_embeds,
+            )
+        if is_prefill:
+            inputs_embeds = self.generate_embs(input_ids, plain_attention_mask)
             input_ids = None
         # elif input_ids is not None and inputs_embeds is None and input_ids.size()!=attention_mask.size():
             # 这个时候是在做生成任务，已经有了cache所以用input_ids即可

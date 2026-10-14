@@ -60,6 +60,9 @@ def train(
     category_text_file: str = None,  # text positive control: category-embedding .pt with "paths"
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
+    # L7 structural bottleneck: target tokens see only the latent + fixed instruction
+    # prefix, never the history, in training and generation (latent_bottleneck.py)
+    latent_only: bool = False,
 
 ):
 
@@ -79,6 +82,7 @@ def train(
             "side_init_norm": side_init_norm,
             "side_token_scale": side_token_scale,
             "category_text_file": category_text_file,
+            "latent_only": latent_only,
         },
     )
 
@@ -200,6 +204,14 @@ def train(
         extra_train = extra_val = {"category_paths": category_paths}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
+
+    if latent_only:
+        if use_side_info or use_category_alignment or category_text_file:
+            raise ValueError("latent_only is a plain-R3 run; do not combine with other options")
+        prefix_ids = [int(t) for t in train_data.instruction_tokens()]
+        assert prefix_ids == [int(t) for t in val_data.instruction_tokens()]
+        model.config.latent_bottleneck = {"visible_prefix_ids": prefix_ids}
+        print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
 
     print("LOAD DATA FINISHED")
 

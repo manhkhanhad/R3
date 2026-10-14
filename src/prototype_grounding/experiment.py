@@ -30,8 +30,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src" / "grpo_attention_tuning"))
+# CODE: where this source tree lives (may be a frozen copy under output_dir/).
+# ROOT: repository holding data/, analysis/, output_dir/ (override with R3_ROOT).
+CODE = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("R3_ROOT", CODE)).resolve()
+sys.path.insert(0, str(CODE / "src" / "grpo_attention_tuning"))
 from model import LatentModel  # noqa: E402
 from latent_grpo_dataset import get_prefix_data  # noqa: E402
 from latent_grpo_processor import CFEnhancedLogitsProcessor, get_hash  # noqa: E402
@@ -189,10 +192,11 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     config = AutoConfig.from_pretrained(checkpoint)
-    if getattr(config, "latent_neighbor_refinement", None):
-        # This wrapper lives in the SFT model class.  The original GRPO class
-        # silently drops it and random-initializes the plain attention layer.
-        sys.path.insert(0, str(ROOT / "src" / "latent"))
+    if getattr(config, "latent_neighbor_refinement", None) or getattr(config, "latent_bottleneck", None):
+        # These live in the SFT model class.  The original GRPO class silently
+        # drops the neighbor wrapper (random-initialising the plain attention
+        # layer) and does not apply the L7 latent-only attention mask.
+        sys.path.insert(0, str(CODE / "src" / "latent"))
         from layers import LatentModel as CorrectedLatentModel
         model, loading = CorrectedLatentModel.from_pretrained(
             checkpoint, torch_dtype=torch.bfloat16, output_loading_info=True,
@@ -215,9 +219,14 @@ def thought_embeds(model: LatentModel, ids: torch.Tensor, mask: torch.Tensor, po
     return thought.float(), embeds
 
 
-def per_example_nll(model: LatentModel, embeds: torch.Tensor, mask: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def per_example_nll(model: LatentModel, embeds: torch.Tensor, mask: torch.Tensor, labels: torch.Tensor,
+                    ids: torch.Tensor | None = None) -> torch.Tensor:
+    # A latent-bottleneck (L7) checkpoint needs the prompt ids to build its mask.
+    extra = {"latent_bottleneck_ids": ids} if getattr(model.config, "latent_bottleneck", None) else {}
+    if extra and ids is None:
+        raise ValueError("latent-bottleneck checkpoints need ids for teacher-forced scoring")
     with torch.no_grad():
-        logits = model(inputs_embeds=embeds, attention_mask=mask, use_cache=False).logits[:, :-1].float()
+        logits = model(inputs_embeds=embeds, attention_mask=mask, use_cache=False, **extra).logits[:, :-1].float()
         shifted = labels[:, 1:]
         loss = F.cross_entropy(logits.transpose(1, 2), shifted, ignore_index=-100, reduction="none")
         valid = shifted.ne(-100)
@@ -266,8 +275,8 @@ def extract(split: str, batch_size: int, limit: int = -1,
         last_z = getattr(model.attention, "last_z", None)
         if last_z is not None:
             z_vectors.append(last_z.detach().cpu().half())
-        nll_raw = per_example_nll(model, embeds, mask, labels)
-        nll_mask = per_example_nll(model, substitute(embeds, pos, torch.zeros_like(thought)), mask, labels)
+        nll_raw = per_example_nll(model, embeds, mask, labels, ids)
+        nll_mask = per_example_nll(model, substitute(embeds, pos, torch.zeros_like(thought)), mask, labels, ids)
         vectors.append(thought.cpu().half())
         raw_nll.append(nll_raw.cpu())
         mask_nll.append(nll_mask.cpu())
@@ -482,8 +491,8 @@ def collaborative_score(split: str, bank: str, k: int, seed: int, topk: int,
         q = cached[offset:offset+len(ids)].to(device)
         p, diag = exclusion_retrieve(q, batch["meta"], components, exclusion, topk, temperature, min_users)
         grounded = q + alpha * (p - q)
-        raw_all.append(per_example_nll(model, embeds, mask, labels).cpu())
-        grounded_all.append(per_example_nll(model, substitute(embeds, pos, grounded), mask, labels).cpu())
+        raw_all.append(per_example_nll(model, embeds, mask, labels, ids).cpu())
+        grounded_all.append(per_example_nll(model, substitute(embeds, pos, grounded), mask, labels, ids).cpu())
         diag_all.append(diag.cpu()); offset += len(ids)
     raw, grounded, diag = torch.cat(raw_all).numpy(), torch.cat(grounded_all).numpy(), torch.cat(diag_all).numpy()
     delta = raw - grounded
@@ -518,10 +527,10 @@ def oracle_score(split: str, bank: str, k: int, seed: int, candidate_k: int,
         q = cached[offset:offset+len(ids)].to(device)
         _, diag = retrieve(q, centers, candidate_k, .1)
         ids_top = (F.normalize(q, dim=1) @ F.normalize(centers, dim=1).T).topk(candidate_k, dim=1).indices
-        raw = per_example_nll(model, embeds, mask, labels)
+        raw = per_example_nll(model, embeds, mask, labels, ids)
         candidate_losses = []
         for j in range(candidate_k):
-            candidate_losses.append(per_example_nll(model, substitute(embeds, pos, centers[ids_top[:, j]]), mask, labels))
+            candidate_losses.append(per_example_nll(model, substitute(embeds, pos, centers[ids_top[:, j]]), mask, labels, ids))
         losses = torch.stack(candidate_losses, 1)
         raw_out.append(raw.cpu()); sim_out.append(losses[:, 0].cpu()); oracle_out.append(losses.min(1).values.cpu())
         offset += len(ids)
@@ -562,8 +571,8 @@ def score_configuration(split: str, bank: str, k: int, seed: int, topk: int,
         elif mode == "shuffled": grounded = p[torch.randperm(len(p), generator=rng, device=device)]
         elif mode == "random": grounded = torch.randn(q.shape, generator=rng, device=device) * q.std()
         else: raise ValueError(mode)
-        raw_all.append(per_example_nll(model, embeds, mask, labels).cpu())
-        grounded_all.append(per_example_nll(model, substitute(embeds, pos, grounded), mask, labels).cpu())
+        raw_all.append(per_example_nll(model, embeds, mask, labels, ids).cpu())
+        grounded_all.append(per_example_nll(model, substitute(embeds, pos, grounded), mask, labels, ids).cpu())
         diag_all.append(torch.stack([diag["similarity"], diag["margin"], diag["entropy"]], 1).cpu())
         offset += len(ids)
     raw, grounded, diag = torch.cat(raw_all).numpy(), torch.cat(grounded_all).numpy(), torch.cat(diag_all).numpy()
@@ -756,7 +765,7 @@ def intervention(split: str, batch_size: int, limit: int = -1,
         for scale in (.25, .5, 1.0):
             variants[f"noise_{scale}"] = q + torch.randn(q.shape, generator=gen, device=device) * std * scale
         for name, vec in variants.items():
-            values[name].append(per_example_nll(model, substitute(embeds, pos, vec), mask, labels).cpu())
+            values[name].append(per_example_nll(model, substitute(embeds, pos, vec), mask, labels, ids).cpu())
         offset += len(ids)
         if batch_i % 50 == 0: print(f"intervention {split}: {offset}/{len(ds)}", flush=True)
     arrays = {k: torch.cat(v).numpy() for k, v in values.items()}
