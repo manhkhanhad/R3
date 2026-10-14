@@ -160,12 +160,42 @@ def main(
         if not bool(model.attention.bank_ready):
             raise RuntimeError("grounded reasoning checkpoint has no inference bank")
         meta = [row_metadata(val_dataset.data.iloc[i]) for i in range(len(val_dataset.data))]
+    intent = getattr(model.config, "latent_intent_reasoning", None)
+    intent_mode = os.environ.get("INTENT_MODE", "map")
+    intent_predictions = []
+    if intent:
+        targets = [int(val_dataset.data.iloc[i]["item_id"]) for i in range(len(val_dataset.data))]
     for idx, encodings in enumerate(tqdm(new_encodings)):
         if grounded:
             rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)
             model.attention.query_user = torch.tensor([m["query_user"] for m in rows], device=device)
-        output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+        if intent and intent_mode == "oracle":
+            batch_targets = targets[idx * batch_size: idx * batch_size + len(encodings)]
+            model.attention.target_item = torch.tensor(batch_targets, device=device)
+        if intent and intent_mode == "mixture":
+            # One beam search per intent; merge by log p(k|x) + sequence score.
+            merged = [dict() for _ in encodings]
+            per_intent = [dict() for _ in encodings]
+            for k in range(model.attention.n_intents):
+                model.attention.forced_intent = k
+                out_k, score_k, _ = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+                prior = model.attention.last_prior_logp.view(len(encodings), -1, model.attention.n_intents)[:, 0, k]
+                for row, (items, item_scores) in enumerate(zip(out_k, score_k)):
+                    per_intent[row][k] = items
+                    for item, s in zip(items, item_scores):
+                        value = prior[row].item() + s
+                        if value > merged[row].get(item, float("-inf")):
+                            merged[row][item] = value
+            model.attention.forced_intent = None
+            output = [sorted(m, key=m.get, reverse=True)[:10] for m in merged]
+            score = [[m[i] for i in o] for m, o in zip(merged, output)]
+            seq_score = None
+            intent_predictions.extend(per_intent)
+        else:
+            output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+        if intent:
+            model.attention.target_item = None
         if idx == 0:
             print(output)
             print(score)
@@ -176,6 +206,8 @@ def main(
     for i, test in enumerate(test_data):
         test["predict"] = outputs[i]
         test["predict_score"] = scores[i]
+        if intent_predictions:
+            test["intent_predict"] = {str(k): v for k, v in intent_predictions[i].items()}
         # test["predict_seq_score"] = seq_scores[i]
 
     for i in range(len(test_data)):
