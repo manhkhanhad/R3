@@ -1,5 +1,6 @@
 """Print HR/NDCG@1,3,5,10,20 as markdown rows using the repo's ranking metric code."""
 import json
+import os
 import sys
 
 sys.path.insert(0, sys.argv[1])  # worktree src/
@@ -13,12 +14,19 @@ INFO = {
 RUNS = [
     ("L1", "Musical", "two-phase (final)", f"{R3}/output_dir/Musical_Instruments_R3_collab_margin/0.json"),
     ("L2", "CDs", "two-phase (final)", f"{R3}/output_dir/CDs_and_Vinyl_R3_collab_margin/0.json"),
-] + [
-    ("L5", "CDs", mode, f"{R3}/output_dir/CDs_and_Vinyl_R3_grounded/eval_{mode}.json")
-    for mode in ("knn", "off", "shuffle_outcome", "latent_only", "random")
-] + [
-    ("L4", "Musical", "knn", f"{R3}/output_dir/Musical_Instruments_R3_grounded/eval_knn.json"),
 ]
+# Every finished control/mode file of the grounded and intent runs.
+for run, data, folder, modes in (
+    ("L4", "Musical", "Musical_Instruments_R3_grounded", ("knn", "off", "shuffle_outcome", "latent_only", "random")),
+    ("L5", "CDs", "CDs_and_Vinyl_R3_grounded", ("knn", "off", "shuffle_outcome", "latent_only", "random")),
+    ("L6a", "Musical", "Musical_Instruments_R3_intent", ("mixture", "map", "oracle", "random", "r0")),
+    ("L6b", "Musical", "Musical_Instruments_R3_intent_margin", ("mixture", "map", "oracle", "random", "r0")),
+    ("L6c", "Musical", "Musical_Instruments_R3_intent_fixes", ("mixture", "map", "oracle", "random", "r0")),
+):
+    for mode in modes:
+        path = f"{R3}/output_dir/{folder}/eval_{mode}.json"
+        if os.path.exists(path):
+            RUNS.append((run, data, mode, path))
 K = (1, 3, 5, 10, 20)
 for dataset in INFO:
     rows = [r for r in RUNS if r[1] == dataset]
