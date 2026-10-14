@@ -19,7 +19,7 @@ def make_model(margin_weight=0.0):
     torch.manual_seed(0)
     config = Qwen2Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
                          num_attention_heads=2, num_key_value_heads=2)
-    config.latent_intent_reasoning = {"n_intents": K, "code_dim": 4, "path_hidden": 16,
+    config.latent_intent_reasoning = {"n_intents": K, "path_hidden": 16,
                                       "n_items": N_ITEMS, "item_dim": 4, "margin_weight": margin_weight}
     model = IntentLatentModel(config)
     model.attention.reset_new_parameters()
@@ -65,7 +65,7 @@ def test_training_step_trains_every_intent_module():
     assert {"mixture_loss", "prior_loss", "balance_loss", "posterior_entropy"} <= set(model.last_losses)
     out.loss.backward()
     layer = model.attention
-    assert layer.codebook.grad.abs().sum() > 0
+    assert layer.intent_heads.grad.abs().sum() > 0
     for module in (layer.path, layer.prior, layer.item_head):
         assert module[1].weight.grad.abs().sum() > 0
     assert layer.path_scale.grad is not None
@@ -122,5 +122,14 @@ def test_round_trip_through_latent_model(tmp_path):
     model.save_pretrained(tmp_path)
     loaded = LatentModel.from_pretrained(tmp_path)
     assert isinstance(loaded.attention, IntentReasoningLayer)
-    torch.testing.assert_close(loaded.attention.codebook, model.attention.codebook)
+    torch.testing.assert_close(loaded.attention.intent_heads, model.attention.intent_heads)
     torch.testing.assert_close(loaded.attention.item_emb, model.attention.item_emb)
+
+
+def test_paths_start_distinct():
+    layer = make_model().attention
+    r0 = torch.randn(8, 16)
+    unit = F.normalize(layer.paths(r0) - r0[:, None], dim=-1)
+    cos = unit @ unit.transpose(1, 2)
+    off_diagonal = cos[:, ~torch.eye(K, dtype=torch.bool)]
+    assert off_diagonal.abs().mean() < 0.5

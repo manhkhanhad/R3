@@ -60,7 +60,6 @@ def train(
     cutoff_len: int = 512,
     K: int = 0,
     n_intents: int = 4,
-    code_dim: int = 256,
     path_hidden: int = 1024,
     init_scale: float = 0.5,
     tau_item: float = 0.07,
@@ -95,7 +94,7 @@ def train(
     item_table = torch.load(item_emb_file, map_location="cpu", weights_only=False)["embeddings"].float()
     config = AutoConfig.from_pretrained(base_model)
     config.latent_intent_reasoning = {
-        "n_intents": n_intents, "code_dim": code_dim, "path_hidden": path_hidden,
+        "n_intents": n_intents, "path_hidden": path_hidden,
         "init_scale": init_scale, "tau_item": tau_item, "mixture_weight": mixture_weight,
         "prior_weight": prior_weight, "balance_weight": balance_weight, "margin": margin,
         "margin_weight": margin_weight, "n_items": int(item_table.size(0)),

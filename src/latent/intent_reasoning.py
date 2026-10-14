@@ -6,7 +6,7 @@ one of them explains the item the user actually chose.  A single deterministic
 among K reasoning paths:
 
     r0        = R3 pooling over the history
-    r_k       = r0 + g * ||r0|| * normalize(W([LN(r0); c_k]))     k = 1..K
+    r_k       = r0 + g * ||r0|| * normalize(U_k trunk(r0) + b_k)  k = 1..K
     p(k | x)  = softmax(prior(r0))                                (inference)
     q(k | x,y) ∝ p(k | x) * p_item(y | r_k)                       (training only)
 
@@ -47,17 +47,17 @@ class IntentReasoningLayer(nn.Module):
         super().__init__()
         self.base_attention = base_attention
         self.n_intents = int(spec.get("n_intents", 4))
-        code_dim = int(spec.get("code_dim", 256))
         path_hidden = int(spec.get("path_hidden", 1024))
         n_items, item_dim = int(spec["n_items"]), int(spec["item_dim"])
         self.tau_item = float(spec.get("tau_item", 0.07))
         self.balance_momentum = float(spec.get("balance_momentum", 0.99))
 
-        self.codebook = nn.Parameter(torch.zeros(self.n_intents, code_dim))
-        self.path = nn.Sequential(
-            nn.LayerNorm(hidden_size + code_dim), nn.Linear(hidden_size + code_dim, path_hidden),
-            nn.GELU(), nn.Linear(path_hidden, hidden_size),
-        )
+        # Shared trunk over the history latent, one output head per intent: independent
+        # heads start near-orthogonal, so paths are distinct before training specialises
+        # them (a single MLP over [r0; c_k] is dominated by r0 and collapses the paths).
+        self.path = nn.Sequential(nn.LayerNorm(hidden_size), nn.Linear(hidden_size, path_hidden), nn.GELU())
+        self.intent_heads = nn.Parameter(torch.zeros(self.n_intents, path_hidden, hidden_size))
+        self.intent_bias = nn.Parameter(torch.zeros(self.n_intents, hidden_size))
         self.prior = nn.Sequential(
             nn.LayerNorm(hidden_size), nn.Linear(hidden_size, 512), nn.GELU(),
             nn.Linear(512, self.n_intents),
@@ -78,7 +78,7 @@ class IntentReasoningLayer(nn.Module):
         self.last_prior_logp = None
 
     @torch.no_grad()
-    def reset_new_parameters(self, init_scale=0.5, codebook=None):
+    def reset_new_parameters(self, init_scale=0.5):
         for module in (self.path, self.prior, self.item_head):
             for layer in module:
                 if isinstance(layer, nn.Linear):
@@ -87,18 +87,14 @@ class IntentReasoningLayer(nn.Module):
                 elif isinstance(layer, nn.LayerNorm):
                     nn.init.ones_(layer.weight)
                     nn.init.zeros_(layer.bias)
-        if codebook is None:
-            nn.init.normal_(self.codebook, std=1.0)
-        else:
-            self.codebook.copy_(codebook.to(self.codebook))
+        nn.init.normal_(self.intent_heads, std=self.intent_heads.size(1) ** -0.5)
+        nn.init.zeros_(self.intent_bias)
         self.path_scale.fill_(init_scale)
 
     def paths(self, r0):
-        dtype = self.path[1].weight.dtype
-        batch = r0.size(0)
-        codes = self.codebook.to(dtype)[None].expand(batch, -1, -1)
-        base = r0.to(dtype)[:, None].expand(-1, self.n_intents, -1)
-        delta = F.normalize(self.path(torch.cat([base, codes], dim=-1)).float(), dim=-1)
+        trunk = self.path(r0.to(self.path[1].weight.dtype))
+        delta = torch.einsum("bp,kph->bkh", trunk, self.intent_heads.to(trunk.dtype)) + self.intent_bias.to(trunk.dtype)
+        delta = F.normalize(delta.float(), dim=-1)
         return r0.float()[:, None] + self.path_scale * r0.float().norm(dim=-1)[:, None, None] * delta
 
     def item_log_probs(self, r):
