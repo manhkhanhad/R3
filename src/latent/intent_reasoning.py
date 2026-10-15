@@ -29,6 +29,12 @@ Interest-collapse fixes from the multi-interest literature (all training-only):
   single history item.  (REMI's hard-negative mining targets sampled softmax; the
   item scorer here already uses a full softmax over the catalogue.)
 
+Phase 2 (DivReason, SIGIR 2026, "Reasoning Path Aggregation"): a router scores each
+path, redundancy among path offsets is suppressed, and a sharp softmax (pruned at
+inference) weights the paths into one latent.  The router is trained through the
+decoder's recommendation loss with everything else frozen.  Modes ``aggregate``,
+``aggregate_uniform`` (equal weights) and ``prior_blend`` (prior weights, no router).
+
 ``INTENT_MODE`` (eval): ``map`` (default) | ``r0`` | ``random`` | ``oracle``;
 a forced intent (set by the eval script) overrides it.
 """
@@ -47,7 +53,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from layers import LatentModel
 from reasoning_dataset import LatentRDataset
 
-INTENT_MODES = {"map", "r0", "random", "oracle"}
+INTENT_MODES = {"map", "r0", "random", "oracle", "aggregate", "aggregate_uniform", "prior_blend"}
 
 
 MAX_HISTORY = 10
@@ -131,6 +137,17 @@ class IntentReasoningLayer(nn.Module):
         self.register_buffer("item_emb", torch.zeros(n_items, item_dim, dtype=torch.float16))
         self.register_buffer("usage_ema", torch.full((self.n_intents,), 1.0 / self.n_intents),
                              persistent=False)
+        # DivReason-style path aggregation (phase 2): router score per path, redundancy
+        # suppression on path offsets, sharp softmax, pruning at inference.
+        aggregator = spec.get("aggregator") or {}
+        self.aggregator_enabled = bool(aggregator)
+        if self.aggregator_enabled:
+            self.router = nn.Sequential(nn.LayerNorm(hidden_size), nn.Linear(hidden_size, 256), nn.GELU(),
+                                        nn.Linear(256, 1))
+            self.agg_log_beta = nn.Parameter(torch.tensor(0.0))
+            self.agg_tau = float(aggregator.get("tau", 0.5))
+            self.agg_prune = float(aggregator.get("prune", 0.05))
+            self.last_aggregation = None
 
         self.forced_intent = None   # int or per-prompt tensor (eval)
         self.target_item = None     # per-row tensor (training, oracle eval)
@@ -142,6 +159,49 @@ class IntentReasoningLayer(nn.Module):
         self.last_paths = None
         self.last_selected = None
         self.last_prior_logp = None
+
+    @torch.no_grad()
+    def prepare_aggregator(self, beta=0.5):
+        """Initialise the phase-2 router (absent from phase-1 checkpoints) in fp32, so its
+        updates are not rounded away under bf16 training."""
+        for layer in self.router:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
+            elif isinstance(layer, nn.LayerNorm):
+                nn.init.ones_(layer.weight)
+                nn.init.zeros_(layer.bias)
+        self.router.float()
+        self.agg_log_beta.data = torch.tensor(float(torch.log(torch.tensor(beta))), dtype=torch.float32,
+                                              device=self.agg_log_beta.device)
+
+    def aggregate(self, r0, paths, prior_logp, mode="aggregate"):
+        """Weights over paths -> one latent. Redundancy uses the paths' offsets from r0
+        (all paths share r0, so raw cosine would be ~1 for every pair)."""
+        batch, k = paths.shape[:2]
+        if mode == "aggregate_uniform":
+            weights = paths.new_full((batch, k), 1.0 / k)
+        elif mode == "prior_blend":
+            weights = prior_logp.exp()
+        else:
+            scores = self.router(paths.to(self.router[1].weight.dtype)).float().squeeze(-1)
+            unit = F.normalize(paths - r0.float()[:, None], dim=-1)
+            redundancy = (unit @ unit.transpose(1, 2)).sum(-1) - 1.0
+            scores = scores - self.agg_log_beta.float().exp() * redundancy
+            weights = (scores / self.agg_tau).softmax(-1)
+            if not self.training and self.agg_prune > 0:
+                keep = (weights >= self.agg_prune) | (weights == weights.max(-1, keepdim=True).values)
+                weights = weights * keep
+                weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-12)
+        with torch.no_grad():
+            self.last_aggregation = {
+                "agg_entropy": -(weights * weights.clamp_min(1e-12).log()).sum(-1).mean(),
+                "agg_max_weight": weights.max(-1).values.mean(),
+                "agg_prior_agree": (weights.argmax(-1) == prior_logp.argmax(-1)).float().mean(),
+                "agg_beta": self.agg_log_beta.float().exp() if self.aggregator_enabled else weights.new_zeros(()),
+            }
+        self.last_selected = weights.argmax(-1)
+        return torch.einsum("bk,bkh->bh", weights, paths)
 
     @torch.no_grad()
     def reset_new_parameters(self, init_scale=0.5):
@@ -308,9 +368,14 @@ class IntentReasoningLayer(nn.Module):
         elif self.forced_intent is not None:
             selected = self._expand(self.forced_intent, batch, r0.device)
         else:
-            mode = os.environ.get("INTENT_MODE", "map")
+            default = "aggregate" if self.aggregator_enabled else "map"
+            mode = os.environ.get("INTENT_MODE", default)
             if mode not in INTENT_MODES:
                 raise ValueError(f"unknown INTENT_MODE {mode}")
+            if mode == "aggregate" and not self.aggregator_enabled:
+                raise ValueError("INTENT_MODE=aggregate needs a checkpoint with a trained aggregator")
+            if mode in {"aggregate", "aggregate_uniform", "prior_blend"}:
+                return self.aggregate(r0, paths, prior_logp, mode).to(r0.dtype)
             if mode == "r0":
                 self.last_selected = None
                 return r0

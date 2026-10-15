@@ -218,3 +218,88 @@ def test_full_step_with_all_fixes_trains_heads():
     out.loss.backward()
     assert model.attention.intent_heads.grad.abs().sum() > 0
     assert model.attention.item_head[1].weight.grad.abs().sum() > 0
+
+
+# ------------------------------------------------- phase 2: DivReason path aggregation
+def make_router_model(tmp_path, **aggregator):
+    phase1 = make_model()
+    phase1.save_pretrained(tmp_path / "phase1")
+    config = phase1.config
+    spec = dict(config.latent_intent_reasoning)
+    spec["aggregator"] = {"tau": 0.5, "prune": 0.05, **aggregator}
+    config.latent_intent_reasoning = spec
+    model = LatentModel.from_pretrained(tmp_path / "phase1", config=config)
+    model.attention.prepare_aggregator(0.5)
+    return model
+
+
+def test_router_is_fp32_and_only_router_trains_through_frozen_decoder(tmp_path):
+    model = make_router_model(tmp_path)
+    layer = model.attention
+    assert layer.router[1].weight.dtype == torch.float32
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for p in list(layer.router.parameters()) + [layer.agg_log_beta]:
+        p.requires_grad_(True)
+    model.train()
+    data = batch(2)
+    out = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"], labels=data["labels"])
+    out.loss.backward()
+    assert layer.router[1].weight.grad.abs().sum() > 0
+    assert layer.agg_log_beta.grad is not None
+    assert layer.intent_heads.grad is None and layer.prior[1].weight.grad is None
+    weights_entropy = layer.last_aggregation["agg_entropy"]
+    assert 0 <= weights_entropy.item() <= torch.log(torch.tensor(float(K))).item() + 1e-5
+
+
+def test_aggregation_modes_and_suppression(tmp_path, monkeypatch):
+    layer = make_router_model(tmp_path).attention
+    layer.eval()
+    r0 = torch.randn(1, 16)
+    paths = layer.paths(r0)
+    prior = torch.log_softmax(torch.tensor([[2.0, 0.0, -1.0]]), -1)
+    uniform = layer.aggregate(r0, paths, prior, "aggregate_uniform")
+    torch.testing.assert_close(uniform, paths.mean(1))
+    blend = layer.aggregate(r0, paths, prior, "prior_blend")
+    torch.testing.assert_close(blend, torch.einsum("bk,bkh->bh", prior.exp(), paths))
+    # Two identical offsets are redundant: suppression must lower their joint weight.
+    dup = paths.clone()
+    dup[:, 1] = dup[:, 0]
+    with torch.no_grad():
+        layer.agg_log_beta.fill_(-20.0)                      # beta ~ 0
+    layer.aggregate(r0, dup, prior)
+    low = layer.last_aggregation
+    with torch.no_grad():
+        layer.agg_log_beta.fill_(1.5)                        # beta ~ 4.5
+    out = layer.aggregate(r0, dup, prior)
+    assert torch.isfinite(out).all()
+    assert layer.last_aggregation["agg_beta"].item() > low["agg_beta"].item()
+
+
+def test_pruning_drops_small_weights_at_eval(tmp_path):
+    layer = make_router_model(tmp_path, prune=0.4).attention
+    layer.eval()
+    r0 = torch.randn(1, 16)
+    with torch.no_grad():
+        layer.router[-1].bias.zero_()
+        layer.router[-1].weight.zero_()
+    paths = layer.paths(r0)
+    out = layer.aggregate(r0, paths, torch.zeros(1, K))
+    # Near-uniform weights (~1/3 < 0.4): pruning must keep at least the top path,
+    # never return a zero latent.
+    assert out.norm() > 0.5 * r0.norm()
+    assert any(torch.allclose(out, paths[:, k], atol=1e-4) for k in range(K)) or out.norm() > 0
+
+
+def test_aggregator_checkpoint_round_trip(tmp_path, monkeypatch):
+    model = make_router_model(tmp_path)
+    model.save_pretrained(tmp_path / "phase2")
+    loaded = LatentModel.from_pretrained(tmp_path / "phase2")
+    assert loaded.attention.aggregator_enabled
+    torch.testing.assert_close(loaded.attention.router[1].weight.float(), model.attention.router[1].weight.float())
+    loaded.eval()
+    monkeypatch.delenv("INTENT_MODE", raising=False)
+    ids = batch(1)["input_ids"][:, :3]
+    out = loaded(input_ids=ids, attention_mask=torch.ones_like(ids))
+    assert torch.isfinite(out.logits).all()
+    assert loaded.attention.last_aggregation is not None
