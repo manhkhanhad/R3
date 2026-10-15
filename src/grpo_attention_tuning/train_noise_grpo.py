@@ -49,6 +49,18 @@ def train(
     local_rank: int = 0,
     wandb_run_name: str = None,
 
+    # collaborative InfoNCE during GRPO (collab_grpo.py); off by default = stock stage 2
+    collab: bool = False,
+    collab_nll_gate_quantile: float = 0.25,
+    collab_nll_gate_window: int = 1024,
+    collab_bank_size: int = 10_000,
+    collab_max_per_user: int = 2,
+    collab_max_per_target: int = 4,
+    collab_dedup_cos: float = 0.9,
+    collab_calibration_steps: int = 20,
+    collab_target_ratio: float = 0.3,
+    collab_prefill_batch_size: int = 8,
+
 ):
     init_training_run(
         dataset=category,
@@ -110,9 +122,15 @@ def train(
             return hash_dict[hash_number]
         return []
 
-    train_data = D3Dataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed,
+    dataset_class = D3Dataset
+    if collab:
+        from collab_grpo import D3CollabDataset
+        dataset_class = D3CollabDataset
+        if micro_batch_size != num_generations:
+            raise ValueError("collab GRPO needs micro_batch_size == num_generations (one group per micro-batch)")
+    train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed,
                            category=category, test=False)
-    val_data = D3Dataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed,
+    val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed,
                          category=category, test=False)
 
     print("LOAD DATA FINISHED")
@@ -131,7 +149,29 @@ def train(
         return [1 if strip_(com) == strip_(tar) else 0 for com, tar in zip(completions, targets)]
 
     reward_funcs = [reward]
-    trainer = NoiseGRPORecTrainer(
+    trainer_class, trainer_kwargs = NoiseGRPORecTrainer, {}
+    if collab:
+        from collab_grpo import CollaborativeGRPOTrainer, build_collab_module, prefill_queue
+        from transformers import DataCollatorForSeq2Seq
+        module = build_collab_module(model.config.hidden_size, bank_size=collab_bank_size,
+                                     nll_gate_window=collab_nll_gate_window, checkpoint=base_model)
+        module.nll_gate_quantile = collab_nll_gate_quantile
+        module.bank_max_per_user = collab_max_per_user
+        module.bank_max_per_target = collab_max_per_target
+        module.bank_dedup_cos = collab_dedup_cos
+        model.collab = module  # trained (projection heads) and saved with the model
+        print(f"collab GRPO: gate q={collab_nll_gate_quantile} (window {collab_nll_gate_window}), "
+              f"queue={collab_bank_size}, caps user/target={collab_max_per_user}/{collab_max_per_target}, "
+              f"dedup cos={collab_dedup_cos}, lambda calibration {collab_calibration_steps} steps "
+              f"to ratio {collab_target_ratio}", flush=True)
+        model.to("cuda")
+        prefill_queue(model, hf_train_dataset,
+                      DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True),
+                      collab_prefill_batch_size, "cuda")
+        trainer_class = CollaborativeGRPOTrainer
+        trainer_kwargs = dict(calibration_steps=collab_calibration_steps, target_ratio=collab_target_ratio)
+    trainer = trainer_class(
+        **trainer_kwargs,
     # from grpo_trainer import HalfGRPORecTrainer
     # trainer = HalfGRPORecTrainer(
         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
