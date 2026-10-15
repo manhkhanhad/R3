@@ -22,6 +22,8 @@ for run, data, folder, modes in (
     ("L6a", "Musical", "Musical_Instruments_R3_intent", ("mixture", "map", "oracle", "random", "r0")),
     ("L6b", "Musical", "Musical_Instruments_R3_intent_margin", ("mixture", "map", "oracle", "random", "r0")),
     ("L6c", "Musical", "Musical_Instruments_R3_intent_fixes", ("mixture", "map", "oracle", "random", "r0")),
+    ("L6d-valid", "Musical", "Musical_Instruments_R3_intent_router_valid", ("aggregate", "prior_blend", "aggregate_uniform")),
+    ("L6d-train", "Musical", "Musical_Instruments_R3_intent_router_train", ("aggregate", "prior_blend", "aggregate_uniform")),
 ):
     for mode in modes:
         path = f"{R3}/output_dir/{folder}/eval_{mode}.json"
