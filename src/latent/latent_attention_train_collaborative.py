@@ -36,6 +36,9 @@ class CollaborativeLogCallback(transformers.TrainerCallback):
             ("last_cf_positive_rate", "cf_positive_rate"),
             ("last_queue_accept_rate", "queue_accept_rate"),
             ("last_queue_count", "queue_count"),
+            ("last_nll_gate_threshold", "nll_gate_threshold"),
+            ("last_queue_user_diversity", "queue_user_diversity"),
+            ("last_queue_replaced", "queue_replaced"),
         ):
             value = getattr(target, attr, None)
             logs[key] = value.item() if value is not None else None
@@ -111,6 +114,11 @@ def train(
     num_negatives: int = 256,
     positive_min_token_accuracy: float = 1.0,
     positive_max_nll: float = float("inf"),
+    nll_gate_quantile: float = 0.0,
+    nll_gate_window: int = 1024,
+    bank_max_per_user: int = 0,
+    bank_max_per_target: int = 0,
+    bank_dedup_cos: float = 0.0,
     title_cf_positives: bool = False,
     title_positive_floor: float = 0.25,
     cf_contrastive_weight: float = 0.1,
@@ -155,6 +163,7 @@ def train(
         "bank_size": bank_size,
         "title_feature_dim": 0 if title_vectors is None else title_vectors.shape[1],
         "cf_topk": 0 if cf_neighbors is None else cf_neighbors.shape[1],
+        "nll_gate_window": nll_gate_window,
     }
     model = CollaborativeContrastiveLatentModel.from_pretrained(
         base_model, config=config, torch_dtype=torch.bfloat16,
@@ -173,6 +182,10 @@ def train(
     model.num_negatives = num_negatives
     model.positive_min_token_accuracy = positive_min_token_accuracy
     model.positive_max_nll = positive_max_nll
+    model.nll_gate_quantile = nll_gate_quantile
+    model.bank_max_per_user = bank_max_per_user
+    model.bank_max_per_target = bank_max_per_target
+    model.bank_dedup_cos = bank_dedup_cos
     model.grad_accum_steps = gradient_accumulation_steps
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -188,7 +201,10 @@ def train(
         f"epochs={num_epochs}, queue={bank_size}, projection={projection_dim}, "
         f"temperature={temperature}, user_weight={user_contrastive_weight}, "
         f"target_weight={target_contrastive_weight}, "
-        f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}"
+        f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}, "
+        f"nll_gate_quantile={nll_gate_quantile} (window {nll_gate_window}), "
+        f"per_user_cap={bank_max_per_user}, per_target_cap={bank_max_per_target}, "
+        f"dedup_cos={bank_dedup_cos}"
     )
     train_data = CollaborativeContrastiveDataset(
         train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,

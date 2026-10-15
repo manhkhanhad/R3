@@ -76,6 +76,22 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         self.register_buffer("bank_pointer", torch.zeros((), dtype=torch.int64), persistent=False)
         self.register_buffer("bank_count", torch.zeros((), dtype=torch.int64), persistent=False)
 
+        # Relative NLL gate: admit a sample when its NLL is within the best
+        # ``nll_gate_quantile`` of the last ``nll_gate_window`` training samples.
+        self.nll_gate_quantile = 0.0   # 0 = off
+        self.nll_gate_window = int(settings.get("nll_gate_window", 1024))
+        self.register_buffer("nll_history", torch.zeros(self.nll_gate_window), persistent=False)
+        self.register_buffer("nll_history_pointer", torch.zeros((), dtype=torch.int64), persistent=False)
+        self.register_buffer("nll_history_count", torch.zeros((), dtype=torch.int64), persistent=False)
+
+        # Diversity-aware insertion (all 0 = plain FIFO); see ``_push_bank_diverse``.
+        self.bank_max_per_user = 0
+        self.bank_max_per_target = 0
+        self.bank_dedup_cos = 0.0
+        self.register_buffer("bank_time", torch.zeros(self.bank_size, dtype=torch.int64), persistent=False)
+        self.register_buffer("bank_valid", torch.zeros(self.bank_size, dtype=torch.bool), persistent=False)
+        self.register_buffer("bank_clock", torch.zeros((), dtype=torch.int64), persistent=False)
+
         self.temperature = 0.1
         self.user_contrastive_weight = 0.1
         self.target_contrastive_weight = 0.1
@@ -97,6 +113,9 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         self.last_cf_positive_rate = None
         self.last_queue_accept_rate = None
         self.last_queue_count = None
+        self.last_nll_gate_threshold = None
+        self.last_queue_user_diversity = None
+        self.last_queue_replaced = None
 
     def _thought_positions(self, input_ids):
         thought_token_id = self.model.embed_tokens.num_embeddings - 1
@@ -137,8 +156,25 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             num_logits_to_keep=num_logits_to_keep,
         )
 
+    def _diverse_queue(self):
+        return bool(
+            getattr(self, "bank_max_per_user", 0) or getattr(self, "bank_max_per_target", 0)
+            or getattr(self, "bank_dedup_cos", 0.0)
+        )
+
+    def _slot_order(self):
+        """Occupied slots of the diversity-aware queue, oldest to newest."""
+        slots = torch.nonzero(self.bank_valid, as_tuple=False).flatten()
+        return slots[torch.argsort(self.bank_time[slots], stable=True)]
+
     def _bank_view(self):
         """Return valid queue entries in oldest-to-newest FIFO order."""
+        if self._diverse_queue():
+            order = self._slot_order()
+            return (
+                self.bank_r[order], self.bank_user[order], self.bank_target[order],
+                self.bank_sample[order], self.bank_nll[order],
+            )
         count = int(self.bank_count.item())
         if count == 0:
             return (
@@ -162,6 +198,9 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         )
 
     def _bank_aux_view(self):
+        if self._diverse_queue():
+            order = self._slot_order()
+            return self.bank_title[order], self.bank_item[order]
         count = int(self.bank_count.item())
         if count < self.bank_size:
             return self.bank_title[:count], self.bank_item[:count]
@@ -188,6 +227,16 @@ class CollaborativeContrastiveLatentModel(LatentModel):
                 self.bank_title.device, dtype=self.bank_title.dtype
             )
             item = target_item_index.detach()[keep].to(self.bank_item.device)
+
+        if self._diverse_queue():
+            values = {
+                "bank_r": r, "bank_user": user_hash, "bank_target": target_hash,
+                "bank_sample": sample_hash, "bank_nll": nll,
+            }
+            if getattr(self, "title_feature_dim", 0):
+                values.update(bank_title=title, bank_item=item)
+            self._push_bank_diverse(values)
+            return
 
         if r.size(0) > self.bank_size:
             r, user_hash, target_hash, sample_hash, nll = (
@@ -216,6 +265,74 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             copy_ring(self.bank_item, item)
         self.bank_pointer.fill_((pointer + r.size(0)) % self.bank_size)
         self.bank_count.fill_(min(self.bank_size, int(self.bank_count.item()) + r.size(0)))
+
+    @torch.no_grad()
+    def _push_bank_diverse(self, values):
+        """Insert entries one by one, choosing the slot in this order:
+
+        1. near-duplicate: an entry of the same user with cosine >= ``bank_dedup_cos``
+           is refreshed by the new latent;
+        2. per-user cap: a user holding ``bank_max_per_user`` entries has its oldest replaced;
+        3. per-target cap: likewise for ``bank_max_per_target``;
+        4. otherwise an empty slot, else the globally oldest entry (FIFO).
+        """
+        clock = int(self.bank_clock.item())
+        replaced = 0
+        for row in range(values["bank_r"].size(0)):
+            slot = None
+            same_user = torch.nonzero(
+                self.bank_valid & (self.bank_user == values["bank_user"][row]), as_tuple=False
+            ).flatten()
+            if self.bank_dedup_cos and same_user.numel():
+                cosine = F.cosine_similarity(
+                    self.bank_r[same_user].float(), values["bank_r"][row].float()[None], dim=-1
+                )
+                best = int(cosine.argmax())
+                if cosine[best] >= self.bank_dedup_cos:
+                    slot = same_user[best]
+            if slot is None and self.bank_max_per_user and same_user.numel() >= self.bank_max_per_user:
+                slot = same_user[self.bank_time[same_user].argmin()]
+            if slot is None and self.bank_max_per_target:
+                same_target = torch.nonzero(
+                    self.bank_valid & (self.bank_target == values["bank_target"][row]), as_tuple=False
+                ).flatten()
+                if same_target.numel() >= self.bank_max_per_target:
+                    slot = same_target[self.bank_time[same_target].argmin()]
+            if slot is not None:
+                replaced += 1
+            else:
+                free = torch.nonzero(~self.bank_valid, as_tuple=False).flatten()
+                slot = free[0] if free.numel() else self.bank_time.argmin()
+            for name, value in values.items():
+                getattr(self, name)[slot] = value[row]
+            self.bank_time[slot] = clock
+            self.bank_valid[slot] = True
+            clock += 1  # strict order within a micro-batch
+        self.bank_clock.fill_(clock)
+        self.bank_count.fill_(int(self.bank_valid.sum()))
+        self.last_queue_replaced = torch.tensor(float(replaced))
+
+    @torch.no_grad()
+    def _nll_gate(self, example_nll):
+        """True for samples whose NLL is within the best ``nll_gate_quantile`` of recent
+        training samples (the current micro-batch included)."""
+        nll = example_nll.detach().float().to(self.nll_history.device)
+        for value in nll:
+            self.nll_history[int(self.nll_history_pointer.item())] = value
+            self.nll_history_pointer.fill_((int(self.nll_history_pointer.item()) + 1) % self.nll_gate_window)
+        self.nll_history_count.fill_(min(self.nll_gate_window, int(self.nll_history_count.item()) + nll.numel()))
+        history = self.nll_history[: int(self.nll_history_count.item())]
+        threshold = torch.quantile(history, self.nll_gate_quantile)
+        self.last_nll_gate_threshold = threshold.detach()
+        return (nll <= threshold).to(example_nll.device)
+
+    @torch.no_grad()
+    def _queue_user_diversity(self):
+        """Distinct users per queue entry (1.0 = every entry from a different user)."""
+        bank_user = self._bank_view()[1]
+        if bank_user.numel() == 0:
+            return torch.tensor(0.0)
+        return torch.tensor(torch.unique(bank_user).numel() / bank_user.numel())
 
     @staticmethod
     def _sample(indices, limit):
@@ -385,6 +502,8 @@ class CollaborativeContrastiveLatentModel(LatentModel):
             (token_accuracy >= self.positive_min_token_accuracy)
             & (example_nll <= self.positive_max_nll)
         )
+        if getattr(self, "nll_gate_quantile", 0.0):
+            quality &= self._nll_gate(example_nll)
 
         user_loss, target_loss, cf_loss, user_rate, target_rate, cf_rate = self._collaborative_losses(
             r, user_hash, target_hash, sample_hash, quality,
@@ -404,6 +523,7 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         self.last_cf_positive_rate = cf_rate
         self.last_queue_accept_rate = quality.float().mean().detach()
         self.last_queue_count = self.bank_count.detach().clone()
+        self.last_queue_user_diversity = self._queue_user_diversity()
 
         total_loss = (
             ce_loss

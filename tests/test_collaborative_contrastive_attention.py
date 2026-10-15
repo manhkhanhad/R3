@@ -245,3 +245,103 @@ def test_title_cf_training_forward_and_queue_prefill():
     assert torch.isfinite(output.loss)
     output.loss.backward()
     assert model.cf_projection[1].weight.grad is not None
+
+
+def make_diverse_model(bank_size=4, per_user=0, per_target=0, dedup=0.0, window=8, gate=0.0):
+    model = make_model(bank_size=bank_size)
+    model.bank_max_per_user = per_user
+    model.bank_max_per_target = per_target
+    model.bank_dedup_cos = dedup
+    model.nll_gate_quantile = gate
+    model.nll_gate_window = window
+    model.register_buffer("bank_time", torch.zeros(bank_size, dtype=torch.int64), persistent=False)
+    model.register_buffer("bank_valid", torch.zeros(bank_size, dtype=torch.bool), persistent=False)
+    model.register_buffer("bank_clock", torch.zeros((), dtype=torch.int64), persistent=False)
+    model.register_buffer("nll_history", torch.zeros(window), persistent=False)
+    model.register_buffer("nll_history_pointer", torch.zeros((), dtype=torch.int64), persistent=False)
+    model.register_buffer("nll_history_count", torch.zeros((), dtype=torch.int64), persistent=False)
+    return model
+
+
+def push_rows(model, rows):
+    """rows: (r0, r1, user, target, sample)."""
+    rows = torch.tensor(rows, dtype=torch.float32)
+    model._push_bank(
+        rows[:, :2], rows[:, 2].long(), rows[:, 3].long(), rows[:, 4].long(),
+        torch.zeros(len(rows)), torch.ones(len(rows), dtype=torch.bool),
+    )
+
+
+def test_diverse_queue_without_limits_matches_fifo():
+    model = make_diverse_model(bank_size=3, per_target=100)  # active but never binding
+    push_rows(model, [(1, 0, 1, 11, 1), (2, 0, 2, 12, 2)])
+    push_rows(model, [(3, 0, 3, 13, 3), (4, 0, 4, 14, 4)])
+    torch.testing.assert_close(model._bank_view()[0].float()[:, 0], torch.tensor([2.0, 3.0, 4.0]))
+
+
+def test_per_user_cap_replaces_that_users_oldest_entry():
+    model = make_diverse_model(bank_size=4, per_user=2)
+    push_rows(model, [(1, 0, 7, 11, 1), (1, 1, 8, 12, 2), (0, 1, 7, 13, 3)])
+    push_rows(model, [(-1, 0, 7, 14, 4)])  # user 7 already holds 2: replace its oldest (sample 1)
+    bank_r, bank_user, _, bank_sample, _ = model._bank_view()
+    assert sorted(bank_sample.tolist()) == [2, 3, 4]
+    assert (bank_user == 7).sum() == 2
+    assert int(model.last_queue_replaced) == 1
+
+
+def test_per_target_cap_replaces_that_targets_oldest_entry():
+    model = make_diverse_model(bank_size=4, per_target=1)
+    push_rows(model, [(1, 0, 1, 50, 1), (0, 1, 2, 60, 2)])
+    push_rows(model, [(-1, 0, 3, 50, 3)])
+    _, _, bank_target, bank_sample, _ = model._bank_view()
+    assert sorted(bank_sample.tolist()) == [2, 3]
+    assert (bank_target == 50).sum() == 1
+
+
+def test_near_duplicate_of_same_user_refreshes_slot_but_other_users_do_not():
+    model = make_diverse_model(bank_size=4, dedup=0.9)
+    push_rows(model, [(1, 0, 7, 11, 1)])
+    push_rows(model, [(1, 0.1, 7, 12, 2)])   # cos ~0.995 with user 7's entry: replaces it
+    push_rows(model, [(1, 0.1, 8, 13, 3)])   # same vector, different user: added
+    push_rows(model, [(0, 1, 7, 14, 4)])     # user 7 but dissimilar: added
+    _, bank_user, _, bank_sample, _ = model._bank_view()
+    assert bank_sample.tolist() == [2, 3, 4]
+    assert bank_user.tolist() == [7, 8, 7]
+
+
+def test_full_diverse_queue_evicts_globally_oldest():
+    model = make_diverse_model(bank_size=2, per_user=5)
+    push_rows(model, [(1, 0, 1, 11, 1), (2, 0, 2, 12, 2)])
+    push_rows(model, [(3, 0, 3, 13, 3)])
+    assert model._bank_view()[3].tolist() == [2, 3]
+
+
+def test_relative_nll_gate_keeps_best_quantile_of_recent_samples():
+    model = make_diverse_model(window=8, gate=0.25)
+    first = model._nll_gate(torch.tensor([4.0, 3.0, 2.0, 1.0]))
+    assert first.tolist() == [False, False, False, True]   # 25% quantile of {1,2,3,4} = 1.75
+    second = model._nll_gate(torch.tensor([0.5, 5.0, 6.0, 7.0]))
+    # window now {4,3,2,1,0.5,5,6,7}: 25% quantile = 1.75, so only 0.5 passes
+    assert second.tolist() == [True, False, False, False]
+    third = model._nll_gate(torch.tensor([9.0, 9.0, 9.0, 9.0]))  # oldest four evicted
+    assert third.tolist() == [False, False, False, False]
+    torch.testing.assert_close(model.last_nll_gate_threshold, torch.quantile(
+        torch.tensor([0.5, 5.0, 6.0, 7.0, 9.0, 9.0, 9.0, 9.0]), 0.25))
+
+
+def test_training_forward_with_nll_gate_and_diverse_queue():
+    model = make_tiny_training_model()
+    model.positive_min_token_accuracy = 0.0
+    model.nll_gate_quantile = 0.25
+    model.bank_max_per_user, model.bank_max_per_target, model.bank_dedup_cos = 2, 4, 0.9
+    batch = tiny_batch()
+    for _ in range(3):
+        output = model(**batch)
+        assert torch.isfinite(output.loss)
+        output.loss.backward()
+    assert model.last_nll_gate_threshold is not None
+    assert 0 < int(model.bank_count) <= 3 * 3
+    assert int(model.bank_count) == int(model.bank_valid.sum())
+    assert 0.0 < float(model.last_queue_user_diversity) <= 1.0
+    users = model._bank_view()[1]
+    assert int(torch.unique(users, return_counts=True)[1].max()) <= 2
