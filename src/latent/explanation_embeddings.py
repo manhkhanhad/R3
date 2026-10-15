@@ -119,6 +119,24 @@ class Encoder:
         return result
 
 
+class SentenceTransformerEncoder:
+    """``SentenceTransformer(path).encode(documents)``: the model's own pooling/normalize
+    modules (Qwen3-Embedding: last token, L2), no prompt for documents.  ``dim`` > 0
+    truncates (Matryoshka); 0 keeps the full width."""
+
+    def __init__(self, path, dim, max_length):
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer(path, truncate_dim=dim or None,
+                                         model_kwargs={"dtype": torch.bfloat16},
+                                         tokenizer_kwargs={"padding_side": "left"})
+        self.model.max_seq_length = max_length
+        print(self.model)
+
+    def __call__(self, texts, batch_size):
+        return self.model.encode(texts, batch_size=batch_size, convert_to_tensor=True,
+                                 normalize_embeddings=True, show_progress_bar=True).float().cpu()
+
+
 def encode(model, texts, batch_size):
     return model(texts, batch_size)
 
@@ -127,8 +145,10 @@ def item_probe(model, embeddings, train, item_table, item_titles, batch_size, n=
     """Cosine of the feature view to the true target item vs a random item."""
     table = torch.load(item_table, map_location="cpu", weights_only=False)
     items = torch.nn.functional.normalize(table["embeddings"].float(), dim=-1)
+    width = items.size(1)  # compare in the item table's (Matryoshka) width
+    narrow = lambda x: torch.nn.functional.normalize(x.float()[:, :width], dim=-1)
     rows = torch.nonzero(embeddings["mask"]).flatten()
-    feature = embeddings["feature"][rows].float()
+    feature = narrow(embeddings["feature"][rows])
     target = torch.as_tensor(train["item_id"].to_numpy()[rows.numpy()])
     true_cos = (feature * items[target]).sum(-1)
     generator = torch.Generator().manual_seed(seed)
@@ -143,7 +163,7 @@ def item_probe(model, embeddings, train, item_table, item_titles, batch_size, n=
     }
     # Same-space check: re-encode some titles and compare with the stored table.
     sample = torch.randperm(len(item_titles), generator=generator)[:n]
-    fresh = encode(model, [item_titles[i] for i in sample], batch_size)
+    fresh = narrow(encode(model, [item_titles[i] for i in sample], batch_size))
     report["item_table_recode_cos"] = (fresh * items[sample]).sum(-1).mean().item()
     return report
 
@@ -154,7 +174,8 @@ def main():
     parser.add_argument("--train_csv", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default="Qwen/Qwen3-Embedding-8B")
-    parser.add_argument("--dim", type=int, default=1536)
+    parser.add_argument("--dim", type=int, default=1536, help="truncate to this width; 0 = full")
+    parser.add_argument("--backend", choices=("transformers", "sentence-transformers"), default="transformers")
     parser.add_argument("--window", type=int, default=10, help="history window used by the generator")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_seq_length", type=int, default=1024)
@@ -173,7 +194,10 @@ def main():
         raise SystemExit("explanations are not aligned with the train CSV; refusing to write")
     rows = sorted(explained)[: args.limit or None]
 
-    model = Encoder(args.model, args.dim, args.pooling, args.max_seq_length)
+    if args.backend == "sentence-transformers":
+        model = SentenceTransformerEncoder(args.model, args.dim, args.max_seq_length)
+    else:
+        model = Encoder(args.model, args.dim or 10**9, args.pooling, args.max_seq_length)
 
     mask = torch.zeros(len(train), dtype=torch.bool)
     mask[rows] = True
@@ -189,7 +213,8 @@ def main():
     with open(args.explanations, "rb") as handle:
         source_sha = hashlib.sha256(handle.read()).hexdigest()
     result.update({
-        "views": list(VIEWS), "model": args.model, "dim": args.dim, "normalized": True,
+        "views": list(VIEWS), "model": args.model, "dim": result["feature"].size(1), "normalized": True,
+        "backend": args.backend,
         "explanations": os.path.abspath(args.explanations), "explanations_sha256": source_sha,
         "train_csv": os.path.abspath(args.train_csv), "n_rows": len(train), "n_explained": len(rows),
     })

@@ -20,7 +20,9 @@
 # explanation file unless ALLOW_PARTIAL=1; while generation runs it resubmits itself
 # every 30 min (WAIT_FOR_GENERATION=0 to fail instead). Embedding = hidden state of
 # the last token (<|endoftext|>), truncated to 1536 and L2-normalized.
-# Env: CODE_ROOT, EXPLANATIONS_DIR, OUTPUT, LIMIT, BATCH_SIZE, ALLOW_PARTIAL, WAIT_FOR_GENERATION.
+# BACKEND=sentence-transformers uses SentenceTransformer(model).encode(docs); DIM=0 keeps 4096.
+# Env: CODE_ROOT, EXPLANATIONS_DIR, OUTPUT, LIMIT, BATCH_SIZE, ALLOW_PARTIAL, WAIT_FOR_GENERATION,
+#      BACKEND, DIM.
 
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -62,7 +64,8 @@ python "${code}/src/latent/explanation_embeddings.py" \
     --explanations "${expl}/candidates.jsonl" \
     --train_csv "${data}/train/${category}_5_2015-10-2018-11.csv" \
     --output "${output}" \
-    --model Qwen/Qwen3-Embedding-8B --dim 1536 --pooling last --window 10 \
+    --model Qwen/Qwen3-Embedding-8B --backend "${BACKEND:-transformers}" --dim "${DIM:-1536}" \
+    --pooling last --window 10 \
     --batch_size "${batch}" --limit "${LIMIT:-0}" \
     --item_table "${data}/info/${category}_qwen3emb_1536.pt" \
     --item_info "${data}/info/${category}_5_2015-10-2018-11.txt"
