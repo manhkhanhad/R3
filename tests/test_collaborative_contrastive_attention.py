@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -345,3 +346,12 @@ def test_training_forward_with_nll_gate_and_diverse_queue():
     assert 0.0 < float(model.last_queue_user_diversity) <= 1.0
     users = model._bank_view()[1]
     assert int(torch.unique(users, return_counts=True)[1].max()) <= 2
+
+
+def test_nll_gate_works_when_history_buffer_was_cast_to_bf16():
+    model = make_diverse_model(window=8, gate=0.25)
+    model.nll_history = model.nll_history.to(torch.bfloat16)  # as from_pretrained(torch_dtype=bf16) does
+    passed = model._nll_gate(torch.tensor([4.0, 3.0, 2.0, 1.001]))
+    assert passed.tolist() == [False, False, False, True]
+    assert model.nll_history.dtype == torch.float32
+    assert float(model.nll_history[3]) == pytest.approx(1.001)

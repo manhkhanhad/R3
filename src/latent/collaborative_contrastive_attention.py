@@ -316,6 +316,9 @@ class CollaborativeContrastiveLatentModel(LatentModel):
     def _nll_gate(self, example_nll):
         """True for samples whose NLL is within the best ``nll_gate_quantile`` of recent
         training samples (the current micro-batch included)."""
+        if self.nll_history.dtype != torch.float32:
+            # from_pretrained(torch_dtype=bf16) casts float buffers; keep NLLs at full precision.
+            self.nll_history = self.nll_history.float()
         nll = example_nll.detach().float().to(self.nll_history.device)
         for value in nll:
             self.nll_history[int(self.nll_history_pointer.item())] = value
