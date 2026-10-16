@@ -144,12 +144,28 @@ def prefill_queue(model, dataset, collator, batch_size, device, log_every=4096):
 
 
 class CollaborativeGRPOTrainer(NoiseGRPORecTrainer):
-    def __init__(self, *args, calibration_steps=20, target_ratio=0.3, **kwargs):
+    def __init__(self, *args, calibration_steps=20, target_ratio=0.3, min_active_micro_batches=8, **kwargs):
         super().__init__(*args, **kwargs)
         self.calibration_steps = calibration_steps
         self.target_ratio = target_ratio
+        self.min_active_micro_batches = min_active_micro_batches
         self.collab_lambda = None if calibration_steps > 0 else target_ratio
         self._grad_norms = {"grpo": [], "infonce": []}
+        self._calibration_wait_logged = False
+
+    def _maybe_finish_calibration(self):
+        """Calibrate lambda once ``calibration_steps`` have passed AND enough micro-batches
+        had an active InfoNCE term.  Until then lambda stays 0: anchors without positives
+        contribute zero loss (as in stage 1) and training is pure GRPO."""
+        if self.collab_lambda is not None or self.state.global_step < self.calibration_steps:
+            return
+        if len(self._grad_norms["infonce"]) >= self.min_active_micro_batches:
+            self._finish_calibration()
+        elif not self._calibration_wait_logged:
+            print(f"collab: only {len(self._grad_norms['infonce'])} micro-batches with an active InfoNCE "
+                  f"term after {self.state.global_step} steps (need {self.min_active_micro_batches}); "
+                  "lambda stays 0 (pure GRPO) until enough positives appear", flush=True)
+            self._calibration_wait_logged = True
 
     def _generate_and_score_completions(self, inputs):
         out = super()._generate_and_score_completions(inputs)
@@ -217,8 +233,8 @@ class CollaborativeGRPOTrainer(NoiseGRPORecTrainer):
             norm = lambda grads: torch.sqrt(sum((g.float() ** 2).sum() for g in grads if g is not None)).item()
             self._grad_norms["grpo"].append(norm(g_grpo))
             self._grad_norms["infonce"].append(norm(g_info))
-        if calibrating and self.state.global_step >= self.calibration_steps:
-            self._finish_calibration()
+        if calibrating:
+            self._maybe_finish_calibration()
 
         weight = 0.0 if self.collab_lambda is None else self.collab_lambda
         self._metrics[mode]["collab_lambda"].append(weight)
