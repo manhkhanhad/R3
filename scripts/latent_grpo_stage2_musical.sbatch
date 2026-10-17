@@ -21,7 +21,8 @@
 # Settings: lr 1e-5, beta 0.01, 8 generations, epsilon 0.2/0.28, batch 256, 1 epoch,
 # one GPU.  Then: ranking (noise_eval), train-latent geometry, r interventions.
 # Env: VARIANT, BASE_MODEL, CODE_ROOT, TAG, SMOKE (1 = 256 prompts, batch 64, test 64 rows,
-#      ranking only), SKIP_TRAIN.
+#      ranking only), SKIP_TRAIN, LR (default 1e-5), EVAL (full | ranking: stop after
+#      standard ranking; geometry and interventions can be run later with SKIP_TRAIN=1).
 
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -40,6 +41,8 @@ variant="${VARIANT:?set VARIANT to collab or stock}"
 base_model="${BASE_MODEL:?set BASE_MODEL to the stage-1 checkpoint}"
 tag="${TAG:?set TAG, e.g. musical_l9b_collab}"
 smoke="${SMOKE:-0}"
+lr="${LR:-1e-5}"
+eval_mode="${EVAL:-full}"
 
 case "$variant" in
   collab) collab_args=(--collab True) ;;
@@ -66,7 +69,7 @@ info_file="${data}/info/Musical_Instruments_5_2015-1-2018-11.txt"
 task_dir="output_dir/${category}_R3_grpo_${tag}"
 out="${task_dir}/model"
 mkdir -p "$out"
-echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}"
+echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; eval ${eval_mode}"
 
 if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
   echo "[$(date --iso-8601=seconds)] GRPO stage 2"
@@ -74,7 +77,7 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
     --category "$category" --base_model "$base_model" --output_dir "$out" \
     --train_file "$train_file" --eval_file "$eval_file" --info_file "$info_file" \
     --num_generations 8 --sample "$sample" --num_epochs 1 \
-    --batch_size "$batch" --micro_batch_size 8 --lr 1e-5 --beta 0.01 --seed 42 \
+    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --beta 0.01 --seed 42 \
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28 \
     "${collab_args[@]}"
 fi
@@ -88,6 +91,7 @@ python "$code/src/grpo_attention_tuning/noise_eval.py" \
 python "$code/src/utils/merge.py" --input_path "$task_dir/" --output_path "$out/final_result.json" --nn 1
 python "$code/src/utils/calc.py" --path "$out/final_result.json" --item_path "$info_file"
 [[ "$smoke" == 1 ]] && { echo "[$(date --iso-8601=seconds)] smoke complete"; exit 0; }
+[[ "$eval_mode" == ranking ]] && { echo "[$(date --iso-8601=seconds)] ranking-only run complete"; exit 0; }
 
 log_dir="analysis/logs/R3_grpo_${tag}"
 result_dir="analysis/results/intervention/${tag}"
