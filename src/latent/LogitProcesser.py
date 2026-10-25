@@ -12,7 +12,7 @@ def get_hash(x):
     return '-'.join(x)
 
 
-def get_prefix_data(info_file, tokenizer):
+def get_prefix_data(info_file, tokenizer, n_thoughts=1):
     with open(info_file, 'r') as f:
         info = f.readlines()
         info = ["\"" + _.split('\t')[0].strip(' ') + "\"\n" for _ in info]
@@ -22,15 +22,16 @@ def get_prefix_data(info_file, tokenizer):
     prefixID = [tokenizer(_).input_ids for _ in info]
     thought_id = len(tokenizer) - 1
     for i in range(len(prefixID)):
-        prefixID[i].insert(4, thought_id)
+        prefixID[i][4:4] = [thought_id] * n_thoughts
+    start = 4 + n_thoughts  # "### Response: \n" (4 tokens) + thought tokens
     hash_dict = dict()
     for index, ID in enumerate(prefixID):
         ID.append(tokenizer.eos_token_id)
-        for i in range(5, len(ID)):
-            if i == 5:
+        for i in range(start, len(ID)):
+            if i == start:
                 hash_number = get_hash(ID[:i])
             else:
-                hash_number = get_hash(ID[5:i])
+                hash_number = get_hash(ID[start:i])
             if hash_number not in hash_dict:
                 hash_dict[hash_number] = set()
             hash_dict[hash_number].add(ID[i])
@@ -94,8 +95,10 @@ class CFEnhancedLogitsProcessor(LogitsProcessor):
         unconditional_ids: Optional[torch.LongTensor] = None,
         unconditional_attention_mask: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
+        n_thoughts: int = 1,
     ):
         self._prefix_allowed_tokens_fn = prefix_allowed_tokens_fn
+        self.n_thoughts = n_thoughts
         self.model = model
         self.unconditional_context = {
             "input_ids": unconditional_ids,
@@ -121,7 +124,7 @@ class CFEnhancedLogitsProcessor(LogitsProcessor):
             for beam_id, sent in enumerate(beam_sent):
                 if self.count == 0:
                     # hash_key = sent[-4:]
-                    hash_key = sent[-5:]
+                    hash_key = sent[-(4 + self.n_thoughts):]
                 else:
                     hash_key=sent[-self.count:]
                 hash_key = hash_key.tolist()

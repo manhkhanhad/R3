@@ -31,12 +31,17 @@ def main(checkpoint: str, test_file: str, category: str = "Musical_Instruments",
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = LatentModel.from_pretrained(checkpoint, torch_dtype=getattr(torch, dtype)).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    thoughts = getattr(model.config, "latent_continuous_thoughts", None)
     ds = LatentRDataset(train_file=test_file, tokenizer=tokenizer, max_len=2560,
-                        sample=2 * pairs, seed=0, category=CATEGORIES[category], K=0)
+                        sample=2 * pairs, seed=0, category=CATEGORIES[category], K=0,
+                        n_thoughts=int(thoughts["k"]) if thoughts else 1)
     thought = model.model.embed_tokens.num_embeddings - 1
     print("latent_bottleneck config:", getattr(model.config, "latent_bottleneck", None) is not None)
 
     def latent_of(ids):
+        if thoughts:  # continuous thoughts: the latent is the whole [1, K, H] block
+            logits_of(ids)
+            return model.thoughts.last_thoughts.clone()
         captured = {}
         model.observe_reasoning_latent = lambda latent: captured.setdefault("r", latent)
         logits_of(ids)
@@ -44,12 +49,16 @@ def main(checkpoint: str, test_file: str, category: str = "Musical_Instruments",
         return captured["r"].detach()
 
     def logits_of(ids, r=None):
-        if r is not None:
+        if r is not None and thoughts:
+            model.thoughts.override = lambda block: r.to(block.dtype).expand_as(block)
+        elif r is not None:
             model.observe_reasoning_latent = lambda latent: r.to(latent.dtype).expand_as(latent)
         x = torch.tensor([ids], device=device)
         with torch.no_grad():
             out = model(input_ids=x, attention_mask=torch.ones_like(x)).logits[0].float()
-        if r is not None:
+        if r is not None and thoughts:
+            model.thoughts.override = None
+        elif r is not None:
             del model.observe_reasoning_latent
         return out[ids.index(thought):-1]  # positions predicting the target tokens
 

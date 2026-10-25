@@ -38,7 +38,7 @@ class Tokenizer:
 
     
 class LatentRDataset(Dataset):
-    def __init__(self, train_file, tokenizer, max_len=2048, sample=-1, test = False, seed=0, category="", K=4, dedup=False):
+    def __init__(self, train_file, tokenizer, max_len=2048, sample=-1, test = False, seed=0, category="", K=4, dedup=False, n_thoughts=1):
         self.data = pd.read_csv(train_file)
         random.seed(seed)
         
@@ -50,6 +50,7 @@ class LatentRDataset(Dataset):
         self.category = category
         self.K = K
         self.dedup = dedup
+        self.n_thoughts = n_thoughts  # K contiguous <|Thought|> tokens (continuous_thoughts.py)
         self.instructs = [
         f"Given a list of {category} the user recetenly enjoy, please write a new {category} that the user may bought",
         f"Considering the {category} that has recently captured the user's interest, kindly create a compilation of other {category} that the user might have played prior to this.",
@@ -123,7 +124,7 @@ class LatentRDataset(Dataset):
         history["input"] = ""
 
         # add thought ids
-        tokens = tokens + self.tokenizer.encode("<|Thought|>", bos=False, eos=False)
+        tokens = tokens + self.tokenizer.encode("<|Thought|>", bos=False, eos=False) * self.n_thoughts
 
         attention_mask = [1] * len(tokens)
         

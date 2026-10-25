@@ -140,6 +140,10 @@ class LatentModel(Qwen2ForCausalLM):
     def __init__(self, config):
         super().__init__(config)
         # self.mlp = Noise(config.hidden_size)
+        thoughts = getattr(config, "latent_continuous_thoughts", None)
+        if thoughts:
+            from continuous_thoughts import ContinuousThoughts
+            self.thoughts = ContinuousThoughts(config.hidden_size, thoughts)
         decomposition = getattr(config, "latent_decomposition", None)
         if decomposition:
             from decomposed_attention import build_decomposed_attention
@@ -206,7 +210,26 @@ class LatentModel(Qwen2ForCausalLM):
         """Optional training hook; the baseline leaves the latent unchanged."""
         return latent
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        model = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        target = model[0] if isinstance(model, tuple) else model
+        if getattr(target.config, "latent_continuous_thoughts", None):
+            from continuous_thoughts import load_fp32_thought_params
+            load_fp32_thought_params(target, str(pretrained_model_name_or_path))
+        return model
+
     def generate_embs(self, input_ids, attention_mask):
+        if getattr(self.config, "latent_continuous_thoughts", None):
+            from continuous_thoughts import first_thought_positions
+            thought_token_id = self.model.embed_tokens.num_embeddings - 1
+            first = first_thought_positions(input_ids, thought_token_id, self.thoughts.k)
+            thoughts = self.thoughts(self.model, input_ids, attention_mask, first)
+            input_embs = self.model.embed_tokens(input_ids)
+            rows = torch.arange(input_ids.size(0), device=input_ids.device)[:, None]
+            cols = first[:, None] + torch.arange(self.thoughts.k, device=input_ids.device)[None]
+            input_embs = input_embs.index_put((rows, cols), thoughts.to(input_embs.dtype))
+            return input_embs
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
         thought_ids = self.model.embed_tokens.num_embeddings - 1  # thought id flag
@@ -238,8 +261,10 @@ class LatentModel(Qwen2ForCausalLM):
 
         thought_token_id = self.model.embed_tokens.num_embeddings - 1
         if prompt_ids is not None:
+            thoughts = getattr(self.config, "latent_continuous_thoughts", None)
             block, thought_pos = prompt_block(
-                prompt_ids, attention_mask, thought_token_id, spec["visible_prefix_ids"]
+                prompt_ids, attention_mask, thought_token_id, spec["visible_prefix_ids"],
+                n_thoughts=int(thoughts["k"]) if thoughts else 1,
             )
             self._bottleneck_block, self._bottleneck_thought_pos = block, thought_pos
         else:

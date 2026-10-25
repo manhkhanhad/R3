@@ -63,6 +63,10 @@ def train(
     # L7 structural bottleneck: target tokens see only the latent + fixed instruction
     # prefix, never the history, in training and generation (latent_bottleneck.py)
     latent_only: bool = False,
+    # Continuous thoughts (continuous_thoughts.py): "hidden" = Coconut-style K-step
+    # thoughts replacing the pooled r; "constant" = K learned vectors (baseline C)
+    thought_source: str = None,
+    n_thoughts: int = 1,
 
 ):
 
@@ -83,6 +87,9 @@ def train(
             "side_token_scale": side_token_scale,
             "category_text_file": category_text_file,
             "latent_only": latent_only,
+            "thought_source": thought_source,
+            "n_thoughts": n_thoughts,
+            "learning_rate": learning_rate,
         },
     )
 
@@ -148,6 +155,16 @@ def train(
         model_class = SideInfoLatentModel
         model_kwargs["config"] = model_config
 
+    if thought_source is not None:
+        if use_side_info or use_category_alignment or category_text_file:
+            raise ValueError("continuous thoughts are a plain-R3 variant; do not combine with other options")
+        from transformers import AutoConfig
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_continuous_thoughts = {"k": n_thoughts, "source": thought_source}
+        model_kwargs["config"] = model_config
+    elif n_thoughts != 1:
+        raise ValueError("n_thoughts > 1 needs thought_source")
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -174,6 +191,14 @@ def train(
     print("Additional special tokens:", tokenizer.additional_special_tokens)
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")['input_ids'][0] == len(tokenizer) - 1
+    if thought_source is not None:
+        # HF re-initialised the (missing) thought weights; restore the intended fp32
+        # init and put thoughts at the mean input-token-embedding norm.
+        token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
+        model.config.latent_continuous_thoughts["token_norm"] = token_norm
+        model.thoughts.token_norm.fill_(token_norm)
+        model.thoughts.reset_parameters()
+        print("continuous thoughts:", model.config.latent_continuous_thoughts)
     if use_side_info:
         # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
         token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
@@ -202,6 +227,9 @@ def train(
         category_paths = {i: p for i, p in enumerate(paths["paths"]) if paths["valid"][i]}
         dataset_class = CategoryTextLatentRDataset
         extra_train = extra_val = {"category_paths": category_paths}
+    if n_thoughts != 1:
+        extra_train = {**extra_train, "n_thoughts": n_thoughts}
+        extra_val = {**extra_val, "n_thoughts": n_thoughts}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -262,6 +290,12 @@ def train(
         ),
         callbacks = [EarlyStoppingCallback(early_stopping_patience=1)],
     )
+    if thought_source is not None:
+        from continuous_thoughts import ThoughtDiagnostics
+        # 64 validation rows spread over the file (adjacent rows share a user)
+        step = max(1, len(val_data) // 64)
+        probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
+        trainer.add_callback(ThoughtDiagnostics(probe_rows, trainer.data_collator, output_dir))
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

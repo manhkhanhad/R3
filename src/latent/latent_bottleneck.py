@@ -27,7 +27,12 @@ from typing import Optional, Sequence
 import torch
 
 
-def thought_positions(input_ids: torch.Tensor, thought_token_id: int) -> torch.Tensor:
+def thought_positions(input_ids: torch.Tensor, thought_token_id: int, n_thoughts: int = 1) -> torch.Tensor:
+    """First thought position per row.  With K continuous thoughts the K thought
+    tokens are contiguous; every query from the first one on is target-side."""
+    if n_thoughts > 1:
+        from continuous_thoughts import first_thought_positions
+        return first_thought_positions(input_ids, thought_token_id, n_thoughts)
     where = torch.nonzero(input_ids == thought_token_id)
     if where.size(0) != input_ids.size(0) or not torch.equal(
         where[:, 0], torch.arange(input_ids.size(0), device=input_ids.device)
@@ -41,6 +46,7 @@ def prompt_block(
     attention_mask: torch.Tensor,
     thought_token_id: int,
     visible_prefix_ids: Sequence[int],
+    n_thoughts: int = 1,
 ):
     """Return ``(block, thought_pos)``.
 
@@ -52,7 +58,7 @@ def prompt_block(
     batch, length = input_ids.shape
     device = input_ids.device
     valid = attention_mask.bool()
-    thought_pos = thought_positions(input_ids, thought_token_id)
+    thought_pos = thought_positions(input_ids, thought_token_id, n_thoughts)
     pos = torch.arange(length, device=device).unsqueeze(0)
     first_valid = valid.long().argmax(dim=1, keepdim=True)  # left padding at eval, 0 at train
 

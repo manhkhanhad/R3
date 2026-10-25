@@ -34,6 +34,9 @@ def main(
     guidance_scale: float=1.0,
     length_penalty: float=1.0,
     wandb_run_name: str = None,
+    # continuous-thought interventions (continuous_thoughts.py): raw | mask | mean | shuffle
+    thought_mode: str = "raw",
+    thought_seed: int = 42,
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -54,7 +57,11 @@ def main(
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-    hash_dict = get_prefix_data(info_file, tokenizer)
+    thoughts_spec = getattr(model.config, "latent_continuous_thoughts", None)
+    n_thoughts = int(thoughts_spec["k"]) if thoughts_spec else 1
+    if thought_mode != "raw" and not thoughts_spec:
+        raise ValueError("thought_mode needs a continuous-thought checkpoint")
+    hash_dict = get_prefix_data(info_file, tokenizer, n_thoughts=n_thoughts)
     
     def prefix_allowed_tokens_fn(batch_id, input_ids):
         hash_number = get_hash(input_ids)
@@ -66,7 +73,7 @@ def main(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
     val_dataset=LatentRDataset(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
-                              sample=sample)
+                              sample=sample, n_thoughts=n_thoughts)
         
     encodings = [val_dataset.__getitem__(i) for i in range(len(val_dataset))]
     test_data = val_dataset.get_all()
@@ -117,7 +124,8 @@ def main(
                 unconditional_ids=None,
                 model=model,
                 tokenizer=tokenizer,
-                num_beams=num_beams
+                num_beams=num_beams,
+                n_thoughts=n_thoughts,
             )
             logits_processor = LogitsProcessorList([TemperatureLogitsWarper(temperature=temperature), ccc])
 
@@ -130,7 +138,7 @@ def main(
                 attention_mask=torch.tensor([_ for _ in padding_encodings["attention_mask"]]).to(device),
             )
     
-        s = generation_output.sequences[:, minLen-5:]
+        s = generation_output.sequences[:, minLen - (4 + n_thoughts):]
         # sequence_scores = [[0 for i in range(len(generation_output.scores))] for _ in range(num_beams)]
         # for i in range(num_beams):
         #     for j in range(L, len(generation_output.sequences[i])):
@@ -154,6 +162,10 @@ def main(
         new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
     scores = []
     seq_scores = []
+    replacement = None
+    if thought_mode != "raw":
+        replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
+                                           thought_seed, result_json_data)
     grounded = getattr(model.config, "latent_grounded_reasoning", None)
     if grounded:
         from grounded_reasoning import row_metadata
@@ -193,7 +205,12 @@ def main(
             seq_score = None
             intent_predictions.extend(per_intent)
         else:
+            if replacement is not None:
+                rows = replacement[idx * batch_size: idx * batch_size + len(encodings)].to(device)
+                model.thoughts.override = lambda x, rows=rows: rows.repeat_interleave(x.size(0) // rows.size(0), 0).to(x)
             output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+            if replacement is not None:
+                model.thoughts.override = None
         if intent:
             model.attention.target_item = None
         if idx == 0:
@@ -221,6 +238,43 @@ def main(
         metrics = calculate_ranking_metrics(test_data, info_file)
         wandb_run.log({f"evaluation_shard/{key}": value for key, value in metrics.items()})
         wandb_run.finish()
+
+def thought_replacements(model, tokenizer, batches, frame, mode, seed, result_path):
+    """Thoughts each test row receives under an intervention ([N, K, H], fp32).
+
+    The raw thoughts of every row are computed once (prompt only, left-padded as in
+    generation) and saved as thought_bank.pt next to the results (shared by modes); ``mean`` gives every row the mean
+    thought block, ``shuffle`` the block of a random row from a different user,
+    ``mask`` zeros.
+    """
+    bank_path = os.path.join(os.path.dirname(os.path.abspath(result_path)), "thought_bank.pt")
+    if os.path.exists(bank_path):
+        bank = torch.load(bank_path, map_location="cpu", weights_only=True)
+    else:
+        parts = []
+        for encodings in batches:
+            width = max(len(e["input_ids"]) for e in encodings)
+            ids = torch.tensor([[tokenizer.pad_token_id] * (width - len(e["input_ids"])) + e["input_ids"] for e in encodings])
+            mask = torch.tensor([[0] * (width - len(e["input_ids"])) + e["attention_mask"] for e in encodings])
+            with torch.no_grad():
+                model.generate_embs(ids.to(device), mask.to(device))
+            parts.append(model.thoughts.last_thoughts.float().cpu())
+        bank = torch.cat(parts)
+        torch.save(bank, bank_path)
+    if mode == "mask":
+        return torch.zeros_like(bank)
+    if mode == "mean":
+        return bank.mean(0, keepdim=True).expand_as(bank).clone()
+    if mode == "shuffle":
+        users = frame["user_id"].astype(str).to_numpy()
+        generator = torch.Generator().manual_seed(seed)
+        perm = torch.randperm(len(bank), generator=generator)
+        for i in range(len(bank)):
+            while users[int(perm[i])] == users[i]:
+                perm[i] = int(torch.randint(len(bank), (1,), generator=generator))
+        return bank[perm].clone()
+    raise ValueError(f"unknown thought_mode {mode}")
+
 
 if __name__ == '__main__':
     fire.Fire(main)
