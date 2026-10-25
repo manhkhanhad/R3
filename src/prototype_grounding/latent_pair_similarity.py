@@ -51,13 +51,23 @@ def out_dir(tag: str, split: str) -> Path:
     return E.ROOT / "output_dir/latent_pair_similarity" / tag / split
 
 
+def shared_prefix_length(rows: list[dict]) -> int:
+    """Tokens identical in every row (instruction + "### User Input" header + opening quote).
+
+    Taken over all rows: two rows of the same user also share their first
+    history title, which would overshoot the template.
+    """
+    first = rows[0]["input_ids"]
+    return min(next((i for i, (x, y) in enumerate(zip(first, r["input_ids"])) if x != y),
+                    min(len(first), len(r["input_ids"]))) for r in rows[1:])
+
+
 def extract(split: str, batch_size: int, limit: int, checkpoint: Path, tag: str) -> None:
     model, tokenizer, device = E.load_model(checkpoint)
     ds = E.PromptDataset(split, tokenizer, limit)
     # The instruction and the "### User Input" header are identical in every
     # row; h_mean averages only the tokens after this shared prefix.
-    a, b = ds.rows[0]["input_ids"], ds.rows[1]["input_ids"]
-    prefix = next(i for i, (x, y) in enumerate(zip(a, b)) if x != y)
+    prefix = shared_prefix_length(ds.rows)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
                         collate_fn=lambda x: E.collate(x, tokenizer.pad_token_id))
     vecs = {k: [] for k in KINDS}

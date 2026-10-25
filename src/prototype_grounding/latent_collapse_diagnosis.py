@@ -32,6 +32,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 import experiment as E
+from latent_pair_similarity import shared_prefix_length
 from model import apply_rotary_pos_emb  # src/grpo_attention_tuning, put on sys.path by experiment
 
 
@@ -59,8 +60,7 @@ def spread(x: torch.Tensor) -> dict:
 def run(checkpoint: Path, split: str, limit: int, batch_size: int, tag: str) -> None:
     model, tokenizer, device = E.load_model(checkpoint)
     ds = E.PromptDataset(split, tokenizer, limit)
-    a, b = ds.rows[0]["input_ids"], ds.rows[1]["input_ids"]
-    prefix = next(i for i, (x, y) in enumerate(zip(a, b)) if x != y)
+    prefix = shared_prefix_length(ds.rows)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
                         collate_fn=lambda x: E.collate(x, tokenizer.pad_token_id))
     trained = model.attention
