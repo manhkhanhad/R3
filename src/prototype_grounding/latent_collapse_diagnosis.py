@@ -133,6 +133,15 @@ def run(checkpoint: Path, split: str, limit: int, batch_size: int, tag: str) -> 
         "spread": {k: spread(v) for k, v in vecs.items()},
         "fp32_vs_bf16_max_abs_diff": float((vecs["r_fp32"] - vecs["r_bf16"]).abs().max()),
     }
+    def finite(o, path=""):
+        if isinstance(o, dict):
+            return {k: finite(v, f"{path}.{k}") for k, v in o.items()}
+        if isinstance(o, float) and not np.isfinite(o):
+            print(f"non-finite value at {path}", flush=True)
+            return None
+        return o
+
+    report = finite(report)
     out = E.ANALYSIS / "results/latent_collapse_diagnosis" / tag / f"{split}.json"
     E.atomic_json(out, report)
     print(json.dumps(report, indent=2), flush=True)
