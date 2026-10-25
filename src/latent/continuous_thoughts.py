@@ -178,13 +178,24 @@ class ThoughtDiagnostics(TrainerCallback):
         was_training = model.training
         model.eval()
         device = next(model.parameters()).device
-        batch = {k: v.to(device) for k, v in self.batch.items() if k in ("input_ids", "attention_mask", "labels")}
+        n, step = self.batch["input_ids"].size(0), 4  # full-vocabulary logits: keep chunks small
+        chunks = [{k: self.batch[k][i:i + step].to(device) for k in ("input_ids", "attention_mask", "labels")}
+                  for i in range(0, n, step)]
         with torch.no_grad():
-            raw = self._nll(model, batch)
-            t = model.thoughts.last_thoughts.flatten(1).float()
+            raw, blocks = [], []
+            for c in chunks:
+                raw.append(self._nll(model, c))
+                blocks.append(model.thoughts.last_thoughts)
+            raw, blocks = torch.cat(raw), torch.cat(blocks)
+            t = blocks.flatten(1).float()
             share = ((t - t.mean(0)).norm(dim=1) / t.norm(dim=1).clamp_min(1e-12)).mean()
-            shuffled = self._nll(model, batch, lambda x: x.roll(1, dims=0))
-            mean = self._nll(model, batch, lambda x: x.mean(0, keepdim=True).expand_as(x))
+            variants = {"shuffle": blocks.roll(1, dims=0), "mean": blocks.mean(0, keepdim=True).expand_as(blocks)}
+            nll = {}
+            for name, replacement in variants.items():
+                nll[name] = torch.cat([
+                    self._nll(model, c, lambda x, r=replacement[i * step:(i + 1) * step]: r.to(x))
+                    for i, c in enumerate(chunks)])
+        shuffled, mean = nll["shuffle"], nll["mean"]
         record = {"step": state.global_step, "epoch": state.epoch, "raw_nll": float(raw.mean()),
                   "residual_share": float(share), "shuffle_dnll": float((shuffled - raw).mean()),
                   "mean_dnll": float((mean - raw).mean())}
