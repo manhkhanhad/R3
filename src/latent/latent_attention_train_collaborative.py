@@ -119,6 +119,9 @@ def train(
     bank_max_per_user: int = 0,
     bank_max_per_target: int = 0,
     bank_dedup_cos: float = 0.0,
+    save_steps: int = 0,             # 0 = save once per epoch (default behaviour)
+    save_total_limit: int = 1,       # 0 = keep every checkpoint
+    save_only_model: bool = False,
     title_cf_positives: bool = False,
     title_positive_floor: float = 0.25,
     cf_contrastive_weight: float = 0.1,
@@ -248,9 +251,11 @@ def train(
             logging_steps=1,
             optim="adamw_torch",
             eval_strategy="epoch",
-            save_strategy="epoch",
+            save_strategy="steps" if save_steps > 0 else "epoch",
+            save_steps=save_steps if save_steps > 0 else 500,
             output_dir=output_dir,
-            save_total_limit=1,
+            save_total_limit=save_total_limit or None,
+            save_only_model=save_only_model,
             load_best_model_at_end=False,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
