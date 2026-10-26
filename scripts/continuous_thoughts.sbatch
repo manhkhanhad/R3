@@ -17,7 +17,7 @@
 # matched to R3_ori Toys (base Qwen/Qwen2.5-1.5B, lr 3e-4, batch 128, 3 epochs,
 # early stopping). Then: self-check, bottleneck leak check, constrained 10-beam
 # ranking, thought interventions (mask / mean / shuffle), paired bootstrap.
-# Env: CODE_ROOT (required), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0),
+# Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0),
 #      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 
 set -Eeuo pipefail
@@ -53,7 +53,7 @@ train_file=$(ls ${data_dir}/train/${category}_5_*.csv)
 eval_file=$(ls ${data_dir}/valid/${category}_5_*.csv)
 test_file=$(ls ${data_dir}/test/${category}_5_*.csv)
 info_file=$(ls ${data_dir}/info/${category}_5_*.txt)
-task_dir="output_dir/${name}"
+task_dir="${OUTPUT_ROOT:-output_dir}/${name}"  # OUTPUT_ROOT: e.g. scratch (home quota is ~1 TB)
 out="${task_dir}/latent"
 mkdir -p "$out"
 
