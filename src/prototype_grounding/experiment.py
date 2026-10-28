@@ -604,8 +604,12 @@ def recommendation_metrics(ranks: np.ndarray) -> dict[str, float]:
 def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
                       temperature: float, alpha: float, mode: str, batch_size: int,
                       limit: int = -1, checkpoint: Path = CHECKPOINT,
-                      tag: str = "") -> None:
-    """Run the repository's constrained 10-beam catalog evaluator with grounding."""
+                      tag: str = "", cfg_w: float = 0.0) -> None:
+    """Run the repository's constrained 10-beam catalog evaluator with grounding.
+
+    With ``cfg_w > 0`` every step is decoded on the CFG contrast
+    ``s_null + cfg_w * (s_mode - s_null)`` where the null branch carries the
+    train-mean latent in the thought slot (P1 probe, latent-utilization line)."""
     model, tokenizer, device = load_model(checkpoint)
     tokenizer.padding_side = "left"
     ds = PromptDataset(split, tokenizer, limit)
@@ -681,6 +685,7 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
                                   pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
                                   max_new_tokens=128)
     records: list[dict[str, Any]] = []
+    contrast_summaries: list[dict[str, float]] = []
     catalog = {line.split("\t")[0].strip(' \n"') for line in INFO_FILE.open()}
     violations = 0
     for start in range(0, len(ds), batch_size):
@@ -693,10 +698,22 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
         processor = CFEnhancedLogitsProcessor(guidance_scale=1.0, cf_logits=None,
                     prefix_allowed_tokens_fn=allowed, cf_dict=None, unconditional_ids=None,
                     model=model, tokenizer=tokenizer, num_beams=10)
+        processors = [TemperatureLogitsWarper(temperature=1.0), processor]
+        contrast = None
+        if cfg_w > 0:
+            from latent_contrast import ContrastGuidanceProcessor
+            thought_id = model.model.embed_tokens.num_embeddings - 1
+            where = torch.nonzero(ids == thought_id)
+            null_embs = model.model.embed_tokens(ids).clone()
+            null_embs[where[:, 0], where[:, 1]] = train_mean.to(null_embs.dtype)
+            contrast = ContrastGuidanceProcessor(model, null_embs, masks, ids, num_beams=10, w=cfg_w)
+            processors = [TemperatureLogitsWarper(temperature=1.0), contrast, processor]
         with torch.no_grad():
             generated = model.generate(ids, attention_mask=masks, generation_config=gen_config,
                         return_dict_in_generate=True, output_scores=True,
-                        logits_processor=LogitsProcessorList([TemperatureLogitsWarper(temperature=1.0), processor]))
+                        logits_processor=LogitsProcessorList(processors))
+        if contrast is not None:
+            contrast_summaries.append(contrast.summary())
         decoded = tokenizer.batch_decode(generated.sequences[:, min_len:], skip_special_tokens=True)
         decoded = [x.split("Response:")[-1].strip(' \n"') for x in decoded]
         for i, row in enumerate(rows):
@@ -710,13 +727,20 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
         if start % (batch_size * 25) == 0:
             print(f"generate {mode}: {min(start+batch_size,len(ds))}/{len(ds)}", flush=True)
     ranks = np.array([x["rank"] for x in records])
+    mode_label = mode if cfg_w <= 0 else f"{mode}_cfg{cfg_w:g}"
     result = {"split": split, "bank": bank, "k": k, "seed": seed, "topk": topk,
-              "temperature": temperature, "alpha": alpha, "mode": mode, "n": len(records),
+              "temperature": temperature, "alpha": alpha, "mode": mode_label, "n": len(records),
               "catalog_violations": violations, **recommendation_metrics(ranks),
               "checkpoint": str(checkpoint), "checkpoint_sha256": sha256(checkpoint / "model.safetensors"),
               "split_sha256": sha256(SPLIT_FILES[split]),
               "prototype_sha256": sha256(centers_path) if needs_prototypes else None}
-    key = f"{split}_{bank}_k{k}_s{seed}_{mode}_t{topk}_temp{temperature}_a{alpha}"
+    if cfg_w > 0:
+        result["cfg_w"] = cfg_w
+        result["contrast"] = {
+            "mean_abs_delta": float(np.mean([s["mean_abs_delta"] for s in contrast_summaries])),
+            "mean_kl_r_null": float(np.mean([s["mean_kl_r_null"] for s in contrast_summaries])),
+        }
+    key = f"{split}_{bank}_k{k}_s{seed}_{mode_label}_t{topk}_temp{temperature}_a{alpha}"
     out_dir = ANALYSIS / "results/frozen_grounding"
     if tag:
         out_dir = ANALYSIS / "results/intervention" / tag
@@ -1244,7 +1268,7 @@ def main() -> None:
     x = sub.add_parser("intervention"); x.add_argument("--split", choices=("valid", "test"), default="valid"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     x = sub.add_parser("mine"); x.add_argument("--bank", choices=("all", "correct", "positive", "top", "harmful"), required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True)
     x = sub.add_parser("score"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "hard", "residual", "mean", "shuffled", "random"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
-    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "mu_only", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random", "z_alone", "noise_matched"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
+    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "mu_only", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random", "z_alone", "noise_matched"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl"); x.add_argument("--cfg-w", type=float, default=0.0)
     x = sub.add_parser("collaborative"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--exclusion", choices=("none", "user", "target", "both"), required=True); x.add_argument("--min-users", type=int, default=1); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     x = sub.add_parser("oracle"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--candidate-k", type=int, default=8); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     args = p.parse_args()
@@ -1259,7 +1283,7 @@ def main() -> None:
     elif args.command == "intervention": intervention(args.split, args.batch_size, args.limit, args.checkpoint, args.tag)
     elif args.command == "mine": mine(args.bank, args.k, args.seed)
     elif args.command == "score": score_configuration(args.split, args.bank, args.k, args.seed, args.topk, args.temperature, args.alpha, args.mode, args.batch_size, args.limit)
-    elif args.command == "generate": generate_rankings(args.split, args.bank, args.k, args.seed, args.topk, args.temperature, args.alpha, args.mode, args.batch_size, args.limit, args.checkpoint, args.tag)
+    elif args.command == "generate": generate_rankings(args.split, args.bank, args.k, args.seed, args.topk, args.temperature, args.alpha, args.mode, args.batch_size, args.limit, args.checkpoint, args.tag, args.cfg_w)
     elif args.command == "collaborative": collaborative_score(args.split, args.bank, args.k, args.seed, args.topk, args.temperature, args.alpha, args.exclusion, args.min_users, args.batch_size, args.limit)
     elif args.command == "oracle": oracle_score(args.split, args.bank, args.k, args.seed, args.candidate_k, args.batch_size, args.limit)
 
