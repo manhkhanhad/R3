@@ -71,17 +71,15 @@ class ContrastGuidanceProcessor(LogitsProcessor):
         return out.logits[:, -1, :].float()
 
     def _beam_reorder_index(self, input_ids):
-        n = input_ids.size(0)
-        beam_idx = torch.empty(n, dtype=torch.long, device=input_ids.device)
-        for g in range(n // self.nb):
-            sl = slice(g * self.nb, (g + 1) * self.nb)
-            cur = input_ids[sl, :-1]
-            prev = self.prev_ids[sl]
-            eq = (cur.unsqueeze(1) == prev.unsqueeze(0)).all(-1)  # [nb, nb]
-            if not bool(eq.any(dim=1).all()):
-                raise RuntimeError("contrast: beam prefix not found in previous step")
-            beam_idx[sl] = g * self.nb + eq.float().argmax(dim=1)
-        return beam_idx
+        # The loop invariant is input_ids = cat(prev[beam_idx], token) with an
+        # UNRESTRICTED beam_idx: BeamSearchScorer.process points the rows of a
+        # finished batch item at absolute row 0 (a cross-group copy), so the
+        # match must run over the whole previous batch, not within beam groups.
+        cur, prev = input_ids[:, :-1], self.prev_ids
+        eq = (cur.unsqueeze(1) == prev.unsqueeze(0)).all(-1)  # [N, N]
+        if not bool(eq.any(dim=1).all()):
+            raise RuntimeError("contrast: beam prefix not found in previous step")
+        return eq.float().argmax(dim=1)
 
     @torch.no_grad()
     def _decode(self, input_ids):
