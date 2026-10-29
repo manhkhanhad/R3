@@ -144,6 +144,12 @@ class LatentModel(Qwen2ForCausalLM):
         if thoughts:
             from continuous_thoughts import ContinuousThoughts
             self.thoughts = ContinuousThoughts(config.hidden_size, thoughts)
+        steer = getattr(config, "latent_steered_reading", None)
+        if steer:
+            if not thoughts or getattr(config, "latent_bottleneck", None):
+                raise ValueError("steered reading needs continuous thoughts and no latent bottleneck")
+            from steered_reading import SteeredReading
+            self.steer = SteeredReading(config.hidden_size, steer)
         decomposition = getattr(config, "latent_decomposition", None)
         if decomposition:
             from decomposed_attention import build_decomposed_attention
@@ -217,6 +223,9 @@ class LatentModel(Qwen2ForCausalLM):
         if getattr(target.config, "latent_continuous_thoughts", None):
             from continuous_thoughts import load_fp32_thought_params
             load_fp32_thought_params(target, str(pretrained_model_name_or_path))
+        if getattr(target.config, "latent_steered_reading", None):
+            from steered_reading import load_fp32_steer_params
+            load_fp32_steer_params(target, str(pretrained_model_name_or_path))
         return model
 
     def generate_embs(self, input_ids, attention_mask):
@@ -229,6 +238,12 @@ class LatentModel(Qwen2ForCausalLM):
             rows = torch.arange(input_ids.size(0), device=input_ids.device)[:, None]
             cols = first[:, None] + torch.arange(self.thoughts.k, device=input_ids.device)[None]
             input_embs = input_embs.index_put((rows, cols), thoughts.to(input_embs.dtype))
+            if getattr(self.config, "latent_steered_reading", None):
+                index, sim = self.steer.batch_tensors(input_ids.size(0), input_ids.device)
+                self.steer.block = None
+                if index is not None:
+                    self.steer(thoughts.mean(1), self.thoughts.last_prefix_hidden,
+                               self.thoughts.last_prefix_positions, index, sim)
             return input_embs
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
@@ -296,6 +311,9 @@ class LatentModel(Qwen2ForCausalLM):
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         bottleneck_ids = kwargs.pop("latent_bottleneck_ids", None)
+        item_index = kwargs.pop("item_index", None)
+        item_sim = kwargs.pop("item_sim", None)
+        steer = getattr(self.config, "latent_steered_reading", None)
         is_prefill = (
             input_ids is not None and inputs_embeds is None
             and attention_mask is not None and input_ids.size() == attention_mask.size()
@@ -308,11 +326,22 @@ class LatentModel(Qwen2ForCausalLM):
                 attention_mask, input_ids, inputs_embeds,
             )
         if is_prefill:
+            if steer and item_index is not None:
+                self.steer.item_index, self.steer.item_sim = item_index, item_sim
             inputs_embeds = self.generate_embs(input_ids, plain_attention_mask)
             input_ids = None
+        if steer and plain_attention_mask is not None and plain_attention_mask.dim() == 2:
+            # Prefill selects the items (generate_embs); decoding steps reuse the block.
+            if self.steer.block is None:
+                raise RuntimeError("steered reading: no item selection for this batch (item_index not set)")
+            from steered_reading import steered_mask_and_positions
+            query_len = (inputs_embeds if inputs_embeds is not None else input_ids).size(1)
+            attention_mask, position_ids = steered_mask_and_positions(
+                plain_attention_mask, self.steer.block, query_len,
+                inputs_embeds.dtype if inputs_embeds is not None else self.model.embed_tokens.weight.dtype)
         # elif input_ids is not None and inputs_embeds is None and input_ids.size()!=attention_mask.size():
             # 这个时候是在做生成任务，已经有了cache所以用input_ids即可
-        return super().forward(
+        output = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -327,3 +356,9 @@ class LatentModel(Qwen2ForCausalLM):
             num_logits_to_keep=num_logits_to_keep,
             **kwargs,
         )
+        if steer and is_prefill and item_index is not None:
+            self.steer.item_index = self.steer.item_sim = None  # training batch: do not leak into the next call
+            aux = self.steer.last_aux
+            if labels is not None and aux is not None and self.steer.aux_weight > 0 and self.training:
+                output.loss = output.loss + self.steer.aux_weight * aux
+        return output

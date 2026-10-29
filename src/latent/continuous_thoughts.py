@@ -95,8 +95,14 @@ class ContinuousThoughts(nn.Module):
             prefix[b, width - r.numel():] = r
             prefix_mask[b, width - r.numel():] = 1
         lengths = prefix_mask.sum(1)
+        # Original position of every aligned slot (-1 = pad), for steered_reading.py.
+        positions = torch.full((batch, width), -1, dtype=torch.long, device=device)
+        for b, r in enumerate(rows):
+            positions[b, width - r.numel():] = torch.nonzero(attention_mask[b, : first_thought_pos[b]].bool()).squeeze(1)
+        self.last_prefix_positions = positions
         out = backbone(input_ids=prefix, attention_mask=prefix_mask,
                        position_ids=(prefix_mask.long().cumsum(1) - 1).clamp(min=0), use_cache=True)
+        self.last_prefix_hidden = out.last_hidden_state
         hidden, cache = out.last_hidden_state[:, -1], out.past_key_values
         thoughts, mask = [], prefix_mask
         embed_dtype = backbone.embed_tokens.weight.dtype
@@ -163,7 +169,8 @@ class ThoughtDiagnostics(TrainerCallback):
     def _nll(self, model, batch, override=None):
         model.thoughts.override = override
         try:
-            logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
+            extra = {k: batch[k] for k in ("item_index", "item_sim") if k in batch}
+            logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], **extra).logits
         finally:
             model.thoughts.override = None
         labels = batch["labels"][:, 1:]
@@ -179,13 +186,16 @@ class ThoughtDiagnostics(TrainerCallback):
         model.eval()
         device = next(model.parameters()).device
         n, step = self.batch["input_ids"].size(0), 4  # full-vocabulary logits: keep chunks small
-        chunks = [{k: self.batch[k][i:i + step].to(device) for k in ("input_ids", "attention_mask", "labels")}
-                  for i in range(0, n, step)]
+        keys = [k for k in ("input_ids", "attention_mask", "labels", "item_index", "item_sim") if k in self.batch]
+        chunks = [{k: self.batch[k][i:i + step].to(device) for k in keys} for i in range(0, n, step)]
+        steer = getattr(model, "steer", None)
         with torch.no_grad():
-            raw, blocks = [], []
+            raw, blocks, stats = [], [], []
             for c in chunks:
                 raw.append(self._nll(model, c))
                 blocks.append(model.thoughts.last_thoughts)
+                if steer is not None:
+                    stats.append(dict(steer.last_stats, rows=int(c["input_ids"].size(0))))
             raw, blocks = torch.cat(raw), torch.cat(blocks)
             t = blocks.flatten(1).float()
             share = ((t - t.mean(0)).norm(dim=1) / t.norm(dim=1).clamp_min(1e-12)).mean()
@@ -199,6 +209,10 @@ class ThoughtDiagnostics(TrainerCallback):
         record = {"step": state.global_step, "epoch": state.epoch, "raw_nll": float(raw.mean()),
                   "residual_share": float(share), "shuffle_dnll": float((shuffled - raw).mean()),
                   "mean_dnll": float((mean - raw).mean())}
+        for key in ("rows_selecting", "same_as_recent", "same_as_oracle", "oracle_recall"):
+            have = [s for s in stats if key in s]
+            if have:  # row-weighted over chunks (approximate for the long-row statistics)
+                record[f"select_{key}"] = sum(s[key] * s["rows"] for s in have) / sum(s["rows"] for s in have)
         print("thought diagnostics:", json.dumps(record), flush=True)
         with open(self.path, "a") as f:
             f.write(json.dumps(record) + "\n")

@@ -37,6 +37,9 @@ def main(
     # continuous-thought interventions (continuous_thoughts.py): raw | mask | mean | shuffle
     thought_mode: str = "raw",
     thought_seed: int = 42,
+    # B1 steered reading (steered_reading.py): learned | recent | all (selection intervention)
+    selection_mode: str = "learned",
+    item_embeddings_file: str = None,  # optional: oracle-agreement statistics
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -72,8 +75,18 @@ def main(
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
-    val_dataset=LatentRDataset(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
-                              sample=sample, n_thoughts=n_thoughts)
+    steer = getattr(model.config, "latent_steered_reading", None)
+    dataset_class, extra = LatentRDataset, {}
+    if steer:
+        from steered_reading import SteeredReadingDataset, pad_index
+        dataset_class = SteeredReadingDataset
+        if item_embeddings_file:
+            extra["item_embeddings"] = torch.load(item_embeddings_file, map_location="cpu", weights_only=False)["embeddings"].float()
+        model.steer.rule_override = selection_mode
+    elif selection_mode != "learned":
+        raise ValueError("selection_mode needs a steered-reading checkpoint")
+    val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
+                              sample=sample, n_thoughts=n_thoughts, **extra)
         
     encodings = [val_dataset.__getitem__(i) for i in range(len(val_dataset))]
     test_data = val_dataset.get_all()
@@ -162,6 +175,7 @@ def main(
         new_encodings.append(encodings[i * batch_size: (i + 1) * batch_size])
     scores = []
     seq_scores = []
+    selections = []
     replacement = None
     if thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
@@ -208,7 +222,16 @@ def main(
             if replacement is not None:
                 rows = replacement[idx * batch_size: idx * batch_size + len(encodings)].to(device)
                 model.thoughts.override = lambda x, rows=rows: rows.repeat_interleave(x.size(0) // rows.size(0), 0).to(x)
+            if steer:
+                width = max(len(e["input_ids"]) for e in encodings)
+                model.steer.item_index = pad_index([e["item_index"] for e in encodings], width, "left")
+                model.steer.item_sim = (torch.tensor([e["item_sim"] for e in encodings], dtype=torch.float32)
+                                        if item_embeddings_file else None)
             output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+            if steer:
+                chosen = model.steer.last_selection[:: model.steer.last_selection.size(0) // len(encodings)]
+                selections.extend([torch.nonzero(row).squeeze(1).tolist() for row in chosen.cpu()])
+                model.steer.item_index = model.steer.item_sim = None
             if replacement is not None:
                 model.thoughts.override = None
         if intent:
@@ -223,6 +246,8 @@ def main(
     for i, test in enumerate(test_data):
         test["predict"] = outputs[i]
         test["predict_score"] = scores[i]
+        if selections:
+            test["selected_items"] = selections[i]
         if intent_predictions:
             test["intent_predict"] = {str(k): v for k, v in intent_predictions[i].items()}
         # test["predict_seq_score"] = seq_scores[i]

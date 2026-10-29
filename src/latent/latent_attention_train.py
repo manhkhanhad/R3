@@ -67,6 +67,12 @@ def train(
     # thoughts replacing the pooled r; "constant" = K learned vectors (baseline C)
     thought_source: str = None,
     n_thoughts: int = 1,
+    # B1 steered reading (steered_reading.py): the thought selects which k history
+    # items the recommendation pass reads; selector trained toward the oracle items
+    steered_k: int = 0,
+    steered_rule: str = "learned",  # learned | recent (fixed-rule baseline)
+    steered_aux_weight: float = 0.2,
+    item_embeddings_file: str = None,  # Qwen3 title embeddings (oracle items)
 
 ):
 
@@ -89,6 +95,9 @@ def train(
             "latent_only": latent_only,
             "thought_source": thought_source,
             "n_thoughts": n_thoughts,
+            "steered_k": steered_k,
+            "steered_rule": steered_rule,
+            "steered_aux_weight": steered_aux_weight,
             "learning_rate": learning_rate,
         },
     )
@@ -161,6 +170,11 @@ def train(
         from transformers import AutoConfig
         model_config = AutoConfig.from_pretrained(base_model)
         model_config.latent_continuous_thoughts = {"k": n_thoughts, "source": thought_source}
+        if steered_k > 0:
+            if latent_only or thought_source != "hidden":
+                raise ValueError("steered reading needs thought_source=hidden and no latent_only")
+            model_config.latent_steered_reading = {"k": steered_k, "rule": steered_rule,
+                                                   "aux_weight": steered_aux_weight, "dim": 256}
         model_kwargs["config"] = model_config
     elif n_thoughts != 1:
         raise ValueError("n_thoughts > 1 needs thought_source")
@@ -199,6 +213,11 @@ def train(
         model.thoughts.token_norm.fill_(token_norm)
         model.thoughts.reset_parameters()
         print("continuous thoughts:", model.config.latent_continuous_thoughts)
+        if steered_k > 0:
+            model.steer.float()
+            for layer in (model.steer.query, model.steer.key):
+                layer.reset_parameters()
+            print("steered reading:", model.config.latent_steered_reading)
     if use_side_info:
         # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
         token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
@@ -230,6 +249,12 @@ def train(
     if n_thoughts != 1:
         extra_train = {**extra_train, "n_thoughts": n_thoughts}
         extra_val = {**extra_val, "n_thoughts": n_thoughts}
+    if steered_k > 0:
+        from steered_reading import SteeredReadingDataset
+        dataset_class = SteeredReadingDataset
+        item_embeddings = torch.load(item_embeddings_file, map_location="cpu", weights_only=False)["embeddings"].float()
+        extra_train = {**extra_train, "item_embeddings": item_embeddings}
+        extra_val = {**extra_val, "item_embeddings": item_embeddings}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -256,6 +281,10 @@ def train(
     print("train_data 0 keys:", train_data[0].keys())
     hf_train_dataset = HFDataset.from_dict({k: [v[k] for v in train_data] for k in train_data[0].keys()})
     hf_val_dataset = HFDataset.from_dict({k: [v[k] for v in val_data] for k in val_data[0].keys()})
+    collator = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    if steered_k > 0:
+        from steered_reading import SteeredCollator
+        collator = SteeredCollator(collator)
     trainer = transformers.Trainer(
         # deepspeed=deepspeed,
         model=model,
@@ -279,15 +308,13 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
             remove_unused_columns=False
         ),
-        data_collator=DataCollatorForSeq2Seq(
-            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
-        ),
+        data_collator=collator,
         callbacks = [EarlyStoppingCallback(early_stopping_patience=1)],
     )
     if thought_source is not None:
