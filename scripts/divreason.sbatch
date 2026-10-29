@@ -34,7 +34,9 @@ category="${CATEGORY:-Toys_and_Games}"
 paths="${PATHS:-4}"
 center="${CENTER:-False}"
 if [[ $paths -gt 0 ]]; then
-  name="${OUTPUT_NAME:-${category}_divreason_n${paths}$([[ $center == True ]] && echo _centered)}"
+  suffix=""
+  [[ $center == True ]] && suffix=_centered
+  name="${OUTPUT_NAME:-${category}_divreason_n${paths}${suffix}}"
 else
   name="${OUTPUT_NAME:-${category}_r3_plain_matched}"
 fi
