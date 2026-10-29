@@ -62,8 +62,12 @@ def main(
 
     thoughts_spec = getattr(model.config, "latent_continuous_thoughts", None)
     n_thoughts = int(thoughts_spec["k"]) if thoughts_spec else 1
-    if thought_mode != "raw" and not thoughts_spec:
-        raise ValueError("thought_mode needs a continuous-thought checkpoint")
+    divreason = getattr(model.config, "latent_divreason", None)
+    if thought_mode != "raw" and not (thoughts_spec or divreason):
+        raise ValueError("thought_mode needs a continuous-thought or DivReason checkpoint")
+    if thought_mode == "single" and not divreason:
+        raise ValueError("thought_mode=single (one unperturbed path) needs a DivReason checkpoint")
+    latent_module = model.thoughts if thoughts_spec else (model.divreason if divreason else None)
     hash_dict = get_prefix_data(info_file, tokenizer, n_thoughts=n_thoughts)
     
     def prefix_allowed_tokens_fn(batch_id, input_ids):
@@ -177,7 +181,9 @@ def main(
     seq_scores = []
     selections = []
     replacement = None
-    if thought_mode != "raw":
+    if thought_mode == "single":
+        model.divreason.mode = "single"  # DivReason "w/o Dual": one unperturbed R3 path
+    elif thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)
     grounded = getattr(model.config, "latent_grounded_reasoning", None)
@@ -221,7 +227,7 @@ def main(
         else:
             if replacement is not None:
                 rows = replacement[idx * batch_size: idx * batch_size + len(encodings)].to(device)
-                model.thoughts.override = lambda x, rows=rows: rows.repeat_interleave(x.size(0) // rows.size(0), 0).to(x)
+                latent_module.override = lambda x, rows=rows: rows.repeat_interleave(x.size(0) // rows.size(0), 0).to(x)
             if steer:
                 width = max(len(e["input_ids"]) for e in encodings)
                 model.steer.item_index = pad_index([e["item_index"] for e in encodings], width, "left")
@@ -233,7 +239,7 @@ def main(
                 selections.extend([torch.nonzero(row).squeeze(1).tolist() for row in chosen.cpu()])
                 model.steer.item_index = model.steer.item_sim = None
             if replacement is not None:
-                model.thoughts.override = None
+                latent_module.override = None
         if intent:
             model.attention.target_item = None
         if idx == 0:
@@ -283,7 +289,8 @@ def thought_replacements(model, tokenizer, batches, frame, mode, seed, result_pa
             mask = torch.tensor([[0] * (width - len(e["input_ids"])) + e["attention_mask"] for e in encodings])
             with torch.no_grad():
                 model.generate_embs(ids.to(device), mask.to(device))
-            parts.append(model.thoughts.last_thoughts.float().cpu())
+            module = model.thoughts if hasattr(model, "thoughts") else model.divreason
+            parts.append((module.last_thoughts if hasattr(model, "thoughts") else module.last_r_agg).float().cpu())
         bank = torch.cat(parts)
         torch.save(bank, bank_path)
     if mode == "mask":

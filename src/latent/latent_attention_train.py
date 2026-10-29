@@ -73,6 +73,15 @@ def train(
     steered_rule: str = "learned",  # learned | recent (fixed-rule baseline)
     steered_aux_weight: float = 0.2,
     item_embeddings_file: str = None,  # Qwen3 title embeddings (oracle items)
+    # DivReason (divreason.py): N divergent paths (MC-dropout + k-means directional
+    # perturbation) aggregated by a router with redundancy suppression
+    divreason_paths: int = 0,
+    divreason_dropout: float = 0.1,
+    divreason_layer: int = 14,
+    divreason_alpha: float = 0.1,  # relative to the median token norm at the layer
+    divreason_beta: float = 0.5,
+    divreason_prune: float = 0.05,
+    divreason_center: bool = False,
 
 ):
 
@@ -95,6 +104,12 @@ def train(
             "latent_only": latent_only,
             "thought_source": thought_source,
             "n_thoughts": n_thoughts,
+            "divreason_paths": divreason_paths,
+            "divreason_dropout": divreason_dropout,
+            "divreason_layer": divreason_layer,
+            "divreason_alpha": divreason_alpha,
+            "divreason_beta": divreason_beta,
+            "divreason_center": divreason_center,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -178,6 +193,15 @@ def train(
         model_kwargs["config"] = model_config
     elif n_thoughts != 1:
         raise ValueError("n_thoughts > 1 needs thought_source")
+    if divreason_paths > 0:
+        if thought_source is not None or latent_only or use_side_info or use_category_alignment or category_text_file:
+            raise ValueError("DivReason is a plain-R3 variant; do not combine with other options")
+        from transformers import AutoConfig
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_divreason = {"n_paths": divreason_paths, "dropout": divreason_dropout,
+                                         "layer": divreason_layer, "alpha": 0.0, "beta": divreason_beta,
+                                         "prune": divreason_prune, "router_dim": 256}
+        model_kwargs["config"] = model_config
 
     model = model_class.from_pretrained(
         base_model,
@@ -249,6 +273,12 @@ def train(
     if n_thoughts != 1:
         extra_train = {**extra_train, "n_thoughts": n_thoughts}
         extra_val = {**extra_val, "n_thoughts": n_thoughts}
+    if divreason_paths > 0:
+        # HF re-initialised the router (missing weights); restore an fp32 default init.
+        model.divreason.float()
+        for m in model.divreason.router:
+            if hasattr(m, "reset_parameters"):
+                m.reset_parameters()
     if steered_k > 0:
         from steered_reading import SteeredReadingDataset
         dataset_class = SteeredReadingDataset
@@ -282,6 +312,27 @@ def train(
     hf_train_dataset = HFDataset.from_dict({k: [v[k] for v in train_data] for k in train_data[0].keys()})
     hf_val_dataset = HFDataset.from_dict({k: [v[k] for v in val_data] for k in val_data[0].keys()})
     collator = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    if divreason_paths > 0 and not resume_from_checkpoint:
+        # Directions from the base model before training (Eq. 8-9); alpha relative to the
+        # median token norm at the perturbed layer.
+        from divreason import directions_from_dataset
+        model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+        directions, median_norm, diag = directions_from_dataset(
+            model, train_data, collator, divreason_layer, divreason_paths, divreason_center)
+        model.train()
+        alpha = divreason_alpha * median_norm
+        model.divreason.directions.copy_(directions.to(model.divreason.directions.device))
+        model.divreason.alpha = alpha
+        model.config.latent_divreason.update({"alpha": alpha, "alpha_relative": divreason_alpha,
+                                              "center": divreason_center, "directions_diag": diag})
+        print(f"DivReason directions: median token norm {median_norm:.2f}, alpha {alpha:.3f}, {diag}")
+    elif divreason_paths > 0:
+        # Resuming: directions come back with the checkpoint's buffers; alpha from its config.
+        import json
+        saved = json.load(open(os.path.join(resume_from_checkpoint, "config.json")))["latent_divreason"]
+        model.config.latent_divreason.update(saved)
+        model.divreason.alpha = float(saved["alpha"])
+        print("DivReason resumed:", saved)
     if steered_k > 0:
         from steered_reading import SteeredCollator
         collator = SteeredCollator(collator)
@@ -323,6 +374,11 @@ def train(
         step = max(1, len(val_data) // 64)
         probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
         trainer.add_callback(ThoughtDiagnostics(probe_rows, trainer.data_collator, output_dir))
+    if divreason_paths > 0:
+        from divreason import DivReasonDiagnostics
+        step = max(1, len(val_data) // 64)
+        probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
+        trainer.add_callback(DivReasonDiagnostics(probe_rows, trainer.data_collator, output_dir))
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

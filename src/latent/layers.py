@@ -144,6 +144,13 @@ class LatentModel(Qwen2ForCausalLM):
         if thoughts:
             from continuous_thoughts import ContinuousThoughts
             self.thoughts = ContinuousThoughts(config.hidden_size, thoughts)
+        divreason = getattr(config, "latent_divreason", None)
+        if divreason:
+            if thoughts or getattr(config, "latent_bottleneck", None):
+                raise ValueError("DivReason is a plain-R3 variant (no continuous thoughts / bottleneck)")
+            from divreason import DivergentPaths
+            self.divreason = DivergentPaths(config.hidden_size, divreason)
+            self.divreason.attach(self)
         steer = getattr(config, "latent_steered_reading", None)
         if steer:
             if not thoughts or getattr(config, "latent_bottleneck", None):
@@ -223,6 +230,9 @@ class LatentModel(Qwen2ForCausalLM):
         if getattr(target.config, "latent_continuous_thoughts", None):
             from continuous_thoughts import load_fp32_thought_params
             load_fp32_thought_params(target, str(pretrained_model_name_or_path))
+        if getattr(target.config, "latent_divreason", None):
+            from divreason import load_fp32_divreason_params
+            load_fp32_divreason_params(target, str(pretrained_model_name_or_path))
         if getattr(target.config, "latent_steered_reading", None):
             from steered_reading import load_fp32_steer_params
             load_fp32_steer_params(target, str(pretrained_model_name_or_path))
@@ -244,6 +254,15 @@ class LatentModel(Qwen2ForCausalLM):
                 if index is not None:
                     self.steer(thoughts.mean(1), self.thoughts.last_prefix_hidden,
                                self.thoughts.last_prefix_positions, index, sim)
+            return input_embs
+        if getattr(self.config, "latent_divreason", None):
+            thought_ids = self.model.embed_tokens.num_embeddings - 1
+            where = torch.nonzero(input_ids == thought_ids)
+            if where.size(0) != input_ids.size(0):
+                raise ValueError("DivReason expects exactly one thought token per row")
+            r_agg = self.divreason(self, input_ids, attention_mask, where[:, 1])
+            input_embs = self.model.embed_tokens(input_ids)
+            input_embs = input_embs.index_put((where[:, 0], where[:, 1]), r_agg.to(input_embs.dtype))
             return input_embs
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
