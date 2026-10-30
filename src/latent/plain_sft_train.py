@@ -29,6 +29,9 @@ def train(
     learning_rate: float = 2e-5,
     cutoff_len: int = 512,
     resume_from_checkpoint: str = None,
+    category: str = "music instruments",
+    dataset_name: str = "Musical_Instruments",
+    instruction: str = None,
 ):
     if batch_size < micro_batch_size or batch_size % micro_batch_size:
         raise ValueError("batch_size must be a multiple of micro_batch_size")
@@ -36,7 +39,7 @@ def train(
         raise RuntimeError("This SFT launcher expects one GPU")
 
     init_training_run(
-        dataset="Musical_Instruments",
+        dataset=dataset_name,
         config={
             "method": "plain_sft",
             "base_model": base_model,
@@ -44,7 +47,7 @@ def train(
             "eval_file": eval_file,
             "output_dir": output_dir,
             "learning_rate": learning_rate,
-            "dataset": "Musical_Instruments",
+            "dataset": dataset_name, "instruction": instruction,
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -54,14 +57,13 @@ def train(
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.use_cache = False
 
-    category = "music instruments"
     train_data = PlainSFTDataset(
         train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
-        sample=sample, seed=seed, category=category,
+        sample=sample, seed=seed, category=category, instruction=instruction,
     )
     eval_data = PlainSFTDataset(
         train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
-        sample=sample, seed=seed, category=category,
+        sample=sample, seed=seed, category=category, instruction=instruction,
     )
     trainer = transformers.Trainer(
         model=model,

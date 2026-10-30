@@ -63,16 +63,19 @@ def evaluate(
     sample: int = -1,
     num_beams: int = 10,
     max_new_tokens: int = 128,
+    category: str = "music instruments",
+    dataset_name: str = "Musical_Instruments",
+    instruction: str = None,
 ):
     if not torch.cuda.is_available():
         raise RuntimeError("Ranking evaluation requires a CUDA GPU")
     wandb_run = init_evaluation_run(
-        dataset="Musical_Instruments",
+        dataset=dataset_name,
         config={
             "method": "plain_sft",
             "base_model": base_model,
             "test_data_path": test_data_path,
-            "dataset": "Musical_Instruments",
+            "dataset": dataset_name, "instruction": instruction,
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -85,7 +88,7 @@ def evaluate(
 
     dataset = PlainSFTDataset(
         train_file=test_data_path, tokenizer=tokenizer, max_len=2560,
-        sample=sample, test=True, category="music instruments",
+        sample=sample, test=True, category=category, instruction=instruction,
     )
     results = dataset.get_all()
     trie = build_catalog_trie(info_file, tokenizer)

@@ -4,12 +4,16 @@ from reasoning_dataset import LatentRDataset
 
 
 class PlainSFTDataset(LatentRDataset):
+    def __init__(self, *args, instruction=None, **kwargs):
+        self.instruction = instruction  # e.g. next-item category prediction
+        super().__init__(*args, **kwargs)  # tokenizes every row
+
     def pre(self, idx):
         instruction = (
             "Below is an instruction that describes a task, paired with an input "
             "that provides further context. Write a response that appropriately "
             "completes the request. \n\n"
-            f"### Instruction:\n{self.instructs[0]}\n"
+            f"### Instruction:\n{self.instruction or self.instructs[0]}\n"
         )
         tokens = self.tokenizer.encode(instruction, bos=True, eos=False)
 
