@@ -55,9 +55,9 @@ def main():
         j = n_prefix + (thought - n_prefix) // 2  # a token inside the user span
         other = ids.clone()
         other[j] = (int(ids[j]) + 17) % 150000
-        config.latent_bottleneck["delete_latents"] = True
+        model.config.latent_bottleneck["delete_latents"] = True
         leak = max(leak, float((logprobs(ids, labels) - logprobs(other, labels)).abs().max()))
-        config.latent_bottleneck["delete_latents"] = False
+        model.config.latent_bottleneck["delete_latents"] = False
         used = max(used, float((logprobs(ids, labels) - logprobs(other, labels)).abs().max()))
     print(f"[1] history perturbation: latents deleted max |dlogp| {leak:.2e}; latents visible {used:.2e}")
     if leak > 1e-3 or used < 1e-3:
