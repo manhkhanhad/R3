@@ -80,6 +80,13 @@ def main():
              "| HR@1 | HR@3 | HR@5 | HR@10 |", "|---:|---:|---:|---:|",
              "| " + " | ".join(f"{(cat_rank < c).mean():.4f}" for c in CUTOFFS) + " |", ""]
     cat1 = (cat_rank < 1).astype(float)
+    tc = target_cat.to_numpy()[keep]
+    last = np.array([paths.get(ast.literal_eval(a)[-1]) for a in test["item_asins"]], dtype=object)[keep]
+    in_hist = np.array([t in {paths.get(x) for x in ast.literal_eval(a)}
+                        for a, t in zip(test["item_asins"][keep], tc)], dtype=float)
+    lines += [f"- trivial baseline, last history item's category: top-1 {ci((last == tc).astype(float), idx)}",
+              f"- target category appears in the history: {ci(in_hist, idx)}",
+              f"- category model − last-item baseline (top-1): {ci(cat1 - (last == tc), idx)}", ""]
 
     for spec in args.item_eval:
         label, path = spec.split("=", 1)
