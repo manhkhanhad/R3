@@ -65,7 +65,7 @@ def main(
     divreason = getattr(model.config, "latent_divreason", None)
     if thought_mode != "raw" and not (thoughts_spec or divreason):
         raise ValueError("thought_mode needs a continuous-thought or DivReason checkpoint")
-    if thought_mode == "single" and not divreason:
+    if (thought_mode == "single" or thought_mode.startswith("path")) and not divreason:
         raise ValueError("thought_mode=single (one unperturbed path) needs a DivReason checkpoint")
     latent_module = model.thoughts if thoughts_spec else (model.divreason if divreason else None)
     hash_dict = get_prefix_data(info_file, tokenizer, n_thoughts=n_thoughts)
@@ -183,6 +183,8 @@ def main(
     replacement = None
     if thought_mode == "single":
         model.divreason.mode = "single"  # DivReason "w/o Dual": one unperturbed R3 path
+    elif thought_mode.startswith("path") and divreason:
+        model.divreason.mode = f"path:{int(thought_mode[4:])}"  # e.g. path0: one perturbed path alone
     elif thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)

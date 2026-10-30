@@ -19,7 +19,9 @@
 # early stopping).  Then constrained 10-beam ranking under r_agg interventions
 # (raw / single path / mean / shuffle) and paired bootstrap.
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default scratch), CATEGORY, PATHS, DROPOUT, LAYER, ALPHA,
-#      BETA, CENTER (True/False), OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
+#      BETA, CENTER (True/False), OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN,
+#      PATH_CE / PATH_DIV / PATH_MARGIN (path-diversity test: per-path CE weight, output-divergence hinge
+#      weight and margin; 0 = paper DivReason; needs a >= 40 GB GPU: submit with --constraint="l40s|a100|l40|a40").
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -36,6 +38,7 @@ center="${CENTER:-False}"
 if [[ $paths -gt 0 ]]; then
   suffix=""
   [[ $center == True ]] && suffix=_centered
+  [[ "${PATH_DIV:-0}" != 0 ]] && suffix="${suffix}_pathdiv"
   name="${OUTPUT_NAME:-${category}_divreason_n${paths}${suffix}}"
 else
   name="${OUTPUT_NAME:-${category}_r3_plain_matched}"
@@ -49,6 +52,7 @@ gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
 micro_batch_size=4
 [[ "$gpu_name" == *"3090"* ]] && micro_batch_size=2
 [[ $paths -gt 0 && "$gpu_name" == *"3090"* ]] && micro_batch_size=1  # N first passes per row
+[[ "${PATH_DIV:-0}" != 0 || "${PATH_CE:-0}" != 0 ]] && [[ "$gpu_name" != *"3090"* ]] && micro_batch_size=2  # + N decoder passes
 echo "[$(date --iso-8601=seconds)] $name: paths=$paths center=$center GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
 
 data_dir="data/${category}"
@@ -71,7 +75,8 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   div=()
   [[ $paths -gt 0 ]] && div=(--divreason_paths "$paths" --divreason_dropout "${DROPOUT:-0.1}"
     --divreason_layer "${LAYER:-14}" --divreason_alpha "${ALPHA:-0.1}" --divreason_beta "${BETA:-0.5}"
-    --divreason_center "$center")
+    --divreason_center "$center" --divreason_path_ce_weight "${PATH_CE:-0}"
+    --divreason_path_div_weight "${PATH_DIV:-0}" --divreason_path_div_margin "${PATH_MARGIN:-0.2}")
   python "$code_root/src/latent/latent_attention_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
     --train_file "$train_file" --eval_file "$eval_file" \
@@ -83,6 +88,7 @@ fi
 
 python "$code_root/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 1
 default_modes="raw single mean shuffle"
+[[ "${PATH_DIV:-0}" != 0 || "${PATH_CE:-0}" != 0 ]] && default_modes="raw mean shuffle single path0"
 [[ $paths -gt 0 ]] || default_modes="raw"
 for mode in ${MODES:-$default_modes}; do
   echo "[$(date --iso-8601=seconds)] ranking, thought_mode=$mode"

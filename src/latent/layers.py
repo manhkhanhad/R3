@@ -338,6 +338,7 @@ class LatentModel(Qwen2ForCausalLM):
             and attention_mask is not None and input_ids.size() == attention_mask.size()
         )
         plain_attention_mask = attention_mask
+        plain_input_ids = input_ids
         bottleneck = getattr(self.config, "latent_bottleneck", None)
         if bottleneck and attention_mask is not None and attention_mask.dim() == 2:
             attention_mask, position_ids = self._latent_bottleneck_inputs(
@@ -380,4 +381,19 @@ class LatentModel(Qwen2ForCausalLM):
             aux = self.steer.last_aux
             if labels is not None and aux is not None and self.steer.aux_weight > 0 and self.training:
                 output.loss = output.loss + self.steer.aux_weight * aux
+        dr = getattr(self, "divreason", None)
+        if (dr is not None and self.training and labels is not None and dr.last_paths is not None
+                and (dr.path_ce_weight > 0 or dr.path_div_weight > 0)):
+            from divreason import path_losses
+            thought_pos = torch.nonzero(plain_input_ids == self.model.embed_tokens.num_embeddings - 1)[:, 1]
+            nll_sum, hinge, tokens, stats = path_losses(
+                self, plain_input_ids, plain_attention_mask, labels, dr.last_paths, thought_pos, dr.path_div_margin)
+            # The main CE is a token sum over the micro-batch divided by the token count of the
+            # whole accumulated batch (num_items_in_batch); weight the extras the same way.
+            denom = kwargs.get("num_items_in_batch")
+            denom = float(denom) if denom is not None else float(max(tokens, 1))
+            extra = dr.path_ce_weight * nll_sum / denom + dr.path_div_weight * hinge * tokens / denom
+            output.loss = output.loss + extra
+            dr.last_train_stats = dict(stats, path_hinge=float(hinge))
+            dr.last_paths = None
         return output

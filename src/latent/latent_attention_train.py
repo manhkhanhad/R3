@@ -82,6 +82,10 @@ def train(
     divreason_beta: float = 0.5,
     divreason_prune: float = 0.05,
     divreason_center: bool = False,
+    # path-diversity test: per-path CE + hinge on the paths' output divergence (0 = paper)
+    divreason_path_ce_weight: float = 0.0,
+    divreason_path_div_weight: float = 0.0,
+    divreason_path_div_margin: float = 0.2,
 
 ):
 
@@ -110,6 +114,9 @@ def train(
             "divreason_alpha": divreason_alpha,
             "divreason_beta": divreason_beta,
             "divreason_center": divreason_center,
+            "divreason_path_ce_weight": divreason_path_ce_weight,
+            "divreason_path_div_weight": divreason_path_div_weight,
+            "divreason_path_div_margin": divreason_path_div_margin,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -200,7 +207,10 @@ def train(
         model_config = AutoConfig.from_pretrained(base_model)
         model_config.latent_divreason = {"n_paths": divreason_paths, "dropout": divreason_dropout,
                                          "layer": divreason_layer, "alpha": 0.0, "beta": divreason_beta,
-                                         "prune": divreason_prune, "router_dim": 256}
+                                         "prune": divreason_prune, "router_dim": 256,
+                                         "path_ce_weight": divreason_path_ce_weight,
+                                         "path_div_weight": divreason_path_div_weight,
+                                         "path_div_margin": divreason_path_div_margin}
         model_kwargs["config"] = model_config
 
     model = model_class.from_pretrained(

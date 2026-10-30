@@ -45,6 +45,13 @@ class DivergentPaths(nn.Module):
         self.alpha = float(spec.get("alpha", 0.0))  # absolute, set from the relative value at init
         self.beta = float(spec.get("beta", 0.5))
         self.prune = float(spec.get("prune", 0.05))
+        # Path-diversity test (user hypothesis): per-path CE and a hinge on the paths'
+        # output divergence, history identical across paths.  0 = paper DivReason.
+        self.path_ce_weight = float(spec.get("path_ce_weight", 0.0))
+        self.path_div_weight = float(spec.get("path_div_weight", 0.0))
+        self.path_div_margin = float(spec.get("path_div_margin", 0.2))
+        self.last_paths: Optional[torch.Tensor] = None
+        self.last_train_stats: dict = {}
         dim = int(spec.get("router_dim", 256))
         self.router = nn.Sequential(nn.LayerNorm(hidden_size), nn.Linear(hidden_size, dim), nn.GELU(), nn.Linear(dim, 1))
         self.register_buffer("directions", torch.zeros(self.n, hidden_size))
@@ -95,23 +102,18 @@ class DivergentPaths(nn.Module):
 
     def _aggregate(self, lm, input_ids, attention_mask, thought_idx):
         batch = input_ids.size(0)
-        if self.mode == "single":
-            n, rows_alpha, use_noise = 1, None, False
-        else:
-            n, use_noise = self.n, True
-            rows_alpha = (self.alpha * self.directions.float()).repeat(batch, 1)  # row b*n + k gets direction k
-        ids = input_ids.repeat_interleave(n, 0)
-        mask = attention_mask.repeat_interleave(n, 0)
-        self.active, self.row_alpha = use_noise, rows_alpha
-        try:
-            hidden = lm.model(input_ids=ids, attention_mask=mask).last_hidden_state
-        finally:
-            self.active, self.row_alpha = False, None
-        r = lm.attention(hidden_states=hidden, attention_mask=mask, thought_id_idx=thought_idx.repeat_interleave(n, 0))
-        r = r.float().view(batch, n, -1)
-        if n == 1:
+        self.last_paths = None
+        if self.mode.startswith("path:"):  # evaluation: one perturbed path k alone
+            r = self._paths(lm, input_ids, attention_mask, thought_idx, self.n, True)
             self.last_stats = {}
-            return r[:, 0]
+            return r[:, int(self.mode.split(":")[1])]
+        if self.mode == "single":
+            self.last_stats = {}
+            return self._paths(lm, input_ids, attention_mask, thought_idx, 1, False)[:, 0]
+        n = self.n
+        r = self._paths(lm, input_ids, attention_mask, thought_idx, n, True)
+        if self.training:
+            self.last_paths = r  # with graph, for the per-path losses (path_losses)
         s = self.router(r).squeeze(-1)  # [B, N]
         unit = F.normalize(r, dim=-1)
         cos = unit @ unit.transpose(1, 2)
@@ -135,6 +137,58 @@ class DivergentPaths(nn.Module):
             "weight_entropy": float(-(weights.clamp_min(1e-12).log() * weights).sum(1).mean()),
         }
         return (weights.unsqueeze(-1) * r).sum(1)
+
+    def _paths(self, lm, input_ids, attention_mask, thought_idx, n, noise):
+        """``[B, n, H]`` fp32 path latents; with ``noise``, row b*n + k gets MC-dropout and direction k."""
+        batch = input_ids.size(0)
+        rows_alpha = (self.alpha * self.directions.float()).repeat(batch, 1) if noise else None
+        ids = input_ids.repeat_interleave(n, 0)
+        mask = attention_mask.repeat_interleave(n, 0)
+        self.active, self.row_alpha = noise, rows_alpha
+        try:
+            hidden = lm.model(input_ids=ids, attention_mask=mask).last_hidden_state
+        finally:
+            self.active, self.row_alpha = False, None
+        r = lm.attention(hidden_states=hidden, attention_mask=mask, thought_id_idx=thought_idx.repeat_interleave(n, 0))
+        return r.float().view(batch, n, -1)
+
+
+def target_logprobs(lm, input_ids, attention_mask, labels, latent, thought_pos):
+    """Decoder pass with ``latent`` [B, H] in the thought slot; log-probs ``[T, V]`` (fp32) at
+    the target positions (shifted, labels != -100) and the target ids ``[T]``."""
+    embeds = lm.model.embed_tokens(input_ids)
+    rows = torch.arange(input_ids.size(0), device=input_ids.device)
+    embeds = embeds.index_put((rows, thought_pos), latent.to(embeds.dtype))
+    hidden = lm.model(inputs_embeds=embeds, attention_mask=attention_mask).last_hidden_state
+    target = labels[:, 1:]
+    keep = target.ne(-100)
+    logits = lm.lm_head(hidden[:, :-1][keep]).float()
+    return torch.log_softmax(logits, -1), target[keep]
+
+
+def path_losses(lm, input_ids, attention_mask, labels, paths, thought_pos, margin):
+    """Per-path decoder passes (history identical, only the latent differs).
+
+    Returns (sum over target tokens of the path-mean NLL, the hinge
+    max(0, margin - mean pairwise JS) between the paths' next-token distributions
+    at the target positions, number of target tokens, stats)."""
+    n = paths.size(1)
+    logps, nll_sum = [], 0.0
+    for k in range(n):
+        logp, target = target_logprobs(lm, input_ids, attention_mask, labels, paths[:, k], thought_pos)
+        nll_sum = nll_sum + F.nll_loss(logp, target, reduction="sum") / n
+        logps.append(logp)
+    js_pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            p, q = logps[i].exp(), logps[j].exp()
+            log_m = torch.log((p + q) / 2 + 1e-12)
+            js = 0.5 * (p * (logps[i] - log_m)).sum(-1) + 0.5 * (q * (logps[j] - log_m)).sum(-1)
+            js_pairs.append(js.mean())
+    js_mean = torch.stack(js_pairs).mean()
+    hinge = F.relu(margin - js_mean)
+    tokens = logps[0].size(0)
+    return nll_sum, hinge, tokens, {"path_js": float(js_mean), "path_nll": float(nll_sum) / max(tokens, 1)}
 
 
 @torch.no_grad()
@@ -216,6 +270,44 @@ class DivReasonDiagnostics(TrainerCallback):
         valid = labels.ne(-100)
         return (loss * valid).sum(1) / valid.sum(1).clamp(min=1)
 
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        dr = getattr(model, "divreason", None)
+        if dr is not None and dr.last_train_stats and state.global_step % 10 == 0:
+            import json
+            print("divreason train:", json.dumps({"step": state.global_step, **dr.last_train_stats}), flush=True)
+
+    @staticmethod
+    def _js(logp_a, logp_b):
+        p, q = logp_a.exp(), logp_b.exp()
+        log_m = torch.log((p + q) / 2 + 1e-12)
+        return float((0.5 * (p * (logp_a - log_m)).sum(-1) + 0.5 * (q * (logp_b - log_m)).sum(-1)).mean())
+
+    def _path_identity_vs_content(self, model, chunks, step):
+        """Same user, path 0 vs path 1 (path identity) and own path 0 vs another
+        user's path 0 (user content): JS between target distributions and NLL change."""
+        dr = model.divreason
+        thought_id = model.model.embed_tokens.num_embeddings - 1
+        bank = []
+        for c in chunks:
+            pos = torch.nonzero(c["input_ids"] == thought_id)[:, 1]
+            bank.append(dr._paths(model, c["input_ids"], c["attention_mask"], pos, dr.n, True))
+        bank = torch.cat(bank)
+        other = bank.roll(1, 0)
+        js_id, js_user, d_id, d_user = [], [], [], []
+        for i, c in enumerate(chunks):
+            pos = torch.nonzero(c["input_ids"] == thought_id)[:, 1]
+            own = bank[i * step:(i + 1) * step]
+            args_ = (model, c["input_ids"], c["attention_mask"], c["labels"])
+            lp00, tgt = target_logprobs(*args_, own[:, 0], pos)
+            lp01, _ = target_logprobs(*args_, own[:, 1], pos)
+            lpx0, _ = target_logprobs(*args_, other[i * step:(i + 1) * step, 0], pos)
+            nll = lambda lp: float(F.nll_loss(lp, tgt))
+            js_id.append(self._js(lp00, lp01)); js_user.append(self._js(lp00, lpx0))
+            d_id.append(nll(lp01) - nll(lp00)); d_user.append(nll(lpx0) - nll(lp00))
+        mean = lambda x: sum(x) / len(x)
+        return {"js_same_user_other_path": mean(js_id), "js_other_user_same_path": mean(js_user),
+                "dnll_same_user_other_path": mean(d_id), "dnll_other_user_same_path": mean(d_user)}
+
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         import json
         if model is None or not hasattr(model, "divreason"):
@@ -249,6 +341,7 @@ class DivReasonDiagnostics(TrainerCallback):
                 out["single"] = torch.cat([self._nll(model, c) for c in chunks])
             finally:
                 dr.mode = "paths"
+            identity = self._path_identity_vs_content(model, chunks, step) if dr.n > 1 else {}
         share = ((bank - bank.mean(0)).norm(dim=1) / bank.norm(dim=1).clamp_min(1e-12)).mean()
         record = {"step": state.global_step, "epoch": state.epoch, "raw_nll": float(raw.mean()),
                   "r_agg_residual_share": float(share)}
@@ -256,6 +349,7 @@ class DivReasonDiagnostics(TrainerCallback):
             record[f"{name}_dnll"] = float((v - raw).mean())
         for key in stats[0]:
             record[key] = sum(s[key] for s in stats) / len(stats)
+        record.update(identity)
         print("divreason diagnostics:", json.dumps(record), flush=True)
         with open(self.path, "a") as f:
             f.write(json.dumps(record) + "\n")
