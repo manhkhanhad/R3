@@ -292,7 +292,12 @@ class LatentModel(Qwen2ForCausalLM):
                 )
         query_len = (input_ids if input_ids is not None else inputs_embeds).size(1)
         dtype = inputs_embeds.dtype if inputs_embeds is not None else self.model.embed_tokens.weight.dtype
-        return bottleneck_mask_and_positions(attention_mask, block, thought_pos, query_len, dtype)
+        gist_k = 0
+        if spec.get("gist"):
+            thoughts = getattr(self.config, "latent_continuous_thoughts", None)
+            gist_k = int(thoughts["k"]) if thoughts else 1
+        return bottleneck_mask_and_positions(attention_mask, block, thought_pos, query_len, dtype,
+                                             gist_k=gist_k, delete_latents=bool(spec.get("delete_latents")))
 
     def forward(
         self,

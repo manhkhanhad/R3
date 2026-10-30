@@ -67,6 +67,9 @@ def train(
     # thoughts replacing the pooled r; "constant" = K learned vectors (baseline C)
     thought_source: str = None,
     n_thoughts: int = 1,
+    # Gist bottleneck (latent_bottleneck.py): with latent_only, the thought tokens
+    # read the history at every layer; the target reads it only through them
+    latent_gist: bool = False,
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -95,6 +98,7 @@ def train(
             "latent_only": latent_only,
             "thought_source": thought_source,
             "n_thoughts": n_thoughts,
+            "latent_gist": latent_gist,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -264,6 +268,10 @@ def train(
         prefix_ids = [int(t) for t in train_data.instruction_tokens()]
         assert prefix_ids == [int(t) for t in val_data.instruction_tokens()]
         model.config.latent_bottleneck = {"visible_prefix_ids": prefix_ids}
+        if latent_gist:
+            if thought_source != "constant":
+                raise ValueError("latent_gist uses learned thought tokens (thought_source=constant)")
+            model.config.latent_bottleneck["gist"] = True
         print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
 
     print("LOAD DATA FINISHED")

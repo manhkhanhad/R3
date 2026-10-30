@@ -60,6 +60,11 @@ def main(
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
+    if thought_mode == "delete":  # gist bottleneck: hide the latent tokens from the target side
+        if not (getattr(model.config, "latent_bottleneck", None) or {}).get("gist"):
+            raise ValueError("thought_mode=delete needs a gist-bottleneck checkpoint")
+        model.config.latent_bottleneck["delete_latents"] = True
+        thought_mode = "raw"
     thoughts_spec = getattr(model.config, "latent_continuous_thoughts", None)
     n_thoughts = int(thoughts_spec["k"]) if thoughts_spec else 1
     if thought_mode != "raw" and not thoughts_spec:

@@ -17,7 +17,9 @@
 # matched to R3_ori Toys (base Qwen/Qwen2.5-1.5B, lr 3e-4, batch 128, 3 epochs,
 # early stopping). Then: self-check, bottleneck leak check, constrained 10-beam
 # ranking, thought interventions (mask / mean / shuffle), paired bootstrap.
-# Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0),
+# GIST=1 (with SOURCE=constant LATENT_ONLY=1): gist bottleneck, the thought tokens read the history at every
+# layer and the target reads it only through them (latent_bottleneck.py); interventions raw / delete.
+# Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0), GIST,
 #      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 
 set -Eeuo pipefail
@@ -35,7 +37,8 @@ category="${CATEGORY:-Toys_and_Games}"
 source="${SOURCE:-hidden}"
 k="${K:-4}"
 latent_only="${LATENT_ONLY:-1}"
-name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)}"
+gist="${GIST:-0}"
+name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -60,6 +63,7 @@ mkdir -p "$out"
 if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   echo "[$(date --iso-8601=seconds)] self-check on the base model"
   python "$code_root/src/latent/continuous_thoughts_check.py" --test_file "$test_file" --k "$k"
+  [[ $gist == 1 ]] && python "$code_root/src/latent/latent_gist_check.py" --test_file "$test_file" --k "$k"
   if [[ -n "${VALID_SAMPLE:-}" ]]; then  # smoke runs: small validation file
     head -n $((VALID_SAMPLE + 1)) "$eval_file" > "$task_dir/valid_sample.csv"; eval_file="$task_dir/valid_sample.csv"
   fi
@@ -69,6 +73,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   [[ -n "$last_ckpt" ]] && resume=(--resume_from_checkpoint "$last_ckpt") && echo "resuming from $last_ckpt"
   latent_flag=()
   [[ $latent_only == 1 ]] && latent_flag=(--latent_only True)
+  [[ $gist == 1 ]] && latent_flag+=(--latent_gist True)
   python "$code_root/src/latent/latent_attention_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
     --train_file "$train_file" --eval_file "$eval_file" \
@@ -79,7 +84,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
     --thought_source "$source" --n_thoughts "$k" "${latent_flag[@]}" "${resume[@]}"
 fi
 
-if [[ $latent_only == 1 ]]; then
+if [[ $latent_only == 1 && $gist != 1 ]]; then
   echo "[$(date --iso-8601=seconds)] bottleneck leak check (fp32)"
   python "$code_root/src/latent/latent_bottleneck_check.py" \
     --checkpoint "$out" --test_file "$test_file" --category "$category" --pairs 16
@@ -88,6 +93,7 @@ fi
 python "$code_root/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 1
 for mode in ${MODES:-raw mask mean shuffle}; do
   [[ "$source" == constant && "$mode" == shuffle ]] && continue  # identical to raw by construction
+  [[ "$mode" == delete && $gist != 1 ]] && continue
   echo "[$(date --iso-8601=seconds)] ranking, thought_mode=$mode"
   CUDA_VISIBLE_DEVICES=0 python "$code_root/src/latent/latent_attention_eval.py" \
     --batch_size 8 --base_model "$out" --sample "${TEST_SAMPLE:--1}" \

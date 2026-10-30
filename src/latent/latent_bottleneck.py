@@ -20,6 +20,16 @@ history length either.  The first pass that computes ``r`` is unchanged.
 The same mask is applied in training, teacher-forced scoring, and KV-cache
 generation / constrained beam search, so there is no train/test mode switch
 (Attempt 1's failure mode).
+
+Gist variant (``"gist": True``): the K thought tokens are learned vectors
+(continuous_thoughts ``source="constant"``) processed in the *same* pass, and
+their queries may read the whole history at every layer; only the queries after
+the last thought (the target side) are blocked from the history.  The target
+then reads the history only through the thoughts' per-layer keys/values
+(gisting, Mu et al. 2023).  Position ids are left unchanged (the target positions
+reveal the history length; renumbering would distort the thought-to-history
+distances).  ``"delete_latents": True`` (evaluation) also hides the thoughts from
+the target side.
 """
 
 from typing import Optional, Sequence
@@ -82,6 +92,8 @@ def bottleneck_mask_and_positions(
     thought_pos: torch.Tensor,
     query_len: int,
     dtype: torch.dtype,
+    gist_k: int = 0,
+    delete_latents: bool = False,
 ):
     """4D additive mask ``[B, 1, q, k]`` and position ids ``[B, q]`` for the last
     ``query_len`` positions of a sequence whose full 2D padding mask is
@@ -104,7 +116,11 @@ def bottleneck_mask_and_positions(
     k_abs = torch.arange(key_len, device=device)  # [k]
     causal = q_abs.unsqueeze(1) >= k_abs.unsqueeze(0)  # [q, k]
     allowed = causal.unsqueeze(0) & valid.unsqueeze(1)  # [B, q, k]
-    is_target_query = q_abs.unsqueeze(0) >= thought_pos.unsqueeze(1)  # [B, q]
+    is_target_query = q_abs.unsqueeze(0) >= (thought_pos + gist_k).unsqueeze(1)  # [B, q]
+    if delete_latents:
+        is_thought_key = (k_abs.unsqueeze(0) >= thought_pos.unsqueeze(1)) & (
+            k_abs.unsqueeze(0) < (thought_pos + max(gist_k, 1)).unsqueeze(1))
+        block = block | is_thought_key
     allowed = allowed & ~(is_target_query.unsqueeze(2) & block.unsqueeze(1))
     # Never leave a row empty (pad queries): let every query see itself.
     allowed = allowed | (q_abs.unsqueeze(1) == k_abs.unsqueeze(0)).unsqueeze(0)
@@ -112,7 +128,7 @@ def bottleneck_mask_and_positions(
     bias = torch.zeros(batch, query_len, key_len, dtype=dtype, device=device)
     bias = bias.masked_fill(~allowed, torch.finfo(dtype).min).unsqueeze(1)
 
-    visible = valid & ~block
+    visible = valid if gist_k else valid & ~block
     positions = (visible.long().cumsum(dim=1) - 1).clamp(min=0)[:, key_len - query_len:]
     return bias, positions
 
