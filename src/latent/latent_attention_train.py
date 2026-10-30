@@ -269,8 +269,9 @@ def train(
         assert prefix_ids == [int(t) for t in val_data.instruction_tokens()]
         model.config.latent_bottleneck = {"visible_prefix_ids": prefix_ids}
         if latent_gist:
-            if thought_source != "constant":
-                raise ValueError("latent_gist uses learned thought tokens (thought_source=constant)")
+            if thought_source != "constant" or n_thoughts < 2:
+                raise ValueError("latent_gist uses learned thought tokens (thought_source=constant), "
+                                 "n_thoughts = latents + 1 readout >= 2")
             model.config.latent_bottleneck["gist"] = True
         print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
 

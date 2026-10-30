@@ -24,7 +24,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-1.5B")
     ap.add_argument("--test_file", required=True)
-    ap.add_argument("--k", type=int, default=4)
+    ap.add_argument("--k", type=int, default=5)  # latents + 1 readout
     ap.add_argument("--rows", type=int, default=8)
     args = ap.parse_args()
 

@@ -17,7 +17,7 @@
 # matched to R3_ori Toys (base Qwen/Qwen2.5-1.5B, lr 3e-4, batch 128, 3 epochs,
 # early stopping). Then: self-check, bottleneck leak check, constrained 10-beam
 # ranking, thought interventions (mask / mean / shuffle), paired bootstrap.
-# GIST=1 (with SOURCE=constant LATENT_ONLY=1): gist bottleneck, the thought tokens read the history at every
+# GIST=1 (with SOURCE=constant LATENT_ONLY=1): gist bottleneck, K = latents + 1 readout; the latents read the history at every
 # layer and the target reads it only through them (latent_bottleneck.py); interventions raw / delete.
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0), GIST,
 #      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
