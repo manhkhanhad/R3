@@ -76,6 +76,13 @@ def train(
     steered_rule: str = "learned",  # learned | recent (fixed-rule baseline)
     steered_aux_weight: float = 0.2,
     item_embeddings_file: str = None,  # Qwen3 title embeddings (oracle items)
+    # SASRec-informed pooling (candidate_pooling.py): r's pooling also attends to the
+    # row's SASRec top-C candidates; prompt unchanged; base_model = a trained R3 checkpoint
+    candidate_kind: str = None,  # title | sasrec
+    candidates_file: str = None,  # sasrec_candidates.py output
+    title_vectors_file: str = None,  # candidate_title_vectors.py output
+    n_candidates: int = 10,
+    candidate_shuffle_seed: int = None,  # control: every row gets another user's candidates
 
 ):
 
@@ -102,6 +109,10 @@ def train(
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
+            "candidate_kind": candidate_kind,
+            "candidates_file": candidates_file,
+            "n_candidates": n_candidates,
+            "candidate_shuffle_seed": candidate_shuffle_seed,
             "learning_rate": learning_rate,
         },
     )
@@ -183,6 +194,25 @@ def train(
     elif n_thoughts != 1:
         raise ValueError("n_thoughts > 1 needs thought_source")
 
+    candidates = None
+    if candidate_kind is not None:
+        if use_side_info or use_category_alignment or category_text_file or thought_source or latent_only:
+            raise ValueError("candidate pooling is a plain-R3 variant; do not combine with other options")
+        from transformers import AutoConfig
+        from candidate_pooling import CandidatePoolingModel
+        candidates = torch.load(candidates_file, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_candidate_pooling = {
+            "kind": candidate_kind, "k": n_candidates,
+            "candidates_file": os.path.abspath(candidates_file),
+            "title_vectors": os.path.abspath(title_vectors_file),
+            "title_norm": float(torch.load(title_vectors_file, map_location="cpu", weights_only=False)["mean_norm"]),
+            "sasrec_dim": int(candidates["item_embeddings"].shape[1]),
+            "shuffle_seed": candidate_shuffle_seed,
+        }
+        model_class = CandidatePoolingModel
+        model_kwargs["config"] = model_config
+
     model = model_class.from_pretrained(
         base_model,
         # load_in_8bit=True,
@@ -222,6 +252,8 @@ def train(
             for layer in (model.steer.query, model.steer.key):
                 layer.reset_parameters()
             print("steered reading:", model.config.latent_steered_reading)
+    if candidates is not None:
+        print("candidate pooling:", model.config.latent_candidate_pooling)
     if use_side_info:
         # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
         token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
@@ -259,6 +291,13 @@ def train(
         item_embeddings = torch.load(item_embeddings_file, map_location="cpu", weights_only=False)["embeddings"].float()
         extra_train = {**extra_train, "item_embeddings": item_embeddings}
         extra_val = {**extra_val, "item_embeddings": item_embeddings}
+    if candidates is not None:
+        from candidate_pooling import CandidateRowsDataset
+        dataset_class = CandidateRowsDataset
+        extra_train = {"candidates": candidates["candidates"]["train"], "logp": candidates["logp"]["train"],
+                       "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed}
+        extra_val = {"candidates": candidates["candidates"]["valid"], "logp": candidates["logp"]["valid"],
+                     "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
@@ -294,6 +333,9 @@ def train(
     if steered_k > 0:
         from steered_reading import SteeredCollator
         collator = SteeredCollator(collator)
+    if candidates is not None:
+        from candidate_pooling import CandidateCollator
+        collator = CandidateCollator(collator)
     trainer = transformers.Trainer(
         # deepspeed=deepspeed,
         model=model,
@@ -317,7 +359,8 @@ def train(
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
             load_best_model_at_end=True,
-            label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0) else None,
+            label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0
+                                       or candidates is not None) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),

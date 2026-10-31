@@ -40,6 +40,9 @@ def main(
     # B1 steered reading (steered_reading.py): learned | recent | all (selection intervention)
     selection_mode: str = "learned",
     item_embeddings_file: str = None,  # optional: oracle-agreement statistics
+    # SASRec-informed pooling (candidate_pooling.py): raw | shuffle (another
+    # user's candidates) | drop (no candidates: plain R3 pooling)
+    candidate_mode: str = "raw",
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -55,7 +58,17 @@ def main(
                      "yelp": "resturant" }
     category = category_dict[category]
 
-    model = LatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
+    from transformers import AutoConfig
+    candidate_spec = getattr(AutoConfig.from_pretrained(base_model), "latent_candidate_pooling", None)
+    model_class = LatentModel
+    if candidate_spec:
+        from candidate_pooling import CandidatePoolingModel
+        model_class = CandidatePoolingModel
+    elif candidate_mode != "raw":
+        raise ValueError("candidate_mode needs a candidate-pooling checkpoint")
+    if candidate_mode not in ("raw", "shuffle", "drop"):
+        raise ValueError(f"unknown candidate_mode {candidate_mode}")
+    model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -90,6 +103,15 @@ def main(
         model.steer.rule_override = selection_mode
     elif selection_mode != "learned":
         raise ValueError("selection_mode needs a steered-reading checkpoint")
+    if candidate_spec:
+        from candidate_pooling import CandidateRowsDataset
+        dataset_class = CandidateRowsDataset
+        cand = torch.load(candidate_spec["candidates_file"], map_location="cpu", weights_only=False)
+        # the test CSV here is split.py's copy of the test split (same rows, same order)
+        extra = {"candidates": cand["candidates"]["test"], "logp": cand["logp"]["test"],
+                 "n_candidates": int(candidate_spec["k"]),
+                 "shuffle_seed": thought_seed if candidate_mode == "shuffle" else None}
+        model.cand_disabled = candidate_mode == "drop"
     val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
                               sample=sample, n_thoughts=n_thoughts, **extra)
         
@@ -181,6 +203,7 @@ def main(
     scores = []
     seq_scores = []
     selections = []
+    cand_mass = []
     replacement = None
     if thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
@@ -227,6 +250,9 @@ def main(
             if replacement is not None:
                 rows = replacement[idx * batch_size: idx * batch_size + len(encodings)].to(device)
                 model.thoughts.override = lambda x, rows=rows: rows.repeat_interleave(x.size(0) // rows.size(0), 0).to(x)
+            if candidate_spec:
+                model.cand_override = (torch.tensor([e["cand_items"] for e in encodings]),
+                                       torch.tensor([e["cand_logp"] for e in encodings]))
             if steer:
                 width = max(len(e["input_ids"]) for e in encodings)
                 model.steer.item_index = pad_index([e["item_index"] for e in encodings], width, "left")
@@ -241,6 +267,8 @@ def main(
                 model.thoughts.override = None
         if intent:
             model.attention.target_item = None
+        if candidate_spec and model.last_cand_mass is not None:
+            cand_mass.extend(model.last_cand_mass[:: model.last_cand_mass.size(0) // len(encodings)].float().cpu().tolist())
         if idx == 0:
             print(output)
             print(score)
@@ -253,6 +281,8 @@ def main(
         test["predict_score"] = scores[i]
         if selections:
             test["selected_items"] = selections[i]
+        if cand_mass:
+            test["candidate_attention_mass"] = cand_mass[i]
         if intent_predictions:
             test["intent_predict"] = {str(k): v for k, v in intent_predictions[i].items()}
         # test["predict_seq_score"] = seq_scores[i]
