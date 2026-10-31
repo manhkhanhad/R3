@@ -50,6 +50,7 @@ class DivergentPaths(nn.Module):
         self.path_ce_weight = float(spec.get("path_ce_weight", 0.0))
         self.path_div_weight = float(spec.get("path_div_weight", 0.0))
         self.path_div_margin = float(spec.get("path_div_margin", 0.2))
+        self.path_div_metric = spec.get("path_div_metric", "js")  # js | sqrt_js
         self.last_paths: Optional[torch.Tensor] = None
         self.last_train_stats: dict = {}
         dim = int(spec.get("router_dim", 256))
@@ -166,29 +167,41 @@ def target_logprobs(lm, input_ids, attention_mask, labels, latent, thought_pos):
     return torch.log_softmax(logits, -1), target[keep]
 
 
-def path_losses(lm, input_ids, attention_mask, labels, paths, thought_pos, margin):
+def path_losses(lm, input_ids, attention_mask, labels, paths, thought_pos, margin, metric="js"):
     """Per-path decoder passes (history identical, only the latent differs).
 
     Returns (sum over target tokens of the path-mean NLL, the hinge
-    max(0, margin - mean pairwise JS) between the paths' next-token distributions
-    at the target positions, number of target tokens, stats)."""
+    max(0, margin - D) between the paths' next-token distributions at the target
+    positions, number of target tokens, stats).  ``metric="js"``: D = mean pairwise
+    JS (zero gradient when the paths agree, since JS is quadratic there);
+    ``"sqrt_js"``: D = mean per-token Jensen-Shannon distance sqrt(JS), first order
+    at agreement."""
     n = paths.size(1)
     logps, nll_sum = [], 0.0
     for k in range(n):
         logp, target = target_logprobs(lm, input_ids, attention_mask, labels, paths[:, k], thought_pos)
         nll_sum = nll_sum + F.nll_loss(logp, target, reduction="sum") / n
         logps.append(logp)
-    js_pairs = []
+    js_pairs, dist_pairs = [], []
     for i in range(n):
         for j in range(i + 1, n):
             p, q = logps[i].exp(), logps[j].exp()
             log_m = torch.log((p + q) / 2 + 1e-12)
             js = 0.5 * (p * (logps[i] - log_m)).sum(-1) + 0.5 * (q * (logps[j] - log_m)).sum(-1)
             js_pairs.append(js.mean())
+            dist_pairs.append(torch.sqrt(js.clamp(min=0) + 1e-8).mean())
     js_mean = torch.stack(js_pairs).mean()
-    hinge = F.relu(margin - js_mean)
+    dist_mean = torch.stack(dist_pairs).mean()
+    if metric == "js":
+        divergence = js_mean
+    elif metric == "sqrt_js":
+        divergence = dist_mean
+    else:
+        raise ValueError(f"unknown path divergence metric {metric}")
+    hinge = F.relu(margin - divergence)
     tokens = logps[0].size(0)
-    return nll_sum, hinge, tokens, {"path_js": float(js_mean), "path_nll": float(nll_sum) / max(tokens, 1)}
+    return nll_sum, hinge, tokens, {"path_js": float(js_mean), "path_js_distance": float(dist_mean),
+                                    "path_nll": float(nll_sum) / max(tokens, 1)}
 
 
 @torch.no_grad()

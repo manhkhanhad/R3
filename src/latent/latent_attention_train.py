@@ -86,6 +86,7 @@ def train(
     divreason_path_ce_weight: float = 0.0,
     divreason_path_div_weight: float = 0.0,
     divreason_path_div_margin: float = 0.2,
+    divreason_path_div_metric: str = "js",  # js | sqrt_js (Jensen-Shannon distance)
 
 ):
 
@@ -117,6 +118,7 @@ def train(
             "divreason_path_ce_weight": divreason_path_ce_weight,
             "divreason_path_div_weight": divreason_path_div_weight,
             "divreason_path_div_margin": divreason_path_div_margin,
+            "divreason_path_div_metric": divreason_path_div_metric,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -210,7 +212,8 @@ def train(
                                          "prune": divreason_prune, "router_dim": 256,
                                          "path_ce_weight": divreason_path_ce_weight,
                                          "path_div_weight": divreason_path_div_weight,
-                                         "path_div_margin": divreason_path_div_margin}
+                                         "path_div_margin": divreason_path_div_margin,
+                                         "path_div_metric": divreason_path_div_metric}
         model_kwargs["config"] = model_config
 
     model = model_class.from_pretrained(

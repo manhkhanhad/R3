@@ -387,7 +387,8 @@ class LatentModel(Qwen2ForCausalLM):
             from divreason import path_losses
             thought_pos = torch.nonzero(plain_input_ids == self.model.embed_tokens.num_embeddings - 1)[:, 1]
             nll_sum, hinge, tokens, stats = path_losses(
-                self, plain_input_ids, plain_attention_mask, labels, dr.last_paths, thought_pos, dr.path_div_margin)
+                self, plain_input_ids, plain_attention_mask, labels, dr.last_paths, thought_pos,
+                dr.path_div_margin, dr.path_div_metric)
             # The main CE is a token sum over the micro-batch divided by the token count of the
             # whole accumulated batch (num_items_in_batch); weight the extras the same way.
             denom = kwargs.get("num_items_in_batch")
