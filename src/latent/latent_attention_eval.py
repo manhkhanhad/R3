@@ -267,8 +267,9 @@ def main(
                 model.thoughts.override = None
         if intent:
             model.attention.target_item = None
-        if candidate_spec and model.last_cand_mass is not None:
-            cand_mass.extend(model.last_cand_mass[:: model.last_cand_mass.size(0) // len(encodings)].float().cpu().tolist())
+        if candidate_spec and model.last_cand_weights is not None:
+            w = model.last_cand_weights[:: model.last_cand_weights.size(0) // len(encodings)]
+            cand_mass.extend(w.float().cpu().tolist())
         if idx == 0:
             print(output)
             print(score)
@@ -282,7 +283,7 @@ def main(
         if selections:
             test["selected_items"] = selections[i]
         if cand_mass:
-            test["candidate_attention_mass"] = cand_mass[i]
+            test["candidate_weights"] = cand_mass[i]
         if intent_predictions:
             test["intent_predict"] = {str(k): v for k, v in intent_predictions[i].items()}
         # test["predict_seq_score"] = seq_scores[i]

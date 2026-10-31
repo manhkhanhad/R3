@@ -1,17 +1,20 @@
 """SASRec-informed pooling of the R3 latent (prompt unchanged).
 
-R3 pools the last hidden states H before ``<|Thought|>`` into r with one
-attention query (layers.SelfAttentionLayer).  Here the same pooling also
-attends to the row's SASRec top-C candidate items (sasrec_candidates.py, out
-of fold for training rows):
+R3 pools the last hidden states H before ``<|Thought|>`` into r_R3 with one
+attention query (layers.SelfAttentionLayer).  Here R3's pooling also reads the
+row's SASRec top-C candidate items (sasrec_candidates.py, out of fold for
+training rows) in a separate branch:
 
-    logits = [ q_rope · k_rope(H) / sqrt(d) + mask ;
-               q · Wk c_j / sqrt(d) + b + alpha * logp_j ]
-    r      = softmax(logits) · [ Wv H ; Wv c_j ]
+    s_j    = tau * standardise_j(q · Wk c_j / sqrt(d)) + alpha * logp_j
+    r_cand = softmax_j(s_j) · Wv c_j
+    r      = r_R3 + g * r_cand
 
-with R3's own Wq / Wk / Wv.  Candidates have no prompt position, so their
-logits use the unrotated query and key.  ``logp_j`` is SASRec's log-prob of the
-candidate (its trust signal); b (init 0) and alpha (init 1) are fp32.
+with R3's own Wq / Wk / Wv (unrotated: candidates have no prompt position).
+A separate softmax is needed because R3's pooling puts a logit of ~100-360 on
+one template token, so candidates in the same softmax get exactly zero mass
+and gradient.  ``logp_j`` is SASRec's log-prob (its trust signal);
+standardising q·k over the C candidates makes the selection scale-free.
+g, tau, alpha are fp32, init 1.
 
 Candidate vector c_j (``kind``):
 * ``title``: R3's last-layer representation of the item title
@@ -21,7 +24,7 @@ Candidate vector c_j (``kind``):
 
 The prompt, the single thought slot and the decoder are unchanged; the decoder
 sees candidates only through r.  Interventions (evaluation): ``shuffle``
-(another user's candidates), ``drop`` (no candidates: plain R3 pooling).
+(another user's candidates), ``drop`` (no candidate branch: exactly plain R3).
 """
 
 import os
@@ -36,12 +39,13 @@ from reasoning_dataset import LatentRDataset
 
 
 class CandidatePool(nn.Module):
-    """fp32 parameters of the candidate branch (b, alpha, optional SASRec projection)."""
+    """fp32 parameters of the candidate branch (gate, tau, alpha, optional SASRec projection)."""
 
     def __init__(self, hidden_size, spec):
         super().__init__()
         self.kind = spec["kind"]
-        self.bias = nn.Parameter(torch.zeros(()))
+        self.gate = nn.Parameter(torch.ones(()))
+        self.tau = nn.Parameter(torch.ones(()))
         self.alpha = nn.Parameter(torch.ones(()))
         if self.kind == "sasrec":
             self.proj = nn.Linear(int(spec["sasrec_dim"]), hidden_size)
@@ -52,8 +56,8 @@ class CandidatePool(nn.Module):
 
     def reset_parameters(self):
         with torch.no_grad():
-            self.bias.zero_()
-            self.alpha.fill_(1.0)
+            for p in (self.gate, self.tau, self.alpha):
+                p.fill_(1.0)
         if self.kind == "sasrec":
             self.proj.reset_parameters()
 
@@ -71,7 +75,7 @@ class CandidatePoolingModel(LatentModel):
         self._cand = None           # (items [B, C], logp [B, C]) for the next prefill (training)
         self.cand_override = None   # same, set by evaluation before generate
         self.cand_disabled = False  # "drop" intervention: plain R3 pooling
-        self.last_cand_mass = None  # attention mass on the candidates, per row
+        self.last_cand_weights = None  # [B, C] candidate selection weights (prefill)
 
     @classmethod
     def from_pretrained(cls, path, *args, **kwargs):
@@ -95,28 +99,24 @@ class CandidatePoolingModel(LatentModel):
         return super().forward(*args, **kwargs)
 
     def pool(self, hidden, attention_mask, thought_idx, items, logp):
-        """R3's SelfAttentionLayer.forward plus candidate keys/values."""
+        """R3's SelfAttentionLayer output plus g * the candidate branch."""
         att: SelfAttentionLayer = self.attention
-        weights = SelfAttentionLayer.mask_to_weights(attention_mask.clone(), thought_idx, att.end_k)
-        cos, sin = att.rope(hidden, position_ids=torch.arange(hidden.shape[1], device=hidden.device).unsqueeze(0))
-        Q, K, V = att.query(hidden), att.key(hidden), att.value(hidden)
+        r = att(hidden_states=hidden, attention_mask=attention_mask, thought_id_idx=thought_idx)
+        if self.cand_disabled:
+            self.last_cand_weights = None
+            return r
         rows = torch.arange(hidden.size(0), device=hidden.device)
-        q_plain = Q[rows, thought_idx - 1]                                   # [B, H]
-        Q, K = apply_rotary_pos_emb(Q, K, cos.squeeze(0), sin.squeeze(0), unsqueeze_dim=0)
-        logits = (Q[rows, thought_idx - 1].unsqueeze(1) @ K.transpose(-2, -1)).squeeze(1) * att.scale_score
-        logits = logits.float() + weights                                    # [B, L]
-        values = V
-        if not self.cand_disabled:
-            c = self.cand_pool.vectors(items)                                # [B, C, H] fp32
-            kc = att.key(c.to(att.key.weight.dtype))
-            vc = att.value(c.to(att.value.weight.dtype))
-            lc = (kc.float() @ q_plain.float().unsqueeze(-1)).squeeze(-1) * att.scale_score
-            lc = lc + self.cand_pool.bias + self.cand_pool.alpha * logp.to(lc.device).float()
-            logits = torch.cat([logits, lc], 1)
-            values = torch.cat([V, vc.to(V.dtype)], 1)
-        probs = F.softmax(logits, -1)
-        self.last_cand_mass = probs[:, hidden.size(1):].sum(-1).detach() if not self.cand_disabled else None
-        return (probs.unsqueeze(1).to(values.dtype) @ values).squeeze(1)
+        q = att.query(hidden[rows, thought_idx - 1]).float()                 # [B, H], unrotated
+        c = self.cand_pool.vectors(items)                                    # [B, C, H] fp32
+        kc = att.key(c.to(att.key.weight.dtype)).float()
+        vc = att.value(c.to(att.value.weight.dtype)).float()
+        z = (kc @ q.unsqueeze(-1)).squeeze(-1) * att.scale_score             # [B, C]
+        z = (z - z.mean(-1, keepdim=True)) / (z.std(-1, keepdim=True) + 1e-4)
+        p = self.cand_pool
+        w = F.softmax(p.tau * z + p.alpha * logp.to(z.device).float(), -1)
+        self.last_cand_weights = w.detach()
+        r_cand = (w.unsqueeze(1) @ vc).squeeze(1)
+        return (r.float() + p.gate * r_cand).to(r.dtype)
 
     def generate_embs(self, input_ids, attention_mask):
         cand = self.cand_override if self.cand_override is not None else self._cand
