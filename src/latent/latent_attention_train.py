@@ -83,6 +83,10 @@ def train(
     title_vectors_file: str = None,  # candidate_title_vectors.py output
     n_candidates: int = 10,
     candidate_shuffle_seed: int = None,  # control: every row gets another user's candidates
+    candidate_source: str = "sasrec",  # sasrec | random (C random non-history items per row)
+    candidate_anneal: str = None,  # "start,end" training fractions: branch scale 1 -> 0
+    eval_sample: int = None,  # validation rows (default: sample)
+    pool_diagnostics: bool = False,  # log R3 pooling concentration / candidate weights per evaluation
 
 ):
 
@@ -113,6 +117,8 @@ def train(
             "candidates_file": candidates_file,
             "n_candidates": n_candidates,
             "candidate_shuffle_seed": candidate_shuffle_seed,
+            "candidate_source": candidate_source,
+            "candidate_anneal": candidate_anneal,
             "learning_rate": learning_rate,
         },
     )
@@ -202,14 +208,25 @@ def train(
         from candidate_pooling import CandidatePoolingModel
         candidates = torch.load(candidates_file, map_location="cpu", weights_only=False)
         model_config = AutoConfig.from_pretrained(base_model)
+        if candidate_source not in ("sasrec", "random"):
+            raise ValueError(f"unknown candidate_source {candidate_source}")
         model_config.latent_candidate_pooling = {
             "kind": candidate_kind, "k": n_candidates,
             "candidates_file": os.path.abspath(candidates_file),
-            "title_vectors": os.path.abspath(title_vectors_file),
-            "title_norm": float(torch.load(title_vectors_file, map_location="cpu", weights_only=False)["mean_norm"]),
             "sasrec_dim": int(candidates["item_embeddings"].shape[1]),
             "shuffle_seed": candidate_shuffle_seed,
+            "source": candidate_source,
+            "n_items": int(candidates["item_embeddings"].shape[0]),
+            "anneal": [float(x) for x in candidate_anneal.split(",")] if candidate_anneal else None,
         }
+        if title_vectors_file:
+            model_config.latent_candidate_pooling.update(
+                title_vectors=os.path.abspath(title_vectors_file),
+                title_norm=float(torch.load(title_vectors_file, map_location="cpu", weights_only=False)["mean_norm"]))
+        elif candidate_kind == "sasrec":
+            model_config.latent_candidate_pooling["sasrec_scale"] = "hidden"
+        else:
+            raise ValueError("candidate_kind=title needs title_vectors_file")
         model_class = CandidatePoolingModel
         model_kwargs["config"] = model_config
 
@@ -294,12 +311,15 @@ def train(
     if candidates is not None:
         from candidate_pooling import CandidateRowsDataset
         dataset_class = CandidateRowsDataset
+        rand = {"random_seed": 42, "n_items": model.config.latent_candidate_pooling["n_items"]} \
+            if candidate_source == "random" else {}
         extra_train = {"candidates": candidates["candidates"]["train"], "logp": candidates["logp"]["train"],
-                       "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed}
+                       "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed, **rand}
         extra_val = {"candidates": candidates["candidates"]["valid"], "logp": candidates["logp"]["valid"],
-                     "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed}
+                     "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed, **rand}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
-    val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
+    val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
+                             sample=sample if eval_sample is None else eval_sample, category=category, K=K, **extra_val)
 
     if latent_only:
         if use_side_info or use_category_alignment or category_text_file:
@@ -375,6 +395,14 @@ def train(
         step = max(1, len(val_data) // 64)
         probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
         trainer.add_callback(ThoughtDiagnostics(probe_rows, trainer.data_collator, output_dir))
+    if candidates is not None and model.config.latent_candidate_pooling.get("anneal"):
+        from candidate_pooling import AnnealCallback
+        trainer.add_callback(AnnealCallback())
+    if pool_diagnostics:
+        from candidate_pooling import PoolingDiagnostics
+        step = max(1, len(val_data) // 64)  # 64 validation rows spread over the file
+        probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
+        trainer.add_callback(PoolingDiagnostics(probe_rows, trainer.data_collator, output_dir))
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

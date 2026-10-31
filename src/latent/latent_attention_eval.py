@@ -40,8 +40,10 @@ def main(
     # B1 steered reading (steered_reading.py): learned | recent | all (selection intervention)
     selection_mode: str = "learned",
     item_embeddings_file: str = None,  # optional: oracle-agreement statistics
-    # SASRec-informed pooling (candidate_pooling.py): raw | shuffle (another
-    # user's candidates) | drop (no candidates: plain R3 pooling)
+    # SASRec-informed pooling (candidate_pooling.py): raw (trained source and
+    # schedule) | shuffle (another user's SASRec candidates) | drop (no candidate
+    # branch: plain R3 pooling) | real (SASRec candidates, for random-source models)
+    # | guided (branch scale 1, for annealed models)
     candidate_mode: str = "raw",
 ):
     dataset_name = category
@@ -66,7 +68,7 @@ def main(
         model_class = CandidatePoolingModel
     elif candidate_mode != "raw":
         raise ValueError("candidate_mode needs a candidate-pooling checkpoint")
-    if candidate_mode not in ("raw", "shuffle", "drop"):
+    if candidate_mode not in ("raw", "shuffle", "drop", "real", "guided"):
         raise ValueError(f"unknown candidate_mode {candidate_mode}")
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
@@ -111,7 +113,10 @@ def main(
         extra = {"candidates": cand["candidates"]["test"], "logp": cand["logp"]["test"],
                  "n_candidates": int(candidate_spec["k"]),
                  "shuffle_seed": thought_seed if candidate_mode == "shuffle" else None}
+        if candidate_spec.get("source") == "random" and candidate_mode == "raw":
+            extra.update(random_seed=42, n_items=int(candidate_spec["n_items"]))
         model.cand_disabled = candidate_mode == "drop"
+        model.eval_cand_scale = 1.0 if candidate_mode == "guided" else 0.0
     val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
                               sample=sample, n_thoughts=n_thoughts, **extra)
         
