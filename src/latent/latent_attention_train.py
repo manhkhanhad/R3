@@ -217,7 +217,9 @@ def train(
             "shuffle_seed": candidate_shuffle_seed,
             "source": candidate_source,
             "n_items": int(candidates["item_embeddings"].shape[0]),
-            "anneal": [float(x) for x in candidate_anneal.split(",")] if candidate_anneal else None,
+            # fire parses "a,b" as a tuple; accept a string too
+            "anneal": [float(x) for x in (candidate_anneal.split(",") if isinstance(candidate_anneal, str)
+                                          else candidate_anneal)] if candidate_anneal else None,
         }
         if title_vectors_file:
             model_config.latent_candidate_pooling.update(
