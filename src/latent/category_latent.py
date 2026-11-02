@@ -167,9 +167,15 @@ class CategoryRowsDataset(LatentRDataset):
             else:
                 k = lists.shape[1]
                 if mode == "oracle" and int(target[row]) != unknown:
-                    others = [int(c) for c in lists[row] if int(c) != int(target[row])][:k - 1]
-                    cats = [int(target[row])] + others
                     rng_row = np.random.default_rng([seed, int(row)])
+                    cats = [int(target[row])]
+                    for c in lists[row]:  # distinct predicted non-target categories, in rank order
+                        if int(c) not in cats and len(cats) < k:
+                            cats.append(int(c))
+                    while len(cats) < k:  # pad (duplicates / unknowns in the list) with random categories
+                        c = int(rng_row.integers(unknown))
+                        if c not in cats:
+                            cats.append(c)
                     cats = [cats[i] for i in rng_row.permutation(len(cats))]
                 elif mode in ("oracle", "pred"):
                     cats = [int(c) for c in lists[row]]
