@@ -241,7 +241,10 @@ class LatentModel(Qwen2ForCausalLM):
             if getattr(self.config, "latent_steered_reading", None):
                 index, sim = self.steer.batch_tensors(input_ids.size(0), input_ids.device)
                 self.steer.block = None
-                if index is not None:
+                if index is not None and self.thoughts.source == "constant":
+                    # Fixed-rule selection (recent / all) needs no latent or first pass.
+                    self.steer.select_by_rule(index)
+                elif index is not None:
                     self.steer(thoughts.mean(1), self.thoughts.last_prefix_hidden,
                                self.thoughts.last_prefix_positions, index, sim)
             return input_embs

@@ -194,6 +194,27 @@ class SteeredReading(nn.Module):
         self.block = hidden_item
         return selected
 
+    def select_by_rule(self, item_index):
+        """Fixed-rule selection from ``item_index`` alone (no latent, no first pass):
+        the recency-split baseline with a constant thought.  Same items as ``forward``
+        with rule recent / all: the last k items, or all of them when n <= k."""
+        rule = self.rule_override or self.rule
+        if rule not in ("recent", "all"):
+            raise ValueError(f"select_by_rule supports recent / all, not {rule}")
+        n = MAX_ITEMS
+        positions = torch.arange(n, device=item_index.device)
+        valid = (item_index.unsqueeze(-1) == positions).any(1)  # [B, N]
+        n_valid = valid.sum(1)
+        if rule == "recent":
+            selected = valid & (positions >= (n_valid - self.k).unsqueeze(1))
+        else:
+            selected = valid.clone()
+        self.last_aux = None
+        self.last_stats = {"rows_selecting": float((n_valid > self.k).float().mean())}
+        self.last_selection = selected
+        self.block = (item_index >= 0) & ~selected.gather(1, item_index.clamp(min=0))
+        return selected
+
 
 def steered_mask_and_positions(attention_mask, block, query_len, dtype):
     """4D additive mask ``[B, 1, q, k]`` and position ids ``[B, q]`` for the last

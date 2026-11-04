@@ -186,8 +186,11 @@ def train(
         model_config = AutoConfig.from_pretrained(base_model)
         model_config.latent_continuous_thoughts = {"k": n_thoughts, "source": thought_source}
         if steered_k > 0:
-            if latent_only or thought_source != "hidden":
-                raise ValueError("steered reading needs thought_source=hidden and no latent_only")
+            if latent_only:
+                raise ValueError("steered reading does not combine with latent_only")
+            if thought_source != "hidden" and steered_rule == "learned":
+                raise ValueError("learned selection needs thought_source=hidden "
+                                 "(constant thoughts only with the fixed recent rule)")
             model_config.latent_steered_reading = {"k": steered_k, "rule": steered_rule,
                                                    "aux_weight": steered_aux_weight, "dim": 256}
         model_kwargs["config"] = model_config

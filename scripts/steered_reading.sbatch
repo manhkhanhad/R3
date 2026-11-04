@@ -19,7 +19,7 @@
 # self-checks, constrained 10-beam ranking under thought interventions
 # (raw / mean / shuffle) and selection interventions (recent / all), paired bootstrap.
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default scratch), CATEGORY, STEER_K, RULE (learned|recent),
-#      AUX_WEIGHT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
+#      AUX_WEIGHT, THOUGHT_SOURCE (hidden|constant), OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -34,7 +34,9 @@ category="${CATEGORY:-Toys_and_Games}"
 k="${STEER_K:-2}"
 rule="${RULE:-learned}"
 aux="${AUX_WEIGHT:-0.2}"
-name="${OUTPUT_NAME:-${category}_steer_${rule}_k${k}}"
+source="${THOUGHT_SOURCE:-hidden}"  # constant = recency-split baseline (one learned token, fixed rule)
+suffix=""; [[ "$source" != hidden ]] && suffix="_${source}"
+name="${OUTPUT_NAME:-${category}_steer_${rule}_k${k}${suffix}}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -44,7 +46,7 @@ code_root="${CODE_ROOT:?set CODE_ROOT to a frozen code copy}"
 gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
 micro_batch_size=4
 [[ "$gpu_name" == *"3090"* ]] && micro_batch_size=2
-echo "[$(date --iso-8601=seconds)] $name: k=$k rule=$rule aux=$aux GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
+echo "[$(date --iso-8601=seconds)] $name: k=$k rule=$rule aux=$aux source=$source GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
 
 data_dir="data/${category}"
 train_file=$(ls ${data_dir}/train/${category}_5_*.csv)
@@ -73,7 +75,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate 3e-4 --cutoff_len 512 \
     --save_only_model False --save_total_limit 2 \
-    --thought_source hidden --n_thoughts 1 \
+    --thought_source "$source" --n_thoughts 1 \
     --steered_k "$k" --steered_rule "$rule" --steered_aux_weight "$aux" \
     --item_embeddings_file "$emb_file" "${resume[@]}"
 fi
