@@ -16,6 +16,8 @@
 #   SOURCE=peer|motive|oracle_motive|none  MODE=text|emb  K=10  CATEGORY=Toys_and_Games|CDs_and_Vinyl
 #   CODE_ROOT (default: this worktree)  TRAIN_SAMPLE / EVAL_SAMPLE / TEST_SAMPLE (smoke runs)
 #   EVAL_OVERRIDES="none shuffle" adds ranking evals with the supports dropped / taken from another row.
+#   IntuRec-matching: MICRO=8  LOSS_AVERAGE=micro_batch  TARGET_FORMAT=end_predict
+#   STOP_AFTER_STEPS=N: loss check run (full LR schedule, stops after N optimizer steps, no eval/save/ranking).
 # Example: sbatch --export=ALL,SOURCE=oracle_motive scripts/collab_rec.sbatch   (run from any dir)
 module purge
 eval "$(conda shell.bash hook)"
@@ -64,7 +66,12 @@ if [[ ! -f "$out/config.json" ]]; then
     --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate "${LR:-3e-4}" --cutoff_len 512 \
     --save_only_model True --save_total_limit 2 --wandb_run_name "$name" \
+    --target_format "${TARGET_FORMAT:-r3}" --loss_average "${LOSS_AVERAGE:-batch}" \
+    --stop_after_steps "${STOP_AFTER_STEPS:-0}" \
     "${resume[@]}" || exit 1
+fi
+if [[ "${STOP_AFTER_STEPS:-0}" -gt 0 ]]; then
+  echo "[$(date --iso-8601=seconds)] $name check run done"; exit 0
 fi
 
 python "$code_root/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 1

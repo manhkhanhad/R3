@@ -102,3 +102,12 @@ def test_collator_stacks_support_ids():
     out = collate([{"input_ids": [1, 1], "attention_mask": [1, 1], "labels": [-100, 1], "support_ids": [3, 4]},
                    {"input_ids": [1], "attention_mask": [1], "labels": [1], "support_ids": [5, 6]}])
     assert out["support_ids"].tolist() == [[3, 4], [5, 6]]
+
+
+def test_loss_average_switch_reaches_trainer(tmp_path):
+    from transformers import Trainer, TrainingArguments
+    model = make_model("text")
+    for flag in (False, True):
+        model.accepts_loss_kwargs = flag
+        trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(tmp_path), report_to=[], use_cpu=True))
+        assert trainer.model_accepts_loss_kwargs is flag

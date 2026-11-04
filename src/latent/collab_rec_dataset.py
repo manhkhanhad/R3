@@ -24,6 +24,7 @@ from reasoning_dataset import LatentRDataset, Tokenizer
 
 INTUREC_ROOT = "/common/home/users/m/mk.ngohuu.2024/research/IntuRec"
 SOURCES = ("peer", "motive", "oracle_motive", "none")
+TARGET_FORMATS = ("r3", "end_predict")
 
 
 def default_collab_dir(dataset):
@@ -101,9 +102,25 @@ class CollabLatentRDataset(LatentRDataset):
     DataFrame index (which ``sample`` preserves).
     """
 
-    def __init__(self, *args, support_rows=None, **kwargs):
+    def __init__(self, *args, support_rows=None, target_format="r3", **kwargs):
+        if target_format not in TARGET_FORMATS:
+            raise ValueError(f"target_format must be one of {TARGET_FORMATS}")
         self.support_rows = support_rows
+        self.target_format = target_format
         super().__init__(*args, **kwargs)
+
+    def get_inputs(self):
+        # end_predict (IntuRec): the target is '"title"' + <|EndPredict|> instead of '"title"\n' + <|endoftext|>;
+        # LatentRDataset appends Tokenizer.eos_id after the target, so point it at <|EndPredict|>.
+        if self.target_format == "end_predict":
+            self.tokenizer.eos_id = self.tokenizer.tokenizer.convert_tokens_to_ids("<|EndPredict|>")
+        super().get_inputs()
+
+    def get_history(self, row):
+        out = super().get_history(row)
+        if self.target_format == "end_predict":
+            out["output"] = out["output"].rstrip("\n")
+        return out
 
     def original_row(self, idx):
         row = self.data.iloc[idx]

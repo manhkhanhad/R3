@@ -14,6 +14,22 @@ from LogitProcesser import CFEnhancedLogitsProcessor, get_hash, get_prefix_data
 from experiment_tracking import init_evaluation_run
 from utils.ranking_metrics import calculate_ranking_metrics
 
+def get_prefix_data_end_predict(info_file, tokenizer, end_id):
+    """get_prefix_data for the IntuRec target format: '"title"' + <|EndPredict|> (no trailing newline)."""
+    with open(info_file, 'r') as f:
+        info = ["### Response: \n\"" + line.split('\t')[0].strip(' ') + "\"" for line in f]
+    prefix_ids = [tokenizer(line).input_ids for line in info]
+    thought_id = len(tokenizer) - 1
+    hash_dict = dict()
+    for ids in prefix_ids:
+        ids.insert(4, thought_id)
+        ids.append(end_id)
+        for i in range(5, len(ids)):
+            key = get_hash(ids[:i]) if i == 5 else get_hash(ids[5:i])
+            hash_dict.setdefault(key, set()).add(ids[i])
+    return {k: list(v) for k, v in hash_dict.items()}
+
+
 if torch.cuda.is_available():
     device = "cuda"
 else:
@@ -67,7 +83,11 @@ def main(
     elif support_override is not None:
         raise ValueError(f"unknown support_override {support_override!r}")
 
-    hash_dict = get_prefix_data(info_file, tokenizer)
+    target_format = spec.get("target_format", "r3")
+    end_id = (tokenizer.convert_tokens_to_ids("<|EndPredict|>") if target_format == "end_predict"
+              else tokenizer.eos_token_id)
+    hash_dict = (get_prefix_data(info_file, tokenizer) if target_format == "r3"
+                 else get_prefix_data_end_predict(info_file, tokenizer, end_id))
     
     def prefix_allowed_tokens_fn(batch_id, input_ids):
         hash_number = get_hash(input_ids)
@@ -84,7 +104,8 @@ def main(
     encodings = [val_dataset.__getitem__(i) for i in range(len(val_dataset))]
     test_data = val_dataset.get_all()
 
-    model.config.pad_token_id = model.config.eos_token_id = tokenizer.eos_token_id
+    model.config.pad_token_id = tokenizer.eos_token_id
+    model.config.eos_token_id = end_id
     model.config.bos_token_id = tokenizer.bos_token_id
 
     model.eval()
