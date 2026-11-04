@@ -133,13 +133,20 @@ def main(
             load_fp32_params(model, base_model, "side_")
             table = torch.cat([category_prep["embeddings"], torch.zeros(1, category_prep["embeddings"].shape[1])])
             valid = torch.ones(len(table), dtype=torch.bool); valid[-1] = False
+            test_target = category_prep["target"]["test"].clone()
+            if mode.startswith(("nn:", "noise:")):
+                test_target, table, valid = perturb_oracle(mode, test_target, category_prep["embeddings"].float(),
+                                                           table, valid, seed)
+                mode = "oracle"
             model.set_side_table(table, valid)
             if mode == "pred1":
                 mode = "pred:0"
             elif mode.startswith("mix"):
                 mixture, mode = int(mode[3:]), "pred:0"
+        else:
+            test_target = category_prep["target"]["test"]
         dataset_class = CategoryRowsDataset
-        extra = {"target": category_prep["target"]["test"], "lists": category_prep["lists"]["test"],
+        extra = {"target": test_target, "lists": category_prep["lists"]["test"],
                  "injection": "additive" if side_spec else "inject", "mode": mode,
                  "unknown": len(category_prep["catalog"])}
     if candidate_spec:
@@ -366,6 +373,47 @@ def main(
         metrics = calculate_ranking_metrics(test_data, info_file)
         wandb_run.log({f"evaluation_shard/{key}": value for key, value in metrics.items()})
         wandb_run.finish()
+
+def perturb_oracle(mode, target, embeddings, table, valid, seed):
+    """Perturbed target-item oracles (item_oracle_prep.py tables).
+
+    ``nn:<k>``: the target's k-th nearest other item (cosine in the table's space).
+    ``noise:<s>``: variance-preserving noise on the item-specific (mean-centred) part, norm kept:
+    v' = mu + ||c|| * normalize(sqrt(1 - s^2) c/||c|| + s u), c = v - mu, u a random unit
+    vector (centred cos ~ sqrt(1 - s^2)); one noised vector per test row, appended to the table.
+    Rows without a vector (target == n) keep the zero row.
+    """
+    import torch.nn.functional as F
+
+    n = embeddings.shape[0]
+    ok = target < n
+    target = target.clone()
+    if mode.startswith("nn:"):
+        k = int(mode[3:])
+        unit = F.normalize(embeddings, dim=-1)
+        rows = torch.nonzero(ok).squeeze(-1)
+        for s in range(0, len(rows), 1024):
+            r = rows[s:s + 1024]
+            sim = unit[target[r]] @ unit.T
+            sim[torch.arange(len(r)), target[r]] = -2.0  # exclude the target itself
+            sim[:, ~valid[:n]] = -2.0
+            target[r] = sim.topk(k, dim=-1).indices[:, -1]
+        return target, table, valid
+    s = float(mode[len("noise:"):])
+    g = torch.Generator().manual_seed(seed)
+    mu = embeddings[valid[:n]].mean(0)  # noise acts on the item-specific part (tables share a large mean)
+    v = embeddings[target[ok]] - mu
+    norm = v.norm(dim=-1, keepdim=True)
+    u = F.normalize(torch.randn(v.shape, generator=g), dim=-1)
+    noisy = mu + F.normalize((1 - s * s) ** 0.5 * v / norm + s * u, dim=-1) * norm
+    print(f"noise {s}: mean centred cos(v', v) {F.cosine_similarity(noisy - mu, v, dim=-1).mean():.4f}, "
+          f"raw cos {F.cosine_similarity(noisy, v + mu, dim=-1).mean():.4f}")
+    start = table.shape[0]
+    table = torch.cat([table, noisy])
+    valid = torch.cat([valid, torch.ones(len(noisy), dtype=torch.bool)])
+    target[ok] = start + torch.arange(len(noisy))
+    return target, table, valid
+
 
 def thought_replacements(model, tokenizer, batches, frame, mode, seed, result_path):
     """Thoughts each test row receives under an intervention ([N, K, H], fp32).
