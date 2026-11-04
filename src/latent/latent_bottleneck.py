@@ -32,6 +32,13 @@ through the latents' per-layer keys/values (gisting, Mu et al. 2023).  Position 
 reveal the history length; renumbering would distort the thought-to-history
 distances).  ``"delete_latents": True`` (evaluation) also hides the thoughts from
 the target side.
+
+Soft variant (``"history_bias": b``, a finite negative number): instead of hiding
+the blocked keys, the target-side queries get a fixed additive bias ``b`` on their
+attention logits (every layer and head), identical in training and generation.
+The history stays readable at a cost (e.g. for copying a brand), while ``r`` and
+the instruction are unpenalised.  Position ids are left unchanged (the history is
+not removed).  ``b -> -inf`` recovers the hard bottleneck, ``b = 0`` plain R3.
 """
 
 from typing import Optional, Sequence
@@ -96,6 +103,7 @@ def bottleneck_mask_and_positions(
     dtype: torch.dtype,
     gist_k: int = 0,
     delete_latents: bool = False,
+    history_bias: Optional[float] = None,
 ):
     """4D additive mask ``[B, 1, q, k]`` and position ids ``[B, q]`` for the last
     ``query_len`` positions of a sequence whose full 2D padding mask is
@@ -124,14 +132,18 @@ def bottleneck_mask_and_positions(
     if delete_latents:
         is_latent_key = (k_abs.unsqueeze(0) >= thought_pos.unsqueeze(1)) & (k_abs.unsqueeze(0) < readout.unsqueeze(1))
         block = block | is_latent_key
-    allowed = allowed & ~(is_target_query.unsqueeze(2) & block.unsqueeze(1))
+    penalised = is_target_query.unsqueeze(2) & block.unsqueeze(1)
+    if history_bias is None:
+        allowed = allowed & ~penalised
     # Never leave a row empty (pad queries): let every query see itself.
     allowed = allowed | (q_abs.unsqueeze(1) == k_abs.unsqueeze(0)).unsqueeze(0)
 
     bias = torch.zeros(batch, query_len, key_len, dtype=dtype, device=device)
+    if history_bias is not None:
+        bias = bias.masked_fill(penalised & allowed, float(history_bias))
     bias = bias.masked_fill(~allowed, torch.finfo(dtype).min).unsqueeze(1)
 
-    visible = valid if gist_k else valid & ~block
+    visible = valid if (gist_k or history_bias is not None) else valid & ~block
     positions = (visible.long().cumsum(dim=1) - 1).clamp(min=0)[:, key_len - query_len:]
     return bias, positions
 

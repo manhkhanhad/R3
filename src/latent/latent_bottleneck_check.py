@@ -75,7 +75,10 @@ def main(checkpoint: str, test_file: str, category: str = "Musical_Instruments",
     rswap_mean = sum(rswap) / len(rswap)
     print(f"history swap, r fixed: max |dlogit| = {hist_max:.3e} (mean {sum(hist)/len(hist):.3e})")
     print(f"r swap, history fixed: mean max |dlogit| = {rswap_mean:.3e}")
-    if getattr(model.config, "latent_bottleneck", None) is not None and hist_max > tolerance:
+    soft = (getattr(model.config, "latent_bottleneck", None) or {}).get("history_bias") is not None
+    if soft:
+        print(f"soft bottleneck (history_bias {model.config.latent_bottleneck['history_bias']}): history readable by design")
+    if getattr(model.config, "latent_bottleneck", None) is not None and not soft and hist_max > tolerance:
         raise SystemExit(f"BOTTLENECK LEAK: history swap changed target logits by {hist_max:.3e}")
     print("bottleneck check passed" if hist_max <= tolerance else "history reaches the target (no bottleneck)")
 

@@ -20,7 +20,7 @@
 # GIST=1 (with SOURCE=constant LATENT_ONLY=1): gist bottleneck, K = latents + 1 readout; the latents read the history at every
 # layer and the target reads it only through them (latent_bottleneck.py); interventions raw / delete.
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0), GIST,
-#      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
+#      HISTORY_BIAS (soft bottleneck, e.g. -4), OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -38,7 +38,8 @@ source="${SOURCE:-hidden}"
 k="${K:-4}"
 latent_only="${LATENT_ONLY:-1}"
 gist="${GIST:-0}"
-name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)}"
+hbias="${HISTORY_BIAS:-}"  # soft bottleneck: finite negative attention bias on the history (needs LATENT_ONLY=1)
+name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)$([[ -n $hbias ]] && echo _hb${hbias#-})}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -49,7 +50,7 @@ code_root="${CODE_ROOT:?set CODE_ROOT to a frozen code copy}"
 gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
 micro_batch_size=4
 [[ "$gpu_name" == *"3090"* ]] && micro_batch_size=2
-echo "[$(date --iso-8601=seconds)] $name: source=$source k=$k latent_only=$latent_only GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
+echo "[$(date --iso-8601=seconds)] $name: source=$source k=$k latent_only=$latent_only history_bias=${hbias:-none} GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
 
 data_dir="data/${category}"
 train_file=$(ls ${data_dir}/train/${category}_5_*.csv)
@@ -74,6 +75,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   latent_flag=()
   [[ $latent_only == 1 ]] && latent_flag=(--latent_only True)
   [[ $gist == 1 ]] && latent_flag+=(--latent_gist True)
+  [[ -n $hbias ]] && latent_flag+=(--history_bias="$hbias")
   python "$code_root/src/latent/latent_attention_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
     --train_file "$train_file" --eval_file "$eval_file" \

@@ -70,6 +70,9 @@ def train(
     # Gist bottleneck (latent_bottleneck.py): with latent_only, the thought tokens
     # read the history at every layer; the target reads it only through them
     latent_gist: bool = False,
+    # Soft bottleneck (latent_bottleneck.py): with latent_only, a finite negative
+    # attention bias on the history for target-side queries instead of hiding it
+    history_bias: float = None,
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -106,6 +109,7 @@ def train(
             "thought_source": thought_source,
             "n_thoughts": n_thoughts,
             "latent_gist": latent_gist,
+            "history_bias": history_bias,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -304,6 +308,8 @@ def train(
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, **extra_val)
 
+    if history_bias is not None and not latent_only:
+        raise ValueError("history_bias needs latent_only")
     if latent_only:
         if use_side_info or use_category_alignment or category_text_file:
             raise ValueError("latent_only is a plain-R3 run; do not combine with other options")
@@ -315,6 +321,10 @@ def train(
                 raise ValueError("latent_gist uses learned thought tokens (thought_source=constant), "
                                  "n_thoughts = latents + 1 readout >= 2")
             model.config.latent_bottleneck["gist"] = True
+        if history_bias is not None:
+            if latent_gist or float(history_bias) >= 0:
+                raise ValueError("history_bias is a negative bias for the plain (non-gist) bottleneck")
+            model.config.latent_bottleneck["history_bias"] = float(history_bias)
         print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
 
     print("LOAD DATA FINISHED")

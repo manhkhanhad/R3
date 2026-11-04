@@ -300,7 +300,8 @@ class LatentModel(Qwen2ForCausalLM):
             thoughts = getattr(self.config, "latent_continuous_thoughts", None)
             gist_k = int(thoughts["k"]) if thoughts else 1
         return bottleneck_mask_and_positions(attention_mask, block, thought_pos, query_len, dtype,
-                                             gist_k=gist_k, delete_latents=bool(spec.get("delete_latents")))
+                                             gist_k=gist_k, delete_latents=bool(spec.get("delete_latents")),
+                                             history_bias=spec.get("history_bias"))
 
     def forward(
         self,
