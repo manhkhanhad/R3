@@ -20,19 +20,34 @@ Candidate vector c_j (``kind``):
 * ``title``: R3's last-layer representation of the item title
   (candidate_title_vectors.py); same space as H, no new projection.
 * ``sasrec``: the frozen SASRec item embedding through an fp32 projection,
-  rescaled to the mean title-vector norm.
+  rescaled to the mean title-vector norm (``sasrec_scale`` = "title") or to the
+  mean norm of the batch's own prompt hidden states ("hidden"; no dependence on
+  a trained R3, used when training from the base model).
+
+Candidate source (``source``): ``sasrec`` (the row's SASRec top-C) or
+``random`` (C random non-history items per row, fixed per row, constant logp:
+guidance without content, IntuRec's "random intuition").  ``anneal`` =
+[start, end] training fractions: the branch is scaled by s = 1 until start,
+linearly to 0 at end, 0 afterwards (guidance as a training scaffold); in
+evaluation s = ``eval_cand_scale`` (0 by default, so the annealed model is
+evaluated as plain R3; 1 = "guided").
 
 The prompt, the single thought slot and the decoder are unchanged; the decoder
 sees candidates only through r.  Interventions (evaluation): ``shuffle``
 (another user's candidates), ``drop`` (no candidate branch: exactly plain R3).
 """
 
+import ast
+import json
 import os
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
+
+from transformers import TrainerCallback
 
 from layers import LatentModel, SelfAttentionLayer
 from reasoning_dataset import LatentRDataset
@@ -61,10 +76,11 @@ class CandidatePool(nn.Module):
         if self.kind == "sasrec":
             self.proj.reset_parameters()
 
-    def vectors(self, items):
+    def vectors(self, items, hidden_norm=None):
         v = self.table[items.to(self.table.device)].float()
         if self.kind == "sasrec":
-            v = self.scale * F.normalize(self.proj(v), dim=-1)
+            scale = self.scale if hidden_norm is None else hidden_norm
+            v = scale * F.normalize(self.proj(v), dim=-1)
         return v
 
 
@@ -76,6 +92,20 @@ class CandidatePoolingModel(LatentModel):
         self.cand_override = None   # same, set by evaluation before generate
         self.cand_disabled = False  # "drop" intervention: plain R3 pooling
         self.last_cand_weights = None  # [B, C] candidate selection weights (prefill)
+        self.progress = 0.0         # training progress in [0, 1] (anneal schedule)
+        self.eval_cand_scale = 0.0  # branch scale in evaluation for annealed models
+
+    def cand_scale(self):
+        """s multiplying the candidate branch (1 unless an anneal schedule is configured)."""
+        anneal = self.config.latent_candidate_pooling.get("anneal")
+        if not anneal:
+            return 1.0
+        if not self.training:
+            return float(self.eval_cand_scale)
+        start, end = anneal
+        if self.progress <= start:
+            return 1.0
+        return max(0.0, 1.0 - (self.progress - start) / max(end - start, 1e-8))
 
     @classmethod
     def from_pretrained(cls, path, *args, **kwargs):
@@ -102,12 +132,16 @@ class CandidatePoolingModel(LatentModel):
         """R3's SelfAttentionLayer output plus g * the candidate branch."""
         att: SelfAttentionLayer = self.attention
         r = att(hidden_states=hidden, attention_mask=attention_mask, thought_id_idx=thought_idx)
-        if self.cand_disabled:
+        s = self.cand_scale()
+        if self.cand_disabled or s == 0.0:
             self.last_cand_weights = None
             return r
         rows = torch.arange(hidden.size(0), device=hidden.device)
         q = att.query(hidden[rows, thought_idx - 1]).float()                 # [B, H], unrotated
-        c = self.cand_pool.vectors(items)                                    # [B, C, H] fp32
+        hidden_norm = None
+        if self.config.latent_candidate_pooling.get("sasrec_scale") == "hidden":
+            hidden_norm = hidden[attention_mask.bool()].float().norm(dim=-1).mean().detach()
+        c = self.cand_pool.vectors(items, hidden_norm)                       # [B, C, H] fp32
         kc = att.key(c.to(att.key.weight.dtype)).float()
         vc = att.value(c.to(att.value.weight.dtype)).float()
         z = (kc @ q.unsqueeze(-1)).squeeze(-1) * att.scale_score             # [B, C]
@@ -116,7 +150,7 @@ class CandidatePoolingModel(LatentModel):
         w = F.softmax(p.tau * z + p.alpha * logp.to(z.device).float(), -1)
         self.last_cand_weights = w.detach()
         r_cand = (w.unsqueeze(1) @ vc).squeeze(1)
-        return (r.float() + p.gate * r_cand).to(r.dtype)
+        return (r.float() + s * p.gate * r_cand).to(r.dtype)
 
     def generate_embs(self, input_ids, attention_mask):
         cand = self.cand_override if self.cand_override is not None else self._cand
@@ -163,8 +197,20 @@ class CandidateRowsDataset(LatentRDataset):
     row the candidates of a random row of a different user.
     """
 
-    def __init__(self, *args, candidates=None, logp=None, n_candidates=10, shuffle_seed=None, **kwargs):
+    def __init__(self, *args, candidates=None, logp=None, n_candidates=10, shuffle_seed=None,
+                 random_seed=None, n_items=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if random_seed is not None:  # C random non-history items per row, fixed per row, constant logp
+            const = [float(-np.log(n_candidates))] * n_candidates
+            for item, row, hist in zip(self.inputs, self.data.index, self.data["history_item_id"]):
+                rng = np.random.default_rng([random_seed, int(row)])
+                seen, pick = set(ast.literal_eval(hist) if isinstance(hist, str) else hist), []
+                while len(pick) < n_candidates:
+                    j = int(rng.integers(n_items))
+                    if j not in seen and j not in pick:
+                        pick.append(j)
+                item["cand_items"], item["cand_logp"] = pick, const
+            return
         items, scores = candidates[:, :n_candidates], logp[:, :n_candidates]
         source = self.data.index.to_numpy()
         if shuffle_seed is not None:
@@ -202,3 +248,63 @@ class CandidateCollator:
         batch["cand_items"] = torch.tensor(items, dtype=torch.long)
         batch["cand_logp"] = torch.tensor(logp, dtype=torch.float32)
         return batch
+
+
+class AnnealCallback(TrainerCallback):
+    """Feed training progress to the anneal schedule."""
+
+    def on_step_begin(self, args, state, control, model=None, **kwargs):
+        model.progress = state.global_step / max(state.max_steps, 1)
+
+
+def pooling_probs(att, hidden, attention_mask, thought_idx):
+    """R3's pooling attention distribution over prompt positions [B, L] (SelfAttentionLayer.forward)."""
+    weights = SelfAttentionLayer.mask_to_weights(attention_mask.clone(), thought_idx, att.end_k)
+    cos, sin = att.rope(hidden, position_ids=torch.arange(hidden.shape[1], device=hidden.device).unsqueeze(0))
+    Q, K = att.query(hidden), att.key(hidden)
+    Q, K = apply_rotary_pos_emb(Q, K, cos.squeeze(0), sin.squeeze(0), unsqueeze_dim=0)
+    rows = torch.arange(hidden.size(0), device=hidden.device)
+    logits = (Q[rows, thought_idx - 1].unsqueeze(1) @ K.transpose(-2, -1)).squeeze(1).float() * att.scale_score
+    return F.softmax(logits + weights, -1)
+
+
+class PoolingDiagnostics(TrainerCallback):
+    """At each evaluation, on fixed validation rows: concentration of R3's pooling
+    (max weight, entropy, argmax position), candidate weights and branch parameters.
+    Appends one JSON line per evaluation to <output_dir>/pool_diagnostics.jsonl."""
+
+    def __init__(self, rows, collator, output_dir):
+        self.rows, self.collator = rows, collator
+        self.path = os.path.join(output_dir, "pool_diagnostics.jsonl")
+
+    @torch.no_grad()
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        was_training = model.training
+        train_scale = model.cand_scale() if was_training and isinstance(model, CandidatePoolingModel) else None
+        model.eval()
+        batch = {k: v.to(model.device) for k, v in self.collator(self.rows).items()}
+        ids, mask = batch["input_ids"], batch["attention_mask"]
+        hidden = model.model(input_ids=ids, attention_mask=mask).last_hidden_state
+        where = torch.nonzero(ids == model.model.embed_tokens.num_embeddings - 1)
+        p = pooling_probs(model.attention, hidden, mask, where[:, 1])
+        out = {"epoch": state.epoch, "step": state.global_step,
+               "pool_max_weight": float(p.max(-1).values.mean()),
+               "pool_entropy": float(-(p * p.clamp_min(1e-12).log()).sum(-1).mean()),
+               "pool_argmax_positions": sorted(set(p.argmax(-1).tolist()))[:10]}
+        if isinstance(model, CandidatePoolingModel):
+            scale, model.eval_cand_scale = model.eval_cand_scale, 1.0  # inspect the branch even if annealed
+            model.cand_override = (batch["cand_items"], batch["cand_logp"])
+            model.generate_embs(ids, mask)
+            model.cand_override, model.eval_cand_scale = None, scale
+            w = model.last_cand_weights
+            cp = model.cand_pool
+            out.update({"gate": float(cp.gate), "tau": float(cp.tau), "alpha": float(cp.alpha),
+                        "train_scale_now": train_scale,
+                        "progress": model.progress,
+                        "cand_max_weight": float(w.max(-1).values.mean()),
+                        "cand_entropy": float(-(w * w.clamp_min(1e-12).log()).sum(-1).mean())})
+        with open(self.path, "a") as f:
+            f.write(json.dumps(out) + "\n")
+        print("pool diagnostics:", out, flush=True)
+        if was_training:
+            model.train()

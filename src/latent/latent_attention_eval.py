@@ -40,9 +40,15 @@ def main(
     # B1 steered reading (steered_reading.py): learned | recent | all (selection intervention)
     selection_mode: str = "learned",
     item_embeddings_file: str = None,  # optional: oracle-agreement statistics
-    # SASRec-informed pooling (candidate_pooling.py): raw | shuffle (another
-    # user's candidates) | drop (no candidates: plain R3 pooling)
+    # SASRec-informed pooling (candidate_pooling.py): raw (trained source and
+    # schedule) | shuffle (another user's SASRec candidates) | drop (no candidate
+    # branch: plain R3 pooling) | real (SASRec candidates, for random-source models)
+    # | guided (branch scale 1, for annealed models)
     candidate_mode: str = "raw",
+    # category latents (category_latent.py).  additive: oracle | shuffle | pred1 |
+    # mix<K> (one beam search per predicted category, merged by category score +
+    # item score); inject: oracle | pred | shuffle
+    category_mode: str = None,
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -59,14 +65,26 @@ def main(
     category = category_dict[category]
 
     from transformers import AutoConfig
-    candidate_spec = getattr(AutoConfig.from_pretrained(base_model), "latent_candidate_pooling", None)
+    base_config = AutoConfig.from_pretrained(base_model)
+    candidate_spec = getattr(base_config, "latent_candidate_pooling", None)
+    side_spec = getattr(base_config, "latent_side_info", None)
+    side_spec = side_spec if side_spec and side_spec.get("table") == "category" else None
+    inject_spec = getattr(base_config, "latent_category_inject", None)
     model_class = LatentModel
+    if side_spec:
+        from side_info_latent import SideInfoLatentModel
+        model_class = SideInfoLatentModel
+    elif inject_spec:
+        from category_latent import CategoryInjectModel
+        model_class = CategoryInjectModel
+    elif category_mode is not None:
+        raise ValueError("category_mode needs a category-latent checkpoint")
     if candidate_spec:
         from candidate_pooling import CandidatePoolingModel
         model_class = CandidatePoolingModel
     elif candidate_mode != "raw":
         raise ValueError("candidate_mode needs a candidate-pooling checkpoint")
-    if candidate_mode not in ("raw", "shuffle", "drop"):
+    if candidate_mode not in ("raw", "shuffle", "drop", "real", "guided"):
         raise ValueError(f"unknown candidate_mode {candidate_mode}")
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
@@ -103,6 +121,27 @@ def main(
         model.steer.rule_override = selection_mode
     elif selection_mode != "learned":
         raise ValueError("selection_mode needs a steered-reading checkpoint")
+    category_prep = None
+    mixture = 0
+    if side_spec or inject_spec:
+        from category_latent import CategoryRowsDataset, load_fp32_params
+        category_prep = torch.load((side_spec or inject_spec)["source"], map_location="cpu", weights_only=False)
+        mode = category_mode or "oracle"
+        if side_spec:
+            model.side_projection.float()
+            model.side_gain.data = model.side_gain.data.float()
+            load_fp32_params(model, base_model, "side_")
+            table = torch.cat([category_prep["embeddings"], torch.zeros(1, category_prep["embeddings"].shape[1])])
+            valid = torch.ones(len(table), dtype=torch.bool); valid[-1] = False
+            model.set_side_table(table, valid)
+            if mode == "pred1":
+                mode = "pred:0"
+            elif mode.startswith("mix"):
+                mixture, mode = int(mode[3:]), "pred:0"
+        dataset_class = CategoryRowsDataset
+        extra = {"target": category_prep["target"]["test"], "lists": category_prep["lists"]["test"],
+                 "injection": "additive" if side_spec else "inject", "mode": mode,
+                 "unknown": len(category_prep["catalog"])}
     if candidate_spec:
         from candidate_pooling import CandidateRowsDataset
         dataset_class = CandidateRowsDataset
@@ -111,7 +150,10 @@ def main(
         extra = {"candidates": cand["candidates"]["test"], "logp": cand["logp"]["test"],
                  "n_candidates": int(candidate_spec["k"]),
                  "shuffle_seed": thought_seed if candidate_mode == "shuffle" else None}
+        if candidate_spec.get("source") == "random" and candidate_mode == "raw":
+            extra.update(random_seed=42, n_items=int(candidate_spec["n_items"]))
         model.cand_disabled = candidate_mode == "drop"
+        model.eval_cand_scale = 1.0 if candidate_mode == "guided" else 0.0
     val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
                               sample=sample, n_thoughts=n_thoughts, **extra)
         
@@ -253,12 +295,37 @@ def main(
             if candidate_spec:
                 model.cand_override = (torch.tensor([e["cand_items"] for e in encodings]),
                                        torch.tensor([e["cand_logp"] for e in encodings]))
+            if inject_spec:
+                model.cat_override = torch.tensor([e["cat_list"] for e in encodings])
+            if side_spec and not mixture:
+                model.set_side_index(torch.tensor([e["side_index"] for e in encodings]))
             if steer:
                 width = max(len(e["input_ids"]) for e in encodings)
                 model.steer.item_index = pad_index([e["item_index"] for e in encodings], width, "left")
                 model.steer.item_sim = (torch.tensor([e["item_sim"] for e in encodings], dtype=torch.float32)
                                         if item_embeddings_file else None)
-            output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+            if side_spec and mixture:
+                # one beam search per predicted category; merge by category score + item score
+                start = idx * batch_size
+                rows_lists = category_prep["lists"]["test"][val_dataset.data.index[start:start + len(encodings)]]
+                rows_scores = category_prep["scores"]["test"][val_dataset.data.index[start:start + len(encodings)]]
+                merged = [dict() for _ in encodings]
+                for j in range(mixture):
+                    model.set_side_index(rows_lists[:, j])
+                    out_j, score_j, _ = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+                    for r, (items, item_scores) in enumerate(zip(out_j, score_j)):
+                        for it, s in zip(items, item_scores):
+                            v = float(rows_scores[r, j]) + s
+                            if v > merged[r].get(it, float("-inf")):
+                                merged[r][it] = v
+                output = [sorted(m, key=m.get, reverse=True)[:10] for m in merged]
+                score = [[m[i] for i in o] for m, o in zip(merged, output)]
+                seq_score = None
+            else:
+                output, score, seq_score = evaluate(encodings, cf_logits=None, temperature=temperature, guidance_scale=guidance_scale, length_penalty=length_penalty)
+            if inject_spec and model.last_cat_weights is not None:
+                w = model.last_cat_weights[:: model.last_cat_weights.size(0) // len(encodings)]
+                cand_mass.extend(w.float().cpu().tolist())
             if steer:
                 chosen = model.steer.last_selection[:: model.steer.last_selection.size(0) // len(encodings)]
                 selections.extend([torch.nonzero(row).squeeze(1).tolist() for row in chosen.cpu()])
