@@ -98,6 +98,8 @@ def train(
     # latent_only_epochs epochs and removed afterwards (full attention, plain R3), so the
     # saved model is evaluated with history visible. Disables early stopping / best-model reload.
     latent_only_epochs: int = None,
+    # History-only pooling (history_pooling.py): r pools over the history title tokens only
+    pool_history_only: bool = False,
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -136,6 +138,7 @@ def train(
             "latent_gist": latent_gist,
             "history_bias": history_bias,
             "latent_only_epochs": latent_only_epochs,
+            "pool_history_only": pool_history_only,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -357,6 +360,17 @@ def train(
             raise ValueError("latent_only_epochs is for the plain-R3 hard bottleneck (latent_only only)")
         if not 0 < int(latent_only_epochs) < num_epochs:
             raise ValueError("need 0 < latent_only_epochs < num_epochs")
+
+    if pool_history_only:
+        if (thought_source is not None or latent_only or use_side_info or use_category_alignment
+                or category_text_file or steered_k > 0 or candidates is not None):
+            raise ValueError("pool_history_only is a plain-R3 option; do not combine with other options")
+        from history_pooling import build_spec, history_title_mask
+        model.config.latent_pool_history = build_spec(tokenizer, train_data.category)
+        probe = torch.tensor(train_data[0]["input_ids"])[None]
+        shown = history_title_mask(probe, torch.ones_like(probe), model.config.latent_pool_history,
+                                   model.model.embed_tokens.num_embeddings - 1)[0]
+        print("history pooling: keys =", repr(tokenizer.decode(probe[0][shown])))
 
     print("LOAD DATA FINISHED")
 

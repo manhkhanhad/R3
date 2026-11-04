@@ -228,6 +228,16 @@ class LatentModel(Qwen2ForCausalLM):
             load_fp32_steer_params(target, str(pretrained_model_name_or_path))
         return model
 
+    def pooling_mask(self, input_ids, attention_mask):
+        """Mask for the r pooling: unchanged, or history title tokens only
+        (config.latent_pool_history, history_pooling.py)."""
+        spec = getattr(self.config, "latent_pool_history", None)
+        if not spec:
+            return attention_mask
+        from history_pooling import history_title_mask
+        thought_id = self.model.embed_tokens.num_embeddings - 1
+        return history_title_mask(input_ids, attention_mask, spec, thought_id).to(attention_mask.dtype)
+
     def generate_embs(self, input_ids, attention_mask):
         if getattr(self.config, "latent_continuous_thoughts", None):
             from continuous_thoughts import first_thought_positions
@@ -256,7 +266,7 @@ class LatentModel(Qwen2ForCausalLM):
         input_embs = self.model.embed_tokens(input_ids)
 
         reasoning_latent = self.attention(
-            hidden_states=hidden_states[-1], attention_mask=attention_mask,
+            hidden_states=hidden_states[-1], attention_mask=self.pooling_mask(input_ids, attention_mask),
             thought_id_idx=where_thought_ids[:, 1],
         )
         reasoning_latent = self.observe_reasoning_latent(reasoning_latent)

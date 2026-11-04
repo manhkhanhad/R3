@@ -192,7 +192,8 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     config = AutoConfig.from_pretrained(checkpoint)
-    if getattr(config, "latent_neighbor_refinement", None) or getattr(config, "latent_bottleneck", None):
+    if (getattr(config, "latent_neighbor_refinement", None) or getattr(config, "latent_bottleneck", None)
+            or getattr(config, "latent_pool_history", None)):
         # These live in the SFT model class.  The original GRPO class silently
         # drops the neighbor wrapper (random-initialising the plain attention
         # layer) and does not apply the L7 latent-only attention mask.
@@ -213,7 +214,8 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
 def thought_embeds(model: LatentModel, ids: torch.Tensor, mask: torch.Tensor, pos: torch.Tensor):
     with torch.no_grad():
         first = model.model(input_ids=ids, attention_mask=mask, output_hidden_states=False, use_cache=False)
-        thought = model.attention(first.last_hidden_state, mask, pos)
+        pool_mask = model.pooling_mask(ids, mask) if hasattr(model, "pooling_mask") else mask
+        thought = model.attention(first.last_hidden_state, pool_mask, pos)
         embeds = model.model.embed_tokens(ids).clone()
         embeds[torch.arange(ids.size(0), device=ids.device), pos] = thought.to(embeds.dtype)
     return thought.float(), embeds
