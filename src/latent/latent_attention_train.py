@@ -22,6 +22,27 @@ from side_info_dataset import SideInfoLatentRDataset, CategoryTextLatentRDataset
 from experiment_tracking import init_training_run, wandb_report_to
 # torch.backends.cuda.enable_cudnn_sdp(False)
 
+
+class BottleneckSchedule(transformers.TrainerCallback):
+    """Latent-only bottleneck for epochs [0, n), full attention from epoch n on.
+
+    The bottleneck is read from model.config.latent_bottleneck at every forward
+    (layers.py), so removing the key switches training, epoch-end evaluation and the
+    saved config to plain R3. Checkpoints saved at the end of epochs < n keep the
+    bottleneck in their config. Also correct after resuming from a checkpoint, since
+    state.epoch is restored before on_epoch_begin.
+    """
+
+    def __init__(self, model, n):
+        self.model, self.n = model, n
+        self.spec = model.config.latent_bottleneck
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch = int(state.epoch + 1e-4)
+        latent = epoch < self.n
+        self.model.config.latent_bottleneck = self.spec if latent else None
+        print(f"[BottleneckSchedule] epoch {epoch}: {'latent-only bottleneck' if latent else 'full attention'}", flush=True)
+
 def train(
     # model/data params
     base_model: str = "/data1/huggingface/models--Qwen--Qwen2.5-1.5B/",  # the only required argument
@@ -73,6 +94,10 @@ def train(
     # Soft bottleneck (latent_bottleneck.py): with latent_only, a finite negative
     # attention bias on the history for target-side queries instead of hiding it
     history_bias: float = None,
+    # Staged training: with latent_only, the bottleneck is active for the first
+    # latent_only_epochs epochs and removed afterwards (full attention, plain R3), so the
+    # saved model is evaluated with history visible. Disables early stopping / best-model reload.
+    latent_only_epochs: int = None,
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -110,6 +135,7 @@ def train(
             "n_thoughts": n_thoughts,
             "latent_gist": latent_gist,
             "history_bias": history_bias,
+            "latent_only_epochs": latent_only_epochs,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -326,6 +352,11 @@ def train(
                 raise ValueError("history_bias is a negative bias for the plain (non-gist) bottleneck")
             model.config.latent_bottleneck["history_bias"] = float(history_bias)
         print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
+    if latent_only_epochs is not None:
+        if not latent_only or latent_gist or history_bias is not None or thought_source is not None:
+            raise ValueError("latent_only_epochs is for the plain-R3 hard bottleneck (latent_only only)")
+        if not 0 < int(latent_only_epochs) < num_epochs:
+            raise ValueError("need 0 < latent_only_epochs < num_epochs")
 
     print("LOAD DATA FINISHED")
 
@@ -371,7 +402,7 @@ def train(
             output_dir=output_dir,
             save_total_limit=save_total_limit,
             save_only_model=save_only_model,
-            load_best_model_at_end=True,
+            load_best_model_at_end=latent_only_epochs is None,
             label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0
                                        or candidates is not None) else None,
             ddp_find_unused_parameters=False if ddp else None,
@@ -380,8 +411,10 @@ def train(
             remove_unused_columns=False
         ),
         data_collator=collator,
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=1)],
+        callbacks = [EarlyStoppingCallback(early_stopping_patience=1)] if latent_only_epochs is None else [],
     )
+    if latent_only_epochs is not None:
+        trainer.add_callback(BottleneckSchedule(model, int(latent_only_epochs)))
     if thought_source is not None:
         from continuous_thoughts import ThoughtDiagnostics
         # 64 validation rows spread over the file (adjacent rows share a user)
