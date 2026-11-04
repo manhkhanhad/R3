@@ -5,7 +5,7 @@
 #SBATCH --mem=64GB
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="l40s|a100|l40|a40"
-#SBATCH --exclude=lunar
+#SBATCH --exclude=lunar,analog
 #SBATCH --partition=researchshort
 #SBATCH --qos=research-1-qos
 #SBATCH --time=48:00:00
@@ -55,7 +55,13 @@ mkdir -p "$out"
 if [[ ! -f "$out/config.json" ]]; then
   resume=()
   last_ckpt=$(ls -d "$out"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
-  [[ -n "$last_ckpt" ]] && resume=(--resume_from_checkpoint "$last_ckpt") && echo "resuming from $last_ckpt"
+  if [[ -n "$last_ckpt" && -f "$last_ckpt/optimizer.pt" && -f "$last_ckpt/scheduler.pt" ]]; then
+    resume=(--resume_from_checkpoint "$last_ckpt"); echo "resuming from $last_ckpt"
+  elif [[ -n "$last_ckpt" ]]; then
+    # model-only checkpoints (save_only_model): HF would silently restart AdamW and the LR schedule -> start fresh
+    echo "no optimizer/scheduler state in $last_ckpt: removing partial checkpoints, training from step 0"
+    rm -rf "$out"/checkpoint-*
+  fi
   eval_sample=(); [[ -n "${EVAL_SAMPLE:-}" ]] && eval_sample=(--eval_sample "$EVAL_SAMPLE")
   python "$code_root/src/latent/collab_rec_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
