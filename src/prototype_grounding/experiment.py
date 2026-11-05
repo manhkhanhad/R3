@@ -633,7 +633,9 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
         thought_id = model.model.embed_tokens.num_embeddings - 1
         where = torch.nonzero(input_ids == thought_id)
         pos = where[:, 1]
-        q = model.attention(first.last_hidden_state, attention_mask, pos).float()
+        # History-only pooling checkpoints restrict the pooling keys (same mask as training / ranking).
+        pool_mask = model.pooling_mask(input_ids, attention_mask) if hasattr(model, "pooling_mask") else attention_mask
+        q = model.attention(first.last_hidden_state, pool_mask, pos).float()
         if needs_prototypes:
             assert centers is not None
             p, diag = retrieve(q, centers, topk, temperature)
