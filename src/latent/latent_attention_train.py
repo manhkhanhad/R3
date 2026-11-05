@@ -121,6 +121,17 @@ def train(
     # trained with the target category (additive) / target + predicted list (inject)
     category_injection: str = None,
     category_prep_file: str = None,  # category_prep.py output
+    # Diffusion-refined thought (diffusion_refine.py): r' = g*normalize(P(diffuse(r))),
+    # denoiser target = the target item's vector from an item_oracle_prep.py table
+    diffusion_refine_file: str = None,
+    diffusion_mode: str = "diffusion",  # diffusion | regress (deterministic control)
+    diffusion_steps: int = 32,
+    diffusion_weight: float = 1.0,
+    diffusion_ce_weight: float = 1.0,
+    diffusion_tau: float = 0.05,
+    diffusion_chain_prob: float = 0.5,
+    diffusion_width: int = 2048,
+    diffusion_depth: int = 3,
 
 ):
 
@@ -157,6 +168,12 @@ def train(
             "candidate_source": candidate_source,
             "candidate_anneal": candidate_anneal,
             "category_injection": category_injection,
+            "diffusion_refine_file": diffusion_refine_file,
+            "diffusion_mode": diffusion_mode,
+            "diffusion_steps": diffusion_steps,
+            "diffusion_weight": diffusion_weight,
+            "diffusion_ce_weight": diffusion_ce_weight,
+            "diffusion_chain_prob": diffusion_chain_prob,
             "learning_rate": learning_rate,
         },
     )
@@ -270,6 +287,27 @@ def train(
             raise ValueError(f"unknown category_injection {category_injection}")
         model_kwargs["config"] = model_config
 
+    diffusion_prep = None
+    if diffusion_refine_file is not None:
+        if category_injection is not None or use_side_info or use_category_alignment or category_text_file \
+                or thought_source or latent_only or candidate_kind or pool_history_only:
+            raise ValueError("diffusion refinement is a plain-R3 variant; do not combine with other options")
+        if diffusion_mode not in ("diffusion", "regress"):
+            raise ValueError(f"unknown diffusion_mode {diffusion_mode}")
+        from transformers import AutoConfig
+        from diffusion_refine import DiffusionRefineModel
+        diffusion_prep = torch.load(diffusion_refine_file, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_diffusion_refine = {
+            "source": os.path.abspath(diffusion_refine_file), "kind": diffusion_prep.get("kind"),
+            "dimension": int(diffusion_prep["embeddings"].shape[1]), "mode": diffusion_mode,
+            "steps": diffusion_steps, "weight": diffusion_weight, "ce_weight": diffusion_ce_weight,
+            "tau": diffusion_tau, "chain_prob": diffusion_chain_prob,
+            "width": diffusion_width, "depth": diffusion_depth, "eval_seed": 0,
+        }
+        model_class = DiffusionRefineModel
+        model_kwargs["config"] = model_config
+
     candidates = None
     if candidate_kind is not None:
         if use_side_info or use_category_alignment or category_text_file or thought_source or latent_only:
@@ -354,6 +392,16 @@ def train(
         print("category latent (additive):", {k: v for k, v in model.config.latent_side_info.items()})
     elif category_injection == "inject":
         print("category latent (inject): k =", model.config.latent_category_inject["k"])
+    if diffusion_prep is not None:
+        # fp32 denoiser, freshly initialised (HF leaves missing weights uninitialised)
+        model.diffuse.float()
+        for m in model.diffuse.modules():
+            if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm)):
+                m.reset_parameters()
+        with torch.no_grad():
+            model.diffuse.gain.fill_(30.0)
+        model.set_item_table(diffusion_prep["embeddings"], diffusion_prep["valid"])
+        print("diffusion refinement:", model.config.latent_diffusion_refine)
     if use_side_info:
         # token scale = mean input-embedding norm of the real vocabulary (fixed at init)
         token_norm = float(model.model.embed_tokens.weight[:-1].float().norm(dim=-1).mean())
@@ -399,6 +447,15 @@ def train(
                        "injection": category_injection, "mode": "oracle", "unknown": unknown}
         extra_val = {"target": category_prep["target"]["valid"], "lists": category_prep["lists"]["valid"],
                      "injection": category_injection, "mode": "oracle", "unknown": unknown}
+    if diffusion_prep is not None:
+        # the target item index rides in ``side_index`` (CategoryRowsDataset, mode oracle)
+        from category_latent import CategoryRowsDataset
+        dataset_class = CategoryRowsDataset
+        unknown = len(diffusion_prep["catalog"])
+        extra_train = {"target": diffusion_prep["target"]["train"], "lists": diffusion_prep["lists"]["train"],
+                       "injection": "additive", "mode": "oracle", "unknown": unknown}
+        extra_val = {"target": diffusion_prep["target"]["valid"], "lists": diffusion_prep["lists"]["valid"],
+                     "injection": "additive", "mode": "oracle", "unknown": unknown}
     if candidates is not None:
         from candidate_pooling import CandidateRowsDataset
         dataset_class = CandidateRowsDataset
@@ -469,7 +526,7 @@ def train(
     if candidates is not None:
         from candidate_pooling import CandidateCollator
         collator = CandidateCollator(collator)
-    if category_prep is not None:
+    if category_prep is not None or diffusion_prep is not None:
         from category_latent import CategoryCollator
         collator = CategoryCollator(collator)
     trainer = transformers.Trainer(
@@ -496,7 +553,8 @@ def train(
             save_only_model=save_only_model,
             load_best_model_at_end=latent_only_epochs is None,
             label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0
-                                       or candidates is not None or category_prep is not None) else None,
+                                       or candidates is not None or category_prep is not None
+                                       or diffusion_prep is not None) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
@@ -521,6 +579,9 @@ def train(
         step = max(1, len(val_data) // 64)  # 64 validation rows spread over the file
         probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
         trainer.add_callback(PoolingDiagnostics(probe_rows, trainer.data_collator, output_dir))
+    if diffusion_prep is not None:
+        from diffusion_refine import AuxLogCallback
+        trainer.add_callback(AuxLogCallback(model))
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

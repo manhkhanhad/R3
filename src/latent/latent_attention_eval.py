@@ -49,6 +49,9 @@ def main(
     # mix<K> (one beam search per predicted category, merged by category score +
     # item score); inject: oracle | pred | shuffle
     category_mode: str = None,
+    # diffusion-refined thought (diffusion_refine.py): raw (sampled x0_hat) | oracle
+    # (target item's vector) | shuffle (another user's x0_hat) | mean (mean x0_hat)
+    diffusion_eval_mode: str = "raw",
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -79,6 +82,14 @@ def main(
         model_class = CategoryInjectModel
     elif category_mode is not None:
         raise ValueError("category_mode needs a category-latent checkpoint")
+    diffusion_spec = getattr(base_config, "latent_diffusion_refine", None)
+    if diffusion_spec:
+        from diffusion_refine import DiffusionRefineModel
+        model_class = DiffusionRefineModel
+    elif diffusion_eval_mode != "raw":
+        raise ValueError("diffusion_eval_mode needs a diffusion-refine checkpoint")
+    if diffusion_eval_mode not in ("raw", "oracle", "shuffle", "mean"):
+        raise ValueError(f"unknown diffusion_eval_mode {diffusion_eval_mode}")
     if candidate_spec:
         from candidate_pooling import CandidatePoolingModel
         model_class = CandidatePoolingModel
@@ -257,6 +268,10 @@ def main(
     if thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)
+    x0_bank = None
+    if diffusion_spec:
+        x0_bank = diffusion_x0_bank(model, tokenizer, new_encodings, val_dataset.data, diffusion_spec,
+                                    diffusion_eval_mode, thought_seed, result_json_data)
     grounded = getattr(model.config, "latent_grounded_reasoning", None)
     if grounded:
         from grounded_reasoning import row_metadata
@@ -304,6 +319,8 @@ def main(
                                        torch.tensor([e["cand_logp"] for e in encodings]))
             if inject_spec:
                 model.cat_override = torch.tensor([e["cat_list"] for e in encodings])
+            if x0_bank is not None:
+                model.x0_override = x0_bank[idx * batch_size: idx * batch_size + len(encodings)].to(device)
             if side_spec and not mixture:
                 model.set_side_index(torch.tensor([e["side_index"] for e in encodings]))
             if steer:
@@ -373,6 +390,54 @@ def main(
         metrics = calculate_ranking_metrics(test_data, info_file)
         wandb_run.log({f"evaluation_shard/{key}": value for key, value in metrics.items()})
         wandb_run.finish()
+
+def diffusion_x0_bank(model, tokenizer, batches, frame, spec, mode, seed, result_path):
+    """Refined vectors x0_hat of every test row (prompt only, as in generation).
+
+    Writes the nearest-item retrieval readout of the raw x0_hat (HR/NDCG of the
+    target among the catalogue items, centred cosine; also split by whether the
+    target occurs as a training target) to diffusion_x0.json next to the
+    results.  Returns the [N, d] override for ``mode`` (None for raw).
+    """
+    from diffusion_refine import nearest_item_metrics
+
+    prep = torch.load(spec["source"], map_location="cpu", weights_only=False)
+    model.set_item_table(prep["embeddings"], prep["valid"])
+    rows = torch.as_tensor(frame.index.to_numpy())
+    target = prep["target"]["test"][rows].long()
+    parts = []
+    for encodings in batches:
+        width = max(len(e["input_ids"]) for e in encodings)
+        ids = torch.tensor([[tokenizer.pad_token_id] * (width - len(e["input_ids"])) + e["input_ids"] for e in encodings])
+        mask = torch.tensor([[0] * (width - len(e["input_ids"])) + e["attention_mask"] for e in encodings])
+        with torch.no_grad():
+            model.generate_embs(ids.to(device), mask.to(device))
+        parts.append(model.last_x0.float().cpu())
+    bank = torch.cat(parts)
+    item_x0, item_valid = model.item_x0.cpu(), model.item_valid.cpu()
+    seen = prep["seen_target"]["test"][rows].bool()
+    readout = {"all": nearest_item_metrics(bank, target, item_x0, item_valid), "n": len(bank),
+               "seen": nearest_item_metrics(bank[seen], target[seen], item_x0, item_valid),
+               "unseen": nearest_item_metrics(bank[~seen], target[~seen], item_x0, item_valid),
+               "n_unseen": int((~seen).sum())}
+    print("diffusion x0 retrieval:", json.dumps(readout))
+    out_dir = os.path.dirname(os.path.abspath(result_path))
+    with open(os.path.join(out_dir, "diffusion_x0.json"), "w") as f:
+        json.dump(readout, f, indent=2)
+    if mode == "raw":
+        return None
+    if mode == "oracle":
+        return item_x0[target].clone()
+    if mode == "mean":
+        return bank.mean(0, keepdim=True).expand_as(bank).clone()
+    users = frame["user_id"].astype(str).to_numpy()
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(len(bank), generator=generator)
+    for i in range(len(bank)):
+        while users[int(perm[i])] == users[i]:
+            perm[i] = int(torch.randint(len(bank), (1,), generator=generator))
+    return bank[perm].clone()
+
 
 def perturb_oracle(mode, target, embeddings, table, valid, seed):
     """Perturbed target-item oracles (item_oracle_prep.py tables).
