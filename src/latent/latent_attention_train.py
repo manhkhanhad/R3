@@ -103,6 +103,7 @@ def train(
     # Guaranteed attention share for r in every decoder layer (attention_share.py): fixed | budget
     attention_share_mode: str = None,
     attention_share_rho: float = 0.3,
+    attention_share_weight: float = 10.0,  # regularize mode: weight of the attention-floor penalty
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -152,6 +153,7 @@ def train(
             "pool_history_only": pool_history_only,
             "attention_share_mode": attention_share_mode,
             "attention_share_rho": attention_share_rho,
+            "attention_share_weight": attention_share_weight,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -458,7 +460,8 @@ def train(
                 or pool_history_only):
             raise ValueError("attention share is a plain-R3 option; do not combine with other options")
         from attention_share import enable_attention_share
-        model.config.latent_attention_share = {"mode": attention_share_mode, "rho": float(attention_share_rho)}
+        model.config.latent_attention_share = {"mode": attention_share_mode, "rho": float(attention_share_rho),
+                                               "weight": float(attention_share_weight)}
         enable_attention_share(model)
         print("attention share:", model.config.latent_attention_share)
 

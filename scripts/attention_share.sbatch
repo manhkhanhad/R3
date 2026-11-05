@@ -14,12 +14,13 @@
 # Guaranteed attention share for r (src/latent/attention_share.py): plain R3 whose
 # decoder gives r a share rho of every head's attention at every position after r.
 # MODE=fixed (rho for all heads) | budget (layer budget rho distributed over heads
-# in proportion to their own attention to r). Recipe = R3 (base Qwen2.5-1.5B,
+# in proportion to their own attention to r) | regularize (attention unchanged; training
+# adds WEIGHT * mean relu(rho - head-mean attention to r)^2, inference = plain attention). Recipe = R3 (base Qwen2.5-1.5B,
 # lr 3e-4, batch 128, <= 3 epochs, early stopping). Then constrained 10-beam
 # ranking, r interventions raw / mask / mean / shuffle_user (experiment.py),
 # paired bootstrap, operator trace (n = 300).
 # No 3090: eager attention (needed for the reweighting) uses more memory.
-# Env: CODE_ROOT (required), MODE, RHO, CATEGORY, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME,
+# Env: CODE_ROOT (required), MODE, RHO, WEIGHT, CATEGORY, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME,
 #      TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE, EXTRACT_LIMIT, INTERVENTION_LIMIT, MODES, SKIP_TRAIN, TRACE_N.
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -31,7 +32,7 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 category="${CATEGORY:-CDs_and_Vinyl}"
-mode="${MODE:?set MODE=fixed|budget}"
+mode="${MODE:?set MODE=fixed|budget|regularize}"
 rho="${RHO:-0.3}"
 name="${OUTPUT_NAME:-${category}_attn_share_${mode}_${rho}}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
@@ -71,7 +72,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 && ! -f "$out/config.json" ]]; then
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate 3e-4 --cutoff_len 512 \
     --save_only_model True --save_total_limit 2 \
-    --attention_share_mode "$mode" --attention_share_rho "$rho" "${resume[@]}"
+    --attention_share_mode "$mode" --attention_share_rho "$rho" --attention_share_weight "${WEIGHT:-10}" "${resume[@]}"
 fi
 [[ -f "$out/config.json" ]] || { echo "no trained model in $out" >&2; exit 1; }
 

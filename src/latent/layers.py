@@ -366,6 +366,11 @@ class LatentModel(Qwen2ForCausalLM):
                 inputs_embeds.dtype if inputs_embeds is not None else self.model.embed_tokens.weight.dtype)
         # elif input_ids is not None and inputs_embeds is None and input_ids.size()!=attention_mask.size():
             # 这个时候是在做生成任务，已经有了cache所以用input_ids即可
+        share = getattr(self, "_latent_share", None)
+        regularize = (share is not None and share.mode == "regularize" and self.training
+                      and labels is not None and torch.is_grad_enabled())
+        if regularize:
+            share.records = []  # record only the main pass (not the pooling pass in generate_embs)
         output = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -381,6 +386,12 @@ class LatentModel(Qwen2ForCausalLM):
             num_logits_to_keep=num_logits_to_keep,
             **kwargs,
         )
+        if regularize:
+            from attention_share import attention_floor_penalty
+            penalty = attention_floor_penalty(share, labels)
+            share.records = None
+            if penalty is not None and output.loss is not None:
+                output.loss = output.loss + share.weight * penalty
         if steer and is_prefill and item_index is not None:
             self.steer.item_index = self.steer.item_sim = None  # training batch: do not leak into the next call
             aux = self.steer.last_aux

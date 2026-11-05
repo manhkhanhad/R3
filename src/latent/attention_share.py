@@ -17,6 +17,11 @@ back to ~0 because r is redundant with the history):
   so every query position gives r rho_bar on average over the heads (before
   clipping) while heads that naturally read r more get more of it.  Defined per
   query position, so training (teacher forcing) and KV-cache decoding agree.
+* ``regularize``: attention is NOT changed; training adds
+      weight * mean_{l, t} relu(rho_bar - mean_h a_tp^(h))^2
+  over target-predicting positions t, so the model learns (through its own
+  query/key projections) to give r at least rho_bar per layer on average over
+  heads.  Inference is plain attention.
 
 Implemented as an attention function registered under the name
 ``latent_share`` (eager attention + the reweighting); the thought position per
@@ -32,12 +37,43 @@ NAME = "latent_share"
 
 
 class ShareState:
-    def __init__(self, mode, rho):
-        if mode not in ("fixed", "budget"):
+    def __init__(self, mode, rho, weight=0.0):
+        if mode not in ("fixed", "budget", "regularize"):
             raise ValueError(f"unknown attention share mode {mode}")
-        self.mode, self.rho = mode, float(rho)
+        self.mode, self.rho, self.weight = mode, float(rho), float(weight)
         self.positions = None      # [B] key index of the thought token (-1: none)
         self.last_share = None     # diagnostics: mean realised share per layer
+        self.records = None        # regularize: per layer [B, T] head-mean attention to r (with grad)
+        self.last_penalty = None
+
+
+def record_share(weights, positions, q_len, state):
+    """regularize mode: store the head-mean attention to r of every query position (weights unchanged)."""
+    b, h, t, s = weights.shape
+    if positions is None or state.records is None:
+        return
+    pos = positions.to(weights.device).long()
+    idx = pos.clamp_min(0).view(b, 1, 1, 1).expand(b, h, t, 1)
+    state.records.append(weights.gather(-1, idx).squeeze(-1).mean(1))     # [B, T]
+
+
+def attention_floor_penalty(state, labels):
+    """mean over layers and target-predicting positions of relu(rho - head-mean attention to r)^2.
+
+    A query position t counts if it predicts a target token (labels[t + 1] != -100) and lies after r.
+    """
+    if not state.records:
+        return None
+    valid = torch.zeros_like(labels, dtype=torch.bool)
+    valid[:, :-1] = labels[:, 1:] != -100
+    pos = state.positions.to(labels.device)
+    valid &= torch.arange(labels.size(1), device=labels.device)[None] > pos[:, None]
+    shares = torch.stack(state.records)                                        # [L, B, T]
+    gap = torch.relu(state.rho - shares) ** 2
+    penalty = (gap * valid[None]).sum() / (valid.sum() * shares.size(0)).clamp_min(1)
+    state.last_share = float((shares.detach() * valid[None]).sum() / (valid.sum() * shares.size(0)).clamp_min(1))
+    state.last_penalty = float(penalty.detach())
+    return penalty
 
 
 def reweight(weights, positions, q_len, state):
@@ -73,7 +109,11 @@ def share_attention_forward(module, query, key, value, attention_mask, scaling, 
     if attention_mask is not None:
         scores = scores + attention_mask[:, :, :, : key_states.shape[-2]]
     weights = nn.functional.softmax(scores, dim=-1, dtype=torch.float32)
-    weights = reweight(weights, state.positions, query.shape[2], state)
+    if state.mode == "regularize":
+        if module.training and torch.is_grad_enabled():
+            record_share(weights, state.positions, query.shape[2], state)
+    else:
+        weights = reweight(weights, state.positions, query.shape[2], state)
     weights = weights.to(query.dtype)
     weights = nn.functional.dropout(weights, p=dropout, training=module.training)
     out = torch.matmul(weights, value_states).transpose(1, 2).contiguous()
@@ -84,7 +124,7 @@ def enable_attention_share(model):
     """Switch every decoder layer to the share attention (config.latent_attention_share)."""
     spec = model.config.latent_attention_share
     ALL_ATTENTION_FUNCTIONS[NAME] = share_attention_forward
-    state = ShareState(spec["mode"], spec["rho"])
+    state = ShareState(spec["mode"], spec["rho"], spec.get("weight", 0.0))
     model._latent_share = state
     model.config._attn_implementation = NAME
     for layer in model.model.layers:
