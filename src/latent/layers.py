@@ -226,6 +226,9 @@ class LatentModel(Qwen2ForCausalLM):
         if getattr(target.config, "latent_steered_reading", None):
             from steered_reading import load_fp32_steer_params
             load_fp32_steer_params(target, str(pretrained_model_name_or_path))
+        if getattr(target.config, "latent_attention_share", None):
+            from attention_share import enable_attention_share
+            enable_attention_share(target)
         return model
 
     def pooling_mask(self, input_ids, attention_mask):
@@ -344,6 +347,9 @@ class LatentModel(Qwen2ForCausalLM):
                 bottleneck, input_ids if is_prefill else bottleneck_ids,
                 attention_mask, input_ids, inputs_embeds,
             )
+        if is_prefill and getattr(self, "_latent_share", None) is not None:
+            from attention_share import set_share_positions
+            set_share_positions(self, input_ids, self.model.embed_tokens.num_embeddings - 1)
         if is_prefill:
             if steer and item_index is not None:
                 self.steer.item_index, self.steer.item_sim = item_index, item_sim

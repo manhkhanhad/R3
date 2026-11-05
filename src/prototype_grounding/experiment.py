@@ -193,7 +193,7 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     tokenizer.padding_side = "right"
     config = AutoConfig.from_pretrained(checkpoint)
     if (getattr(config, "latent_neighbor_refinement", None) or getattr(config, "latent_bottleneck", None)
-            or getattr(config, "latent_pool_history", None)):
+            or getattr(config, "latent_pool_history", None) or getattr(config, "latent_attention_share", None)):
         # These live in the SFT model class.  The original GRPO class silently
         # drops the neighbor wrapper (random-initialising the plain attention
         # layer) and does not apply the L7 latent-only attention mask.
@@ -211,8 +211,16 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     return model, tokenizer, device
 
 
+def _share_positions(model, ids: torch.Tensor) -> None:
+    """Attention-share checkpoints (attention_share.py): record the thought positions of this batch."""
+    if getattr(model, "_latent_share", None) is not None:
+        from attention_share import set_share_positions
+        set_share_positions(model, ids, model.model.embed_tokens.num_embeddings - 1)
+
+
 def thought_embeds(model: LatentModel, ids: torch.Tensor, mask: torch.Tensor, pos: torch.Tensor):
     with torch.no_grad():
+        _share_positions(model, ids)
         first = model.model(input_ids=ids, attention_mask=mask, output_hidden_states=False, use_cache=False)
         pool_mask = model.pooling_mask(ids, mask) if hasattr(model, "pooling_mask") else mask
         thought = model.attention(first.last_hidden_state, pool_mask, pos)
@@ -628,6 +636,7 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
     # Generation calls this only for the uncached prompt pass. The dynamic query
     # preserves the original left-padding/position behavior of noise_eval.py.
     def grounded_generate_embs(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        _share_positions(model, input_ids)
         first = model.model(input_ids=input_ids, attention_mask=attention_mask,
                             output_hidden_states=True, use_cache=False)
         thought_id = model.model.embed_tokens.num_embeddings - 1

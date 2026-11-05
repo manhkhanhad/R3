@@ -51,8 +51,16 @@ from layers import LatentModel  # noqa: E402
 from reasoning_dataset import LatentRDataset  # noqa: E402
 
 
+def share_positions(model, ids):
+    """Attention-share checkpoints (attention_share.py): thought positions for the next forward."""
+    if getattr(model, "_latent_share", None) is not None:
+        from attention_share import set_share_positions
+        set_share_positions(model, ids, model.model.embed_tokens.num_embeddings - 1)
+
+
 def pooling_stats(model, ids, mask, prefix_len):
     """r and the pooling's attention mass on the shared instruction prefix vs the user region."""
+    share_positions(model, ids)
     out = LatentModel.__mro__[1].forward(model, input_ids=ids, attention_mask=mask, output_hidden_states=True)
     h = out.hidden_states[-1]
     att = model.attention
@@ -148,6 +156,7 @@ def main():
             # tokens after the thought do not affect it)
             r_a, m_pre, m_user, p = pooling_stats(model, ids, mask, prefix_len)
             r_b, _, _, _ = pooling_stats(model, ids_b, torch.ones_like(ids_b), prefix_len)
+            share_positions(model, ids)  # back to A's thought position for the decoder runs
             pool_prefix.append(m_pre); pool_user.append(m_user)
             rel_r.append(float((r_a - r_b).norm() / r_a.norm()))
             emb = model.model.embed_tokens(ids)
@@ -227,6 +236,7 @@ def main():
                 ids_d = torch.tensor([item_d["input_ids"]], device=device)
                 lab_d = torch.tensor(item_d["labels"], device=device)
                 out_d = model(input_ids=ids_d, attention_mask=torch.ones_like(ids_d))
+                share_positions(model, ids)
                 q_d = torch.nonzero(lab_d != -100).squeeze(-1) - 1
                 lp_d = F.log_softmax(out_d.logits[0, q_d].float(), -1)
                 if lp_d.shape == lp_a.shape:

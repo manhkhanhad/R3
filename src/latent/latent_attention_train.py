@@ -100,6 +100,9 @@ def train(
     latent_only_epochs: int = None,
     # History-only pooling (history_pooling.py): r pools over the history title tokens only
     pool_history_only: bool = False,
+    # Guaranteed attention share for r in every decoder layer (attention_share.py): fixed | budget
+    attention_share_mode: str = None,
+    attention_share_rho: float = 0.3,
     # B1 steered reading (steered_reading.py): the thought selects which k history
     # items the recommendation pass reads; selector trained toward the oracle items
     steered_k: int = 0,
@@ -147,6 +150,8 @@ def train(
             "history_bias": history_bias,
             "latent_only_epochs": latent_only_epochs,
             "pool_history_only": pool_history_only,
+            "attention_share_mode": attention_share_mode,
+            "attention_share_rho": attention_share_rho,
             "steered_k": steered_k,
             "steered_rule": steered_rule,
             "steered_aux_weight": steered_aux_weight,
@@ -446,6 +451,16 @@ def train(
         shown = history_title_mask(probe, torch.ones_like(probe), model.config.latent_pool_history,
                                    model.model.embed_tokens.num_embeddings - 1)[0]
         print("history pooling: keys =", repr(tokenizer.decode(probe[0][shown])))
+
+    if attention_share_mode is not None:
+        if (thought_source is not None or latent_only or use_side_info or use_category_alignment
+                or category_text_file or steered_k > 0 or candidates is not None or category_prep is not None
+                or pool_history_only):
+            raise ValueError("attention share is a plain-R3 option; do not combine with other options")
+        from attention_share import enable_attention_share
+        model.config.latent_attention_share = {"mode": attention_share_mode, "rho": float(attention_share_rho)}
+        enable_attention_share(model)
+        print("attention share:", model.config.latent_attention_share)
 
     print("LOAD DATA FINISHED")
 
