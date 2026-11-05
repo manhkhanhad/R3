@@ -111,3 +111,38 @@ def test_loss_average_switch_reaches_trainer(tmp_path):
         model.accepts_loss_kwargs = flag
         trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(tmp_path), report_to=[], use_cpu=True))
         assert trainer.model_accepts_loss_kwargs is flag
+
+
+def test_rationale_infonce_train_only_and_trains():
+    model = make_model("text")
+    ids, mask, labels = batch()
+    tokens = torch.randint(2, THOUGHT, (6, 5))
+    rmask = torch.ones(6, 5, dtype=torch.bool)
+    rmask[:, :1] = False
+    model.set_rationale_table(tokens, rmask)
+    support = torch.tensor([[0, 1, 2], [3, 4, 5]])
+    own = torch.tensor([2, 5])
+    model.train()
+    base = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support, own_row=own).loss
+    model.rationale_beta, model.aux_negatives = 0.1, 4
+    torch.manual_seed(1)
+    out = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support, own_row=own)
+    assert len(model.aux_log) == 1 and model.aux_log[0] > 0
+    assert torch.allclose(out.loss, base + 0.1 * torch.tensor(model.aux_log[0]), atol=1e-4)
+    out.loss.backward()
+    assert model.injectnet.W_q.weight.grad.abs().sum() > 0  # pooling of rationales gets gradient
+    assert model._thought is None and model._own_rows is None
+    model.eval()
+    with torch.no_grad():
+        ev = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support, own_row=own).loss
+    assert torch.allclose(ev, base, atol=1e-5)  # eval loss = NTP only
+
+
+def test_collator_passes_own_row():
+    tok = Tokenizer(models.WordLevel({"[PAD]": 0, "a": 1}, unk_token="[PAD]"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="[PAD]")
+    collate = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    out = collate([{"input_ids": [1, 1], "attention_mask": [1, 1], "labels": [-100, 1], "support_ids": [3, 4], "own_row": 7},
+                   {"input_ids": [1], "attention_mask": [1], "labels": [1], "support_ids": [5, 6], "own_row": 9}])
+    assert out["own_row"].tolist() == [7, 9]

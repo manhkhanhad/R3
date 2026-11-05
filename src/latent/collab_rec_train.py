@@ -17,7 +17,7 @@ import transformers
 from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, EarlyStoppingCallback
 
 from collab_rec_dataset import (SOURCES, TARGET_FORMATS, CollabLatentRDataset, build_support_table, default_collab_dir,
-                                load_support_rows)
+                                load_rationales, load_support_rows, tokenize_texts)
 from collab_rec_latent import CollabLatentModel
 from experiment_tracking import init_training_run, wandb_report_to
 
@@ -40,6 +40,21 @@ def collab_spec(category, support_source, support_mode, support_k, collab_dir, r
             "collab_dir": os.path.abspath(collab_dir or default_collab_dir(category)),
             "rationale_tag": rationale_tag, "max_support_len": int(max_support_len),
             "target_format": target_format}
+
+
+class AuxLossLog(transformers.TrainerCallback):
+    """Print the mean rationale InfoNCE of the last logging_every optimizer steps."""
+
+    def __init__(self, model, every=10):
+        self.model, self.every = model, every
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % self.every == 0 and self.model.aux_log:
+            vals = self.model.aux_log
+            print(f"step {state.global_step}: rationale InfoNCE mean {sum(vals) / len(vals):.4f} "
+                  f"over {len(vals)} micro-batches", flush=True)
+            self.model.aux_log = []
+        return control
 
 
 class StopAfterSteps(transformers.TrainerCallback):
@@ -84,16 +99,25 @@ def train(
     target_format: str = "r3",  # r3: '"title"\n' + <|endoftext|> | end_predict: '"title"' + <|EndPredict|> (IntuRec)
     loss_average: str = "batch",  # batch: token mean over the 128-row batch (HF) | micro_batch: mean of micro-batch means (IntuRec)
     stop_after_steps: int = 0,  # >0: check run, stop after N optimizer steps (full LR schedule), no eval/save
+    max_grad_norm: float = 1.0,  # HF default; 0 = no clipping (IntuRec)
+    rationale_beta: float = 0.0,  # >0: CollabRec rationale InfoNCE (text mode, needs loss_average=micro_batch)
+    aux_temperature: float = 0.05,
+    aux_negatives: int = 63,
 ):
     if target_format not in TARGET_FORMATS:
         raise ValueError(f"target_format must be one of {TARGET_FORMATS}")
     if loss_average not in ("batch", "micro_batch"):
         raise ValueError("loss_average must be batch or micro_batch")
+    if rationale_beta > 0 and (support_mode != "text" or loss_average != "micro_batch"):
+        raise ValueError("rationale_beta needs support_mode=text and loss_average=micro_batch "
+                         "(the aux term is a per-micro-batch mean)")
     spec = collab_spec(category, support_source, support_mode, support_k, collab_dir, rationale_tag,
                        max_support_len, target_format)
     init_training_run(dataset=category, run_name=wandb_run_name,
                       config={"base_model": base_model, "train_file": train_file, "eval_file": eval_file,
                               "output_dir": output_dir, "dataset": category, "collab_rec": spec})
+    spec.update(rationale_beta=float(rationale_beta), aux_temperature=float(aux_temperature),
+                aux_negatives=int(aux_negatives), max_grad_norm=float(max_grad_norm))
     print("collab_rec:", spec)
     category_text = CATEGORY[category]
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -119,10 +143,19 @@ def train(
     # IntuRec averaging: without loss kwargs the Trainer divides each micro-batch's mean by the accumulation steps
     model.accepts_loss_kwargs = loss_average == "batch"
     print(f"target_format={target_format} loss_average={loss_average} micro_batch_size={micro_batch_size} "
-          f"grad_accum={gradient_accumulation_steps}")
+          f"grad_accum={gradient_accumulation_steps} max_grad_norm={max_grad_norm} rationale_beta={rationale_beta}")
     if table is not None:
         model.set_support_table(table, mask)
         print(f"support table {tuple(table.shape)}")
+    if rationale_beta > 0:
+        r_ids, r_mask = tokenize_texts(tokenizer, load_rationales(
+            os.path.join(spec["collab_dir"], f"rationales_facet_train_{rationale_tag}.jsonl")), int(max_support_len))
+        n_train = len(pd.read_csv(train_file, usecols=[0]))
+        assert len(r_ids) == n_train, f"{len(r_ids)} train rationales for {n_train} train rows"
+        model.set_rationale_table(r_ids, r_mask)
+        model.rationale_beta, model.aux_temperature, model.aux_negatives = rationale_beta, aux_temperature, aux_negatives
+        print(f"rationale InfoNCE: beta={rationale_beta} tau={aux_temperature} negatives={aux_negatives} "
+              f"table {tuple(r_ids.shape)}")
 
     def rows_for(path, split):
         rows = load_support_rows(spec, split)
@@ -133,7 +166,7 @@ def train(
 
     train_data = CollabLatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample,
                                       seed=seed, category=category_text, support_rows=rows_for(train_file, "train"),
-                                      target_format=target_format)
+                                      target_format=target_format, own_rows=rationale_beta > 0)
     val_data = CollabLatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
                                     sample=sample if eval_sample is None else eval_sample, category=category_text,
                                     support_rows=rows_for(eval_file, "valid"), target_format=target_format)
@@ -171,9 +204,11 @@ def train(
             report_to=wandb_report_to(),
             remove_unused_columns=False,
             seed=seed,
+            max_grad_norm=max_grad_norm,
         ),
         data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True),
-        callbacks=[StopAfterSteps(stop_after_steps)] if check else [EarlyStoppingCallback(early_stopping_patience=1)],
+        callbacks=([StopAfterSteps(stop_after_steps)] if check else [EarlyStoppingCallback(early_stopping_patience=1)])
+        + ([AuxLossLog(model)] if rationale_beta > 0 else []),
     )
     model.config.use_cache = False
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

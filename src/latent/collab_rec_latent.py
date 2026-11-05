@@ -10,8 +10,11 @@ retrieved *supports* instead of R3's history self-attention:
     no supports (k = 0):  text r = Linear(q);  emb r = W_r q
 
 Only the producer of r changes; the R3 prompt, the target format and the NTP loss
-are untouched. The rationale-alignment InfoNCE (beta) and the contrastive support
-loss (gamma) of CollabRec are not ported.
+are untouched. Optional (``rationale_beta`` > 0, text mode, training only): CollabRec's
+rationale-alignment InfoNCE -- the thought vs the row's own train rationale (positive) and
+``aux_negatives`` random train rationales, all pooled by InjectNet.pool over token embeddings,
+temperature ``aux_temperature``; loss = NTP + beta * InfoNCE. Validation loss stays pure NTP
+(IntuRec selects its checkpoint by valid NTP). The contrastive support loss (gamma) is not ported.
 
 Supports are looked up from a table held as a non-persistent buffer (rebuilt by
 the train/eval scripts from ``config.collab_rec``); each example carries the
@@ -128,6 +131,15 @@ class CollabLatentModel(LatentModel):
         self.register_buffer("support_table", torch.empty(0, 1), persistent=False)
         self.register_buffer("support_mask", torch.empty(0, 1, dtype=torch.bool), persistent=False)
         self._support_ids = None
+        # rationale InfoNCE (set by the training script; off by default)
+        self.rationale_beta = 0.0
+        self.aux_temperature = 0.05
+        self.aux_negatives = 63
+        self.register_buffer("rationale_table", torch.empty(0, 1, dtype=torch.long), persistent=False)
+        self.register_buffer("rationale_mask", torch.empty(0, 1, dtype=torch.bool), persistent=False)
+        self._own_rows = None
+        self._thought = None
+        self.aux_log = []  # recent InfoNCE values (training)
 
     # ------------------------------------------------------------------ tables
     def set_support_table(self, table, mask=None):
@@ -136,6 +148,28 @@ class CollabLatentModel(LatentModel):
         self.support_table = table.to(device)
         if mask is not None:
             self.support_mask = torch.as_tensor(mask).bool().to(device)
+
+    def set_rationale_table(self, tokens, mask):
+        """Train-row rationales [n_train, L] (InfoNCE positives by row, negatives sampled)."""
+        device = self.model.embed_tokens.weight.device
+        self.rationale_table = torch.as_tensor(tokens).long().to(device)
+        self.rationale_mask = torch.as_tensor(mask).bool().to(device)
+
+    def pool_rationales(self, ids):
+        # ids: [...] rows of the rationale table -> [..., dim] (IntuRec's convertseq2emb)
+        shape = ids.shape
+        tokens, mask = self.rationale_table[ids.reshape(-1)], self.rationale_mask[ids.reshape(-1)]
+        return self.injectnet.pool(self.model.embed_tokens(tokens), mask).reshape(*shape, -1)
+
+    def rationale_infonce(self, thought, own_rows):
+        own_rows = own_rows.to(self.rationale_table.device).long()
+        negs = torch.randint(0, self.rationale_table.shape[0], (own_rows.shape[0], self.aux_negatives),
+                             device=own_rows.device)
+        z = F.normalize(thought.float(), dim=-1)
+        pos = (z * F.normalize(self.pool_rationales(own_rows).float(), dim=-1)).sum(-1, keepdim=True)
+        neg = torch.einsum("bd,bnd->bn", z, F.normalize(self.pool_rationales(negs).float(), dim=-1))
+        logits = torch.cat([pos, neg], dim=-1) / self.aux_temperature
+        return F.cross_entropy(logits, torch.zeros(len(logits), dtype=torch.long, device=logits.device))
 
     def set_support_ids(self, ids):
         """Per-example support indices for the next forward pass (generation)."""
@@ -184,16 +218,29 @@ class CollabLatentModel(LatentModel):
         if ids is not None:
             ids = ids.to(input_ids.device)[rows]
         latent = self.thought_vector(query, ids)
+        if self._own_rows is not None:
+            if rows.tolist() != list(range(input_ids.shape[0])):
+                raise ValueError("InfoNCE expects one thought per row in order")
+            self._thought = latent
         latent = self.observe_reasoning_latent(latent)
         input_embs = self.model.embed_tokens(input_ids)
         input_embs[rows, cols] = latent.to(input_embs.dtype)
         return input_embs
 
-    def forward(self, support_ids=None, **kwargs):
+    def forward(self, support_ids=None, own_row=None, **kwargs):
         if support_ids is not None:
             self._support_ids = support_ids
+        use_aux = (self.training and self.rationale_beta > 0 and own_row is not None
+                   and self.support_mode == "text" and self.rationale_table.numel() > 0)
+        self._own_rows = own_row if use_aux else None
         try:
-            return super().forward(**kwargs)
+            out = super().forward(**kwargs)
+            if use_aux and out.loss is not None:
+                aux = self.rationale_infonce(self._thought, own_row)
+                out.loss = out.loss + self.rationale_beta * aux
+                self.aux_log.append(aux.item())
+            return out
         finally:
+            self._own_rows = self._thought = None
             if support_ids is not None:
                 self._support_ids = None

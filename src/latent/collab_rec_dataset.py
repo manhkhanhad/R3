@@ -102,11 +102,12 @@ class CollabLatentRDataset(LatentRDataset):
     DataFrame index (which ``sample`` preserves).
     """
 
-    def __init__(self, *args, support_rows=None, target_format="r3", **kwargs):
+    def __init__(self, *args, support_rows=None, target_format="r3", own_rows=False, **kwargs):
         if target_format not in TARGET_FORMATS:
             raise ValueError(f"target_format must be one of {TARGET_FORMATS}")
         self.support_rows = support_rows
         self.target_format = target_format
+        self.own_rows = own_rows  # add "own_row" (original CSV row) for the rationale InfoNCE
         super().__init__(*args, **kwargs)
 
     def get_inputs(self):
@@ -130,4 +131,6 @@ class CollabLatentRDataset(LatentRDataset):
         example = super().pre(idx)
         if self.support_rows is not None:
             example["support_ids"] = [int(x) for x in self.support_rows[self.original_row(idx)]]
+        if self.own_rows:
+            example["own_row"] = self.original_row(idx)
         return example

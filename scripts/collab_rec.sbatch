@@ -17,6 +17,7 @@
 #   CODE_ROOT (default: this worktree)  TRAIN_SAMPLE / EVAL_SAMPLE / TEST_SAMPLE (smoke runs)
 #   EVAL_OVERRIDES="none shuffle" adds ranking evals with the supports dropped / taken from another row.
 #   IntuRec-matching: MICRO=8  LOSS_AVERAGE=micro_batch  TARGET_FORMAT=end_predict
+#   MAX_GRAD_NORM=0 (no clipping, IntuRec; default 1.0)  BETA=0.1 (rationale InfoNCE, needs LOSS_AVERAGE=micro_batch)
 #   STOP_AFTER_STEPS=N: loss check run (full LR schedule, stops after N optimizer steps, no eval/save/ranking).
 # Example: sbatch --export=ALL,SOURCE=oracle_motive scripts/collab_rec.sbatch   (run from any dir)
 module purge
@@ -74,6 +75,7 @@ if [[ ! -f "$out/config.json" ]]; then
     --save_only_model True --save_total_limit 2 --wandb_run_name "$name" \
     --target_format "${TARGET_FORMAT:-r3}" --loss_average "${LOSS_AVERAGE:-batch}" \
     --stop_after_steps "${STOP_AFTER_STEPS:-0}" \
+    --max_grad_norm "${MAX_GRAD_NORM:-1.0}" --rationale_beta "${BETA:-0}" \
     "${resume[@]}" || exit 1
 fi
 if [[ "${STOP_AFTER_STEPS:-0}" -gt 0 ]]; then
