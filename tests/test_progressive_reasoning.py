@@ -200,6 +200,31 @@ def test_train_forward_adds_prl_and_cl_with_hf_normalisation():
     assert set(model.last_prl_stats) == {"step0", "step1", "step2", "cl"}
 
 
+def test_max_temp_schedule():
+    from progressive_reasoning import step_temperature
+    paper = {"temp_scale": 5.0}
+    capped = {"temp_scale": 5.0, "max_temp": 25.0}
+    assert [step_temperature(j, 4, paper) for j in range(4)] == [625.0, 125.0, 25.0, 5.0]
+    got = [step_temperature(j, 4, capped) for j in range(4)]
+    assert got == pytest.approx([25.0, 25 ** 0.75, 5.0, 25 ** 0.25])
+    # K=2 with max_temp = scale^2 is the paper's schedule
+    assert [step_temperature(j, 2, capped) for j in range(2)] == pytest.approx([25.0, 5.0])
+
+
+def test_prl_loss_uses_capped_temperature():
+    model = make_model()
+    model.config.latent_prl = {"temp_scale": 5.0, "weight": 1.0, "from_step": 0, "max_temp": 25.0}
+    ids, mask, labels = batch([[10, 11, 12]])
+    with torch.no_grad():
+        embs = prepared(model, ids, mask)
+        _, means = prl_loss(model, embs, mask, labels, model.config.latent_prl)
+        for j in range(K):
+            logits, targets = step_logits(model, embs, mask, labels, model._bottleneck_block,
+                                          model._bottleneck_thought_pos, K, j)
+            expect = torch.nn.functional.cross_entropy(logits / 25.0 ** ((K - j) / K), targets)
+            assert torch.allclose(means[j], expect, atol=1e-5)
+
+
 def test_temperature_annealing():
     model = make_model()
     ids, mask, labels = batch([[10, 11, 12]])

@@ -94,6 +94,7 @@ def train(
     # noisy-thought contrastive loss (thought_cl_*; weight defaults to 1 with prl, else 0)
     prl: bool = False,
     prl_temp_scale: float = 5.0,
+    prl_max_temp: float = None,  # cap: step j divides by max_temp^((K-j)/K) instead of temp_scale^(K-j)
     prl_weight: float = 1.0,
     prl_from_step: int = 0,
     thought_cl_weight: float = None,
@@ -158,6 +159,7 @@ def train(
             "thought_dropout": thought_dropout,
             "prl": prl,
             "prl_temp_scale": prl_temp_scale,
+            "prl_max_temp": prl_max_temp,
             "prl_weight": prl_weight,
             "prl_from_step": prl_from_step,
             "thought_cl_weight": thought_cl_weight,
@@ -471,6 +473,10 @@ def train(
             raise ValueError("need 0 <= prl_from_step < n_thoughts")
         model.config.latent_prl = {"temp_scale": float(prl_temp_scale), "weight": float(prl_weight),
                                    "from_step": int(prl_from_step)}
+        if prl_max_temp is not None:
+            if float(prl_max_temp) < 1:
+                raise ValueError("prl_max_temp must be >= 1")
+            model.config.latent_prl["max_temp"] = float(prl_max_temp)
         print("PRL:", model.config.latent_prl)
     if latent_only_epochs is not None:
         if not latent_only or latent_gist or history_bias is not None or thought_source is not None:

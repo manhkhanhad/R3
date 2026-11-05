@@ -22,7 +22,7 @@
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0), GIST,
 #      HISTORY_BIAS (soft bottleneck, e.g. -4),
 #      PRL=1 (ReaRec PRL, needs SOURCE=hidden LATENT_ONLY=1; progressive_reasoning.py) with PRL_TEMP_SCALE (5),
-#      PRL_FROM_STEP (0), CL_WEIGHT (1 with PRL), CL_NOISE (0.01), CL_SIM (cos; dot = official, unstable at LLM scale),
+#      PRL_MAX_TEMP (unset = paper schedule; e.g. 25 caps the earliest step at /25 for any K), PRL_FROM_STEP (0), CL_WEIGHT (1 with PRL), CL_NOISE (0.01), CL_SIM (cos; dot = official, unstable at LLM scale),
 #      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 
 set -Eeuo pipefail
@@ -43,7 +43,7 @@ latent_only="${LATENT_ONLY:-1}"
 gist="${GIST:-0}"
 hbias="${HISTORY_BIAS:-}"  # soft bottleneck: finite negative attention bias on the history (needs LATENT_ONLY=1)
 prl="${PRL:-0}"
-name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)$([[ -n $hbias ]] && echo _hb${hbias#-})$([[ $prl == 1 ]] && echo _prl)}"
+name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)$([[ -n $hbias ]] && echo _hb${hbias#-})$([[ $prl == 1 ]] && echo _prl)$([[ $prl == 1 && -n ${PRL_MAX_TEMP:-} ]] && echo _mt${PRL_MAX_TEMP})}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -83,6 +83,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   [[ $prl == 1 ]] && latent_flag+=(--prl True --prl_temp_scale "${PRL_TEMP_SCALE:-5.0}" --prl_from_step "${PRL_FROM_STEP:-0}"
                                   --thought_cl_noise "${CL_NOISE:-0.01}" --thought_cl_similarity "${CL_SIM:-cos}")
   [[ -n ${CL_WEIGHT:-} ]] && latent_flag+=(--thought_cl_weight "$CL_WEIGHT")
+  [[ $prl == 1 && -n ${PRL_MAX_TEMP:-} ]] && latent_flag+=(--prl_max_temp "$PRL_MAX_TEMP")
   python "$code_root/src/latent/latent_attention_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
     --train_file "$train_file" --eval_file "$eval_file" \

@@ -19,7 +19,14 @@ decoding the target title from step j's state:
            the first thought.
   j = K    the ordinary main pass (HF loss, temperature 1 = the LLM's tau).
 
-Token logits of step j are divided by ``temp_scale ** (K - j)``; per step the loss
+Token logits of step j are divided by ``step_temperature(j)``: the paper's
+``temp_scale ** (K - j)``, or, with ``max_temp`` set, ``max_temp ** ((K - j) / K)``.
+The paper's schedule grows geometrically with K (K=4, s=5: 625/125/25/5); at the
+LLM's tau = 1 a divisor above ~25 makes the softmax over the vocabulary uniform,
+so those steps get no gradient and their loss cannot fall below ~ln V.  With
+``max_temp`` the earliest step is fixed at ``max_temp`` for every K and the
+ratios shrink instead (max_temp = 25, K=4: 25/11.2/5/2.24); K=2 with
+max_temp = s^2 is identical to the paper.  Per step the loss
 is the token-level CE (normalised like the HF loss: by ``num_items_in_batch``
 under gradient accumulation, else the batch mean), averaged over steps (the
 official code averages over the B*K step rows).  ``from_step`` = 1 drops j = 0.
@@ -85,20 +92,27 @@ def step_loss(model, inputs_embeds, attention_mask, labels, history_block, thoug
     return loss / denom, loss.detach() / max(targets.numel(), 1)
 
 
+def step_temperature(step: int, n_thoughts: int, spec: dict) -> float:
+    """Divisor of step ``step``'s logits (see the module docstring)."""
+    max_temp = spec.get("max_temp")
+    if max_temp is not None:
+        return float(max_temp) ** ((n_thoughts - step) / n_thoughts)
+    return float(spec.get("temp_scale", 5.0)) ** (n_thoughts - step)
+
+
 def prl_loss(model, inputs_embeds, attention_mask, labels, spec: dict, num_items_in_batch=None):
     """Mean over steps ``from_step..K-1`` of the temperature-annealed step losses.
     Returns ``(loss, {step: per-token mean CE of this micro-batch, for logging})``."""
     history_block = model._bottleneck_block
     thought_pos = model._bottleneck_thought_pos
     n_thoughts = model.thoughts.k
-    scale = float(spec.get("temp_scale", 5.0))
     steps = list(range(int(spec.get("from_step", 0)), n_thoughts))
     if not steps:
         return None, {}
     losses, means = [], {}
     for j in steps:
         loss, mean = step_loss(model, inputs_embeds, attention_mask, labels, history_block, thought_pos,
-                               n_thoughts, j, scale ** (n_thoughts - j), num_items_in_batch)
+                               n_thoughts, j, step_temperature(j, n_thoughts, spec), num_items_in_batch)
         losses.append(loss)
         means[j] = mean
     return torch.stack(losses).mean(), means
