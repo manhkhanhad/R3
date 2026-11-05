@@ -84,10 +84,22 @@ def train(
     # L7 structural bottleneck: target tokens see only the latent + fixed instruction
     # prefix, never the history, in training and generation (latent_bottleneck.py)
     latent_only: bool = False,
-    # Continuous thoughts (continuous_thoughts.py): "hidden" = Coconut-style K-step
+    # Continuous thoughts (continuous_thoughts.py): "hidden" = ReaRec-style K-step
     # thoughts replacing the pooled r; "constant" = K learned vectors (baseline C)
     thought_source: str = None,
     n_thoughts: int = 1,
+    thought_dropout: float = 0.0,  # ReaRec dropout after the thought-input LayerNorm
+    # ReaRec PRL (progressive_reasoning.py) on the latent-only bottleneck: per-step
+    # target loss with temperature temp_scale^(K-j) for steps from_step..K-1, plus the
+    # noisy-thought contrastive loss (thought_cl_*; weight defaults to 1 with prl, else 0)
+    prl: bool = False,
+    prl_temp_scale: float = 5.0,
+    prl_weight: float = 1.0,
+    prl_from_step: int = 0,
+    thought_cl_weight: float = None,
+    thought_cl_noise: float = 0.01,
+    thought_cl_temperature: float = 0.07,
+    thought_cl_similarity: str = "dot",
     # Gist bottleneck (latent_bottleneck.py): with latent_only, the thought tokens
     # read the history at every layer; the target reads it only through them
     latent_gist: bool = False,
@@ -143,6 +155,15 @@ def train(
             "latent_only": latent_only,
             "thought_source": thought_source,
             "n_thoughts": n_thoughts,
+            "thought_dropout": thought_dropout,
+            "prl": prl,
+            "prl_temp_scale": prl_temp_scale,
+            "prl_weight": prl_weight,
+            "prl_from_step": prl_from_step,
+            "thought_cl_weight": thought_cl_weight,
+            "thought_cl_noise": thought_cl_noise,
+            "thought_cl_temperature": thought_cl_temperature,
+            "thought_cl_similarity": thought_cl_similarity,
             "latent_gist": latent_gist,
             "history_bias": history_bias,
             "latent_only_epochs": latent_only_epochs,
@@ -229,6 +250,15 @@ def train(
         from transformers import AutoConfig
         model_config = AutoConfig.from_pretrained(base_model)
         model_config.latent_continuous_thoughts = {"k": n_thoughts, "source": thought_source}
+        if thought_source == "hidden":
+            cl_weight = (1.0 if prl else 0.0) if thought_cl_weight is None else float(thought_cl_weight)
+            model_config.latent_continuous_thoughts.update(
+                recurrence="rearec", dropout=float(thought_dropout),
+                cl={"weight": cl_weight, "noise": float(thought_cl_noise),
+                    "temperature": float(thought_cl_temperature),
+                    "similarity": thought_cl_similarity} if cl_weight > 0 else None)
+        elif prl or thought_cl_weight:
+            raise ValueError("PRL / the thought contrastive loss need thought_source=hidden")
         if steered_k > 0:
             if latent_only:
                 raise ValueError("steered reading does not combine with latent_only")
@@ -240,6 +270,8 @@ def train(
         model_kwargs["config"] = model_config
     elif n_thoughts != 1:
         raise ValueError("n_thoughts > 1 needs thought_source")
+    elif prl:
+        raise ValueError("prl needs thought_source=hidden")
 
     category_prep = None
     if category_injection is not None:
@@ -430,6 +462,16 @@ def train(
                 raise ValueError("history_bias is a negative bias for the plain (non-gist) bottleneck")
             model.config.latent_bottleneck["history_bias"] = float(history_bias)
         print("latent bottleneck: visible prefix =", repr(tokenizer.decode(prefix_ids)))
+    if prl:
+        if not latent_only or latent_gist or history_bias is not None or latent_only_epochs is not None \
+                or steered_k > 0:
+            raise ValueError("prl is defined on the hard latent-only bottleneck (latent_only, no gist / "
+                             "history_bias / staged / steered)")
+        if not 0 <= int(prl_from_step) < n_thoughts:
+            raise ValueError("need 0 <= prl_from_step < n_thoughts")
+        model.config.latent_prl = {"temp_scale": float(prl_temp_scale), "weight": float(prl_weight),
+                                   "from_step": int(prl_from_step)}
+        print("PRL:", model.config.latent_prl)
     if latent_only_epochs is not None:
         if not latent_only or latent_gist or history_bias is not None or thought_source is not None:
             raise ValueError("latent_only_epochs is for the plain-R3 hard bottleneck (latent_only only)")
@@ -513,6 +555,9 @@ def train(
         step = max(1, len(val_data) // 64)
         probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
         trainer.add_callback(ThoughtDiagnostics(probe_rows, trainer.data_collator, output_dir))
+    if thought_source == "hidden" and (prl or model.config.latent_continuous_thoughts.get("cl")):
+        from progressive_reasoning import PRLLogger
+        trainer.add_callback(PRLLogger())
     if candidates is not None and model.config.latent_candidate_pooling.get("anneal"):
         from candidate_pooling import AnnealCallback
         trainer.add_callback(AnnealCallback())

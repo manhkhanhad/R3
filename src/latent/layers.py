@@ -313,6 +313,32 @@ class LatentModel(Qwen2ForCausalLM):
                                              gist_k=gist_k, delete_latents=bool(spec.get("delete_latents")),
                                              history_bias=spec.get("history_bias"))
 
+    def _add_progressive_reasoning_losses(self, output, inputs_embeds, attention_mask, labels, num_items_in_batch):
+        """ReaRec PRL (progressive_reasoning.py) and the thoughts' contrastive loss
+        (continuous_thoughts.py), added to the main loss in training.  Both are
+        normalised like the HF loss: under gradient accumulation the Trainer passes
+        ``num_items_in_batch`` and does not divide by the accumulation steps."""
+        prl = getattr(self.config, "latent_prl", None)
+        thoughts = getattr(self, "thoughts", None)
+        cl = thoughts.last_cl_loss if thoughts is not None else None
+        if not prl and cl is None:
+            return
+        stats = {}
+        if prl:
+            from progressive_reasoning import prl_loss
+            aux, per_step = prl_loss(self, inputs_embeds, attention_mask, labels, prl, num_items_in_batch)
+            if aux is not None:
+                output.loss = output.loss + float(prl.get("weight", 1.0)) * aux
+                stats.update({f"step{j}": float(v.detach()) for j, v in per_step.items()})
+        if cl is not None:
+            share = 1.0
+            if num_items_in_batch is not None:  # micro-batch mean -> its token share of the global batch
+                share = labels[:, 1:].ne(-100).sum() / torch.as_tensor(num_items_in_batch, device=labels.device)
+            output.loss = output.loss + float(thoughts.cl.get("weight", 1.0)) * cl * share
+            stats["cl"] = float(cl.detach())
+            thoughts.last_cl_loss = None
+        self.last_prl_stats = stats
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -375,6 +401,9 @@ class LatentModel(Qwen2ForCausalLM):
             num_logits_to_keep=num_logits_to_keep,
             **kwargs,
         )
+        if self.training and is_prefill and labels is not None:
+            self._add_progressive_reasoning_losses(output, inputs_embeds, plain_attention_mask, labels,
+                                                   kwargs.get("num_items_in_batch"))
         if steer and is_prefill and item_index is not None:
             self.steer.item_index = self.steer.item_sim = None  # training batch: do not leak into the next call
             aux = self.steer.last_aux

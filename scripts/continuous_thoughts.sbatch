@@ -12,7 +12,7 @@
 #SBATCH --chdir=/common/home/users/m/mk.ngohuu.2024/research/R3
 #SBATCH --output=run_logs/%x.%j.out
 
-# Latent-utilization redesign: Coconut-style K-step continuous thoughts
+# Latent-utilization redesign: ReaRec-style K-step continuous thoughts (replaced the Coconut port)
 # (src/latent/continuous_thoughts.py) with or without the L7 bottleneck, recipe
 # matched to R3_ori Toys (base Qwen/Qwen2.5-1.5B, lr 3e-4, batch 128, 3 epochs,
 # early stopping). Then: self-check, bottleneck leak check, constrained 10-beam
@@ -20,7 +20,10 @@
 # GIST=1 (with SOURCE=constant LATENT_ONLY=1): gist bottleneck, K = latents + 1 readout; the latents read the history at every
 # layer and the target reads it only through them (latent_bottleneck.py); interventions raw / delete.
 # Env: CODE_ROOT (required), OUTPUT_ROOT (default output_dir), CATEGORY, SOURCE (hidden|constant), K, LATENT_ONLY (1/0), GIST,
-#      HISTORY_BIAS (soft bottleneck, e.g. -4), OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
+#      HISTORY_BIAS (soft bottleneck, e.g. -4),
+#      PRL=1 (ReaRec PRL, needs SOURCE=hidden LATENT_ONLY=1; progressive_reasoning.py) with PRL_TEMP_SCALE (5),
+#      PRL_FROM_STEP (0), CL_WEIGHT (1 with PRL), CL_NOISE (0.01), CL_SIM (cos; dot = official, unstable at LLM scale),
+#      OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, NUM_EPOCHS, TEST_SAMPLE, MODES, SKIP_TRAIN.
 
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -39,7 +42,8 @@ k="${K:-4}"
 latent_only="${LATENT_ONLY:-1}"
 gist="${GIST:-0}"
 hbias="${HISTORY_BIAS:-}"  # soft bottleneck: finite negative attention bias on the history (needs LATENT_ONLY=1)
-name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)$([[ -n $hbias ]] && echo _hb${hbias#-})}"
+prl="${PRL:-0}"
+name="${OUTPUT_NAME:-${category}_thoughts_${source}_k${k}$([[ $latent_only == 1 ]] && echo _bottleneck)$([[ $gist == 1 ]] && echo _gist)$([[ -n $hbias ]] && echo _hb${hbias#-})$([[ $prl == 1 ]] && echo _prl)}"
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -50,7 +54,7 @@ code_root="${CODE_ROOT:?set CODE_ROOT to a frozen code copy}"
 gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
 micro_batch_size=4
 [[ "$gpu_name" == *"3090"* ]] && micro_batch_size=2
-echo "[$(date --iso-8601=seconds)] $name: source=$source k=$k latent_only=$latent_only history_bias=${hbias:-none} GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
+echo "[$(date --iso-8601=seconds)] $name: source=$source k=$k latent_only=$latent_only history_bias=${hbias:-none} prl=$prl GPU=$gpu_name mbs=$micro_batch_size code=$code_root"
 
 data_dir="data/${category}"
 train_file=$(ls ${data_dir}/train/${category}_5_*.csv)
@@ -76,6 +80,9 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
   [[ $latent_only == 1 ]] && latent_flag=(--latent_only True)
   [[ $gist == 1 ]] && latent_flag+=(--latent_gist True)
   [[ -n $hbias ]] && latent_flag+=(--history_bias="$hbias")
+  [[ $prl == 1 ]] && latent_flag+=(--prl True --prl_temp_scale "${PRL_TEMP_SCALE:-5.0}" --prl_from_step "${PRL_FROM_STEP:-0}"
+                                  --thought_cl_noise "${CL_NOISE:-0.01}" --thought_cl_similarity "${CL_SIM:-cos}")
+  [[ -n ${CL_WEIGHT:-} ]] && latent_flag+=(--thought_cl_weight "$CL_WEIGHT")
   python "$code_root/src/latent/latent_attention_train.py" \
     --base_model Qwen/Qwen2.5-1.5B \
     --train_file "$train_file" --eval_file "$eval_file" \

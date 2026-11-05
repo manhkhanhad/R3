@@ -1,35 +1,79 @@
-"""Coconut-style continuous thoughts for LatentModel (latent-utilization line).
+"""Continuous thoughts for LatentModel (latent-utilization line), ReaRec recurrence.
 
 Plain R3 attention-pools the history into one vector with a learned query; in
 every original checkpoint that query collapses onto a few constant instruction
 tokens, so ``r`` is a learned task bias (research log U2/U3).  Here the prompt
-ends in K ``<|Thought|>`` tokens and the thoughts are produced the way Coconut
-produces continuous thoughts:
+ends in K ``<|Thought|>`` tokens and the thoughts are produced by the ReaRec
+recurrence (Tang et al., "Think Before Recommend", arXiv 2503.22675; official
+code github.com/TangJiakai/ReaRec, ``utils/layers.py::ReaRecAutoRegressiveWrapper``):
 
   h_0      = last hidden state at the token before the first thought
-             (prompt prefix pass, causal, full history visible)
-  t_k      = project(h_{k-1})            fed back as the k-th thought's input
+             (prompt prefix pass, causal, full history visible; ReaRec's output at
+             the last item)
+  t_k      = scale * LayerNorm(h_{k-1} + p_k)        k = 1..K, fed back as input
   h_k      = last hidden state at thought k (KV cache over prefix + t_1..t_k)
 
-``project`` is an fp32 linear map (identity init) followed by rescaling to the
-mean input-token-embedding norm, so the thought sits at token scale.  The
-thoughts are then spliced into the K thought positions for the recommendation
-pass; with ``latent_bottleneck`` the target tokens see only the instruction
-prefix, the thoughts and earlier target tokens.
+``p_k`` are learned reasoning position embeddings (ReaRec's ``reason_pos_emb``,
+init N(0, 0.02)); ``LayerNorm`` is ReaRec's input LayerNorm (eps 1e-12, affine,
+init 1/0) followed by dropout.  The only addition is the fixed ``scale =
+token_norm / sqrt(H)``: ReaRec's LayerNorm output lives in its own embedding space
+(per-dim scale 1), the LLM's input space has the mean token-embedding norm, so the
+thought is put at token scale (same role as the previous Coconut port's rescale).
+This replaces the earlier Coconut port (identity-init Linear + norm rescale, no
+step embedding; research log T0/T1).  Checkpoints of that port carry
+``thoughts.proj.*`` and no ``"recurrence"`` key and must be evaluated with their
+frozen code copy.
+
+Reasoning-aware contrastive learning (ReaRec PRL, ``spec["cl"]``, training only):
+the recurrence also runs a noisy branch with its own KV cache whose step-k input
+is ``LayerNorm(h_{k-1} + p_k + eps)`` from the *clean* ``h_{k-1}`` (as in the
+official wrapper), ``eps ~ N(0, (noise * rms(h_{k-1} + p_k))^2)``.  ReaRec adds
+N(0, 0.01^2) to states of per-dim RMS ~1; the noise is made relative so it has the
+same size for the LLM's hidden states.  The clean and noisy outputs h_1..h_K are
+contrasted with InfoNCE over the batch (positive = same row and step), similarity
+``dot / temperature`` (official) or ``cos / temperature``; the loss is stored in
+``last_cl_loss`` and added by ``LatentModel.forward``.  The extra step on t_K is
+run only for this loss.  The per-step recommendation loss of PRL lives in
+progressive_reasoning.py.
 
 ``source="constant"`` replaces the thoughts with K learned vectors (baseline C:
 "R3 is a learned task bias" made explicit).
 
 Config: ``config.latent_continuous_thoughts = {"k": K, "source": "hidden" |
-"constant", "token_norm": float}``.
+"constant", "token_norm": float, "recurrence": "rearec", "dropout": float,
+"cl": {"weight", "noise", "temperature", "similarity"} | None}``.
 """
 
+import math
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import TrainerCallback
+from transformers import DynamicCache, TrainerCallback
+
+
+def _repeat_cache(cache, times: int) -> DynamicCache:
+    """Batch-concatenate a DynamicCache ``times`` times (rows [0..B) are the
+    original, [B..2B) the copy), keeping the autograd graph."""
+    out = DynamicCache()
+    for layer in range(len(cache.key_cache)):
+        out.update(torch.cat([cache.key_cache[layer]] * times), torch.cat([cache.value_cache[layer]] * times), layer)
+    return out
+
+
+def info_nce(noisy: torch.Tensor, clean: torch.Tensor, temperature: float, similarity: str) -> torch.Tensor:
+    """ReaRec ``PRL.loss`` thinking contrastive loss: for every row b and step t the
+    noisy output must pick its own clean output among the batch's clean outputs at
+    the same step.  ``noisy``/``clean`` ``[B, T, H]``; mean over B*T."""
+    noisy, clean = noisy.float(), clean.float()
+    if similarity == "cos":
+        noisy, clean = F.normalize(noisy, dim=-1), F.normalize(clean, dim=-1)
+    elif similarity != "dot":
+        raise ValueError(f"unknown contrastive similarity {similarity}")
+    sim = torch.einsum("btd,ktd->btk", noisy, clean) / temperature  # [B, T, B]
+    labels = torch.arange(sim.size(0), device=sim.device).unsqueeze(1).expand(-1, sim.size(1))
+    return F.cross_entropy(sim.permute(0, 2, 1), labels)
 
 
 class ContinuousThoughts(nn.Module):
@@ -40,9 +84,18 @@ class ContinuousThoughts(nn.Module):
         if self.k < 1:
             raise ValueError("continuous thoughts need k >= 1")
         self.register_buffer("token_norm", torch.tensor(float(spec.get("token_norm", 1.0))), persistent=False)
+        self.hidden_size = hidden_size
+        self.cl = spec.get("cl") or None
         if self.source == "hidden":
-            self.proj = nn.Linear(hidden_size, hidden_size)
+            if spec.get("recurrence") != "rearec":
+                raise ValueError("only the ReaRec recurrence is implemented; checkpoints of the earlier Coconut "
+                                 "port (thoughts.proj) need their frozen code copy")
+            self.reason_pos_emb = nn.Parameter(torch.empty(self.k, hidden_size))
+            self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-12)
+            self.dropout = nn.Dropout(float(spec.get("dropout", 0.0)))
         elif self.source == "constant":
+            if self.cl:
+                raise ValueError("the contrastive loss needs recurrent (hidden) thoughts")
             self.constant = nn.Parameter(torch.empty(self.k, hidden_size))
         else:
             raise ValueError(f"unknown continuous-thought source {self.source}")
@@ -50,25 +103,34 @@ class ContinuousThoughts(nn.Module):
         # Interventions at evaluation: a callable [B, K, H] -> [B, K, H] (see latent_attention_eval.py).
         self.override = None
         self.last_thoughts: Optional[torch.Tensor] = None
+        self.last_cl_loss: Optional[torch.Tensor] = None
 
     def reset_parameters(self) -> None:
-        """Identity projection / random constant, in fp32.  Call again after
-        ``from_pretrained`` on a base model: HF re-initialises missing weights."""
+        """ReaRec init (reason_pos_emb N(0, 0.02), LayerNorm 1/0) / random constant,
+        in fp32.  Call again after ``from_pretrained`` on a base model: HF
+        re-initialises missing weights."""
         self.float()
         with torch.no_grad():
             if self.source == "hidden":
-                self.proj.weight.copy_(torch.eye(self.proj.in_features))
-                self.proj.bias.zero_()
+                self.reason_pos_emb.normal_(0.0, 0.02)
+                self.layer_norm.weight.fill_(1.0)
+                self.layer_norm.bias.zero_()
             else:
                 self.constant.normal_(0.0, 1.0)
 
-    def project(self, hidden: torch.Tensor) -> torch.Tensor:
-        x = self.proj(hidden.to(self.proj.weight.dtype))
-        return F.normalize(x.float(), dim=-1) * self.token_norm
+    def project(self, hidden: torch.Tensor, step: int, noise: float = 0.0) -> torch.Tensor:
+        """Thought input for step ``step`` (0-based) from the previous output state."""
+        x = hidden.float() + self.reason_pos_emb[step]
+        if noise > 0:
+            rms = x.detach().pow(2).mean(-1, keepdim=True).sqrt()
+            x = x + torch.randn_like(x) * (noise * rms)
+        x = self.dropout(self.layer_norm(x))
+        return x * (self.token_norm / math.sqrt(self.hidden_size))
 
     def forward(self, backbone, input_ids, attention_mask, first_thought_pos):
         """Return thought input embeddings ``[B, K, H]`` (fp32)."""
         batch = input_ids.size(0)
+        self.last_cl_loss = None
         if self.source == "constant":
             thoughts = F.normalize(self.constant.float(), dim=-1) * self.token_norm
             thoughts = thoughts.unsqueeze(0).expand(batch, -1, -1)
@@ -104,17 +166,32 @@ class ContinuousThoughts(nn.Module):
                        position_ids=(prefix_mask.long().cumsum(1) - 1).clamp(min=0), use_cache=True)
         self.last_prefix_hidden = out.last_hidden_state
         hidden, cache = out.last_hidden_state[:, -1], out.past_key_values
-        thoughts, mask = [], prefix_mask
+
+        contrast = bool(self.cl) and self.training and float(self.cl.get("weight", 1.0)) > 0 \
+            and float(self.cl.get("noise", 0.01)) > 0
+        copies = 2 if contrast else 1
+        if contrast:  # noisy branch: same prefix, its own cache from the first thought on
+            cache = _repeat_cache(cache, 2)
+        mask, lengths = prefix_mask.repeat(copies, 1), lengths.repeat(copies)
         embed_dtype = backbone.embed_tokens.weight.dtype
+        thoughts, clean_out, noisy_out = [], [], []
         for k in range(self.k):
-            t = self.project(hidden)
+            t = self.project(hidden, k)
             thoughts.append(t)
-            if k == self.k - 1:
+            if k == self.k - 1 and not contrast:
                 break
-            mask = torch.cat([mask, mask.new_ones(batch, 1)], dim=1)
-            out = backbone(inputs_embeds=t.to(embed_dtype).unsqueeze(1), attention_mask=mask,
+            step_in = torch.cat([t, self.project(hidden, k, noise=float(self.cl["noise"]))]) if contrast else t
+            mask = torch.cat([mask, mask.new_ones(batch * copies, 1)], dim=1)
+            out = backbone(inputs_embeds=step_in.to(embed_dtype).unsqueeze(1), attention_mask=mask,
                            position_ids=(lengths + k).unsqueeze(1), past_key_values=cache, use_cache=True)
-            hidden, cache = out.last_hidden_state[:, -1], out.past_key_values
+            step_out, cache = out.last_hidden_state[:, -1], out.past_key_values
+            hidden = step_out[:batch]
+            if contrast:
+                clean_out.append(step_out[:batch])
+                noisy_out.append(step_out[batch:])
+        if contrast:  # ReaRec contrasts outputs 1..K (the output at the last item is excluded)
+            self.last_cl_loss = info_nce(torch.stack(noisy_out, 1), torch.stack(clean_out, 1),
+                                         float(self.cl.get("temperature", 0.07)), self.cl.get("similarity", "dot"))
         return torch.stack(thoughts, dim=1)
 
 

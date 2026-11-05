@@ -31,7 +31,7 @@ def main(test_file: str, model_path: str = "Qwen/Qwen2.5-1.5B", k: int = 4, rows
     config = AutoConfig.from_pretrained(model_path)
     fresh = not getattr(config, "latent_continuous_thoughts", None)
     if fresh:
-        config.latent_continuous_thoughts = {"k": k, "source": "hidden", "token_norm": 1.0}
+        config.latent_continuous_thoughts = {"k": k, "source": "hidden", "token_norm": 1.0, "recurrence": "rearec"}
     model = LatentModel.from_pretrained(model_path, config=config, torch_dtype=torch.float32).to(device).eval()
     if fresh:
         tokenizer.add_special_tokens({"additional_special_tokens": tokenizer.additional_special_tokens + ["<|Thought|>"]})
@@ -71,9 +71,9 @@ def main(test_file: str, model_path: str = "Qwen/Qwen2.5-1.5B", k: int = 4, rows
         emb = model.model.embed_tokens(torch.tensor([p[:first]], device=device))
         steps = []
         with torch.no_grad():
-            for _ in range(k):
+            for step in range(k):
                 h = model.model(inputs_embeds=emb).last_hidden_state[:, -1]
-                t = model.thoughts.project(h)
+                t = model.thoughts.project(h, step)
                 steps.append(t)
                 emb = torch.cat([emb, t.to(emb.dtype)[:, None]], dim=1)
         naive.append(torch.stack(steps, dim=1))

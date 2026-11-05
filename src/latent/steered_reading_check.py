@@ -62,7 +62,7 @@ def main():
 
     # 2. mask = deletion
     config = AutoConfig.from_pretrained(args.base_model)
-    config.latent_continuous_thoughts = {"k": 1, "source": "hidden", "token_norm": 1.0}
+    config.latent_continuous_thoughts = {"k": 1, "source": "hidden", "token_norm": 1.0, "recurrence": "rearec"}
     config.latent_steered_reading = {"k": args.k, "rule": "recent", "aux_weight": 0.0}
     model = LatentModel.from_pretrained(args.base_model, config=config, torch_dtype=torch.float32).cuda().eval()
     model.resize_token_embeddings(len(tok))
