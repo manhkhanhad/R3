@@ -6,7 +6,8 @@ donor row B of a different user, the decoder is run twice on A's input: with
 A's own r and with B's r spliced into the thought slot (everything else equal).
 The difference Δ = (A's r) − (B's r) is followed through every operator:
 
-  pooling   r = Σ_j α_j W_V h_j            α: mass on the fixed instruction prefix vs user tokens;
+  pooling   r = Σ_j α_j W_V h_j            α: mass on shared template tokens vs history title tokens
+                                           (history_pooling.history_title_mask);
                                            rel_r = ||r_A − r_B|| / ||r_A||
   per decoder layer l, at the thought position p (input of self_attn = after input_layernorm):
     norm    rel_in[l]  = ||h̃_A − h̃_B|| / ||h̃_A||       (does the difference survive RMSNorm / the
@@ -48,6 +49,9 @@ from transformers import AutoTokenizer  # noqa: E402
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb  # noqa: E402
 
 from layers import LatentModel  # noqa: E402
+from history_pooling import build_spec, history_title_mask  # noqa: E402
+
+TITLE_SPEC = None
 from reasoning_dataset import LatentRDataset  # noqa: E402
 
 
@@ -71,7 +75,10 @@ def pooling_stats(model, ids, mask, prefix_len):
     s = (Q[0, t - 1].float() @ K[0, :t].float().T) * att.scale_score
     w = F.softmax(s, -1)
     r = (w.to(h.dtype) @ att.value(h[0, :t])).float()
-    return r, float(w[:prefix_len].sum()), float(w[prefix_len:].sum()), int(t)
+    titles = history_title_mask(ids, mask, TITLE_SPEC, model.model.embed_tokens.num_embeddings - 1)[0, :t]
+    # user-specific content = the history title tokens; everything else (instruction, headers,
+    # category phrase, "### Response:", item separators) is shared template
+    return r, float(w[~titles].sum()), float(w[titles].sum()), int(t)
 
 
 def drop_last_history(row):
@@ -107,6 +114,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     rows = rng.choice(len(frame), size=min(args.n, len(frame)), replace=False)
     prefix_len = len(ds.instruction_tokens())
+    global TITLE_SPEC
+    TITLE_SPEC = build_spec(tok, args.category)
 
     # inputs of self_attn (post input_layernorm) for every layer
     captured = {}
@@ -261,7 +270,7 @@ def main():
         "rel_dlogit_random": float(np.mean(dlogit_rand)),
         "per_layer": [],
     }
-    print(f"\npooling mass prefix {summary['pooling_mass_prefix']:.4f} / user {summary['pooling_mass_user']:.4f}; "
+    print(f"\npooling mass template {summary['pooling_mass_prefix']:.4f} / history titles {summary['pooling_mass_user']:.4f}; "
           f"||r_A - r_B|| / ||r_A|| = {summary['rel_r']:.4f}")
     print(f"KL swap r {summary['kl_swap_r']:.5f} (dNLL {summary['dnll_swap_r']:+.5f}); "
           f"KL drop last item {summary['kl_drop_last_item']}; KL random-direction r {summary['kl_random_r']:.5f}")
