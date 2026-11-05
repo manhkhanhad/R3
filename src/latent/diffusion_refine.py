@@ -191,8 +191,16 @@ class DiffusionRefineModel(LatentModel):
             output = super().forward(**kwargs)
         finally:
             self._target = None
-        if self.training and self.last_aux is not None and kwargs.get("labels") is not None:
-            output.loss = output.loss + float(self.spec.get("weight", 1.0)) * self.last_aux
+        labels = kwargs.get("labels")
+        if self.training and self.last_aux is not None and labels is not None:
+            # The Trainer normalises the NLL by the label tokens of the whole accumulated
+            # batch (num_items_in_batch); scale the per-micro-batch aux mean the same way
+            # so it is not counted once per accumulation step.
+            total = kwargs.get("num_items_in_batch")
+            scale = 1.0
+            if total is not None:
+                scale = (labels[..., 1:] != -100).sum().float() / torch.as_tensor(total, device=labels.device).float()
+            output.loss = output.loss + float(self.spec.get("weight", 1.0)) * scale * self.last_aux
         return output
 
 

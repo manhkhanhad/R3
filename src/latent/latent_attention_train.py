@@ -581,7 +581,8 @@ def train(
         trainer.add_callback(PoolingDiagnostics(probe_rows, trainer.data_collator, output_dir))
     if diffusion_prep is not None:
         from diffusion_refine import AuxLogCallback
-        trainer.add_callback(AuxLogCallback(model))
+        # first, so the parts are in the logs before the printer / wandb callbacks see them
+        trainer.callback_handler.callbacks.insert(0, AuxLogCallback(model))
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
