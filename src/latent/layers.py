@@ -272,6 +272,11 @@ class LatentModel(Qwen2ForCausalLM):
             hidden_states=hidden_states[-1], attention_mask=self.pooling_mask(input_ids, attention_mask),
             thought_id_idx=where_thought_ids[:, 1],
         )
+        if self.training and torch.is_grad_enabled() and getattr(self.config, "latent_wider", None):
+            from wider_reg import wider_state
+            state = wider_state(self)
+            if state is not None:
+                state.latent = reasoning_latent  # WIDER penalty on the pooled r (added to the loss in forward)
         reasoning_latent = self.observe_reasoning_latent(reasoning_latent)
         reasoning_latent = self.project_reasoning_latent(reasoning_latent)
         input_embs[where_thought_ids[:, 0], where_thought_ids[:, 1]] = reasoning_latent.to(
@@ -392,6 +397,13 @@ class LatentModel(Qwen2ForCausalLM):
             share.records = None
             if penalty is not None and output.loss is not None:
                 output.loss = output.loss + share.weight * penalty
+        if (getattr(self.config, "latent_wider", None) and self.training and labels is not None
+                and output.loss is not None):
+            from wider_reg import wider_state
+            state = wider_state(self)
+            penalty = state.penalty() if state is not None else None
+            if penalty is not None:
+                output.loss = output.loss + state.weight * penalty
         if steer and is_prefill and item_index is not None:
             self.steer.item_index = self.steer.item_sim = None  # training batch: do not leak into the next call
             aux = self.steer.last_aux
