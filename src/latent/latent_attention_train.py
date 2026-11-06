@@ -466,7 +466,8 @@ def train(
             raise ValueError("attention share is a plain-R3 option; do not combine with other options")
         from attention_share import enable_attention_share
         model.config.latent_attention_share = {"mode": attention_share_mode, "rho": float(attention_share_rho),
-                                               "weight": float(attention_share_weight)}
+                                               "weight": float(attention_share_weight),
+                                               "loss_scale": 1.0 / gradient_accumulation_steps}
         enable_attention_share(model)
         print("attention share:", model.config.latent_attention_share)
 
@@ -475,7 +476,10 @@ def train(
                 or category_text_file or steered_k > 0 or candidates is not None or category_prep is not None
                 or pool_history_only or attention_share_mode is not None):
             raise ValueError("the WIDER regulariser is a plain-R3 option; do not combine with other options")
-        model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
+        # loss_scale: the penalty is added per micro-batch and HF 4.48 does not divide the
+        # returned loss by gradient_accumulation_steps (forward has **kwargs), see layers.py
+        model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum),
+                                     "loss_scale": 1.0 / gradient_accumulation_steps}
         print("WIDER regulariser:", model.config.latent_wider)
 
     print("LOAD DATA FINISHED")

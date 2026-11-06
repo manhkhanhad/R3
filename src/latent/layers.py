@@ -396,14 +396,19 @@ class LatentModel(Qwen2ForCausalLM):
             penalty = attention_floor_penalty(share, labels)
             share.records = None
             if penalty is not None and output.loss is not None:
-                output.loss = output.loss + share.weight * penalty
+                # HF 4.48 does not divide the returned loss by gradient_accumulation_steps here
+                # (forward takes **kwargs, CE is normalised by num_items_in_batch), so per-micro-batch
+                # auxiliary terms are scaled by 1/accum (config "loss_scale"; absent in old runs = 1).
+                scale = float(self.config.latent_attention_share.get("loss_scale", 1.0))
+                output.loss = output.loss + scale * share.weight * penalty
         if (getattr(self.config, "latent_wider", None) and self.training and labels is not None
                 and output.loss is not None):
             from wider_reg import wider_state
             state = wider_state(self)
             penalty = state.penalty() if state is not None else None
             if penalty is not None:
-                output.loss = output.loss + state.weight * penalty
+                scale = float(self.config.latent_wider.get("loss_scale", 1.0))  # 1/accum, see above
+                output.loss = output.loss + scale * state.weight * penalty
         if steer and is_prefill and item_index is not None:
             self.steer.item_index = self.steer.item_sim = None  # training batch: do not leak into the next call
             aux = self.steer.last_aux
