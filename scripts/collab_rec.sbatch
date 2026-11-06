@@ -13,11 +13,12 @@
 #SBATCH --chdir=/common/home/users/m/mk.ngohuu.2024/research/R3
 #SBATCH --output=run_logs/%x.%j.out
 # CollabRec on R3 (src/latent/collab_rec_*.py): thought = attention over collaborative supports.
-#   SOURCE=peer|motive|oracle_motive|none  MODE=text|emb  K=10  CATEGORY=Toys_and_Games|CDs_and_Vinyl
+#   SOURCE=peer|motive|oracle_motive|intuition|none  MODE=text|emb  K=10  CATEGORY=Toys_and_Games|CDs_and_Vinyl
 #   CODE_ROOT (default: this worktree)  TRAIN_SAMPLE / EVAL_SAMPLE / TEST_SAMPLE (smoke runs)
 #   EVAL_OVERRIDES="none shuffle" adds ranking evals with the supports dropped / taken from another row.
 #   IntuRec-matching: MICRO=8  LOSS_AVERAGE=micro_batch  TARGET_FORMAT=end_predict
 #   MAX_GRAD_NORM=0 (no clipping, IntuRec; default 1.0)  BETA=0.1 (rationale InfoNCE, needs LOSS_AVERAGE=micro_batch)
+#   IntuRec stage 2 (stage 1 bypassed): SOURCE=intuition K=15 ALPHA=1.0 (intuition loss)
 #   STOP_AFTER_STEPS=N: loss check run (full LR schedule, stops after N optimizer steps, no eval/save/ranking).
 # Example: sbatch --export=ALL,SOURCE=oracle_motive scripts/collab_rec.sbatch   (run from any dir)
 module purge
@@ -76,6 +77,7 @@ if [[ ! -f "$out/config.json" ]]; then
     --target_format "${TARGET_FORMAT:-r3}" --loss_average "${LOSS_AVERAGE:-batch}" \
     --stop_after_steps "${STOP_AFTER_STEPS:-0}" \
     --max_grad_norm "${MAX_GRAD_NORM:-1.0}" --rationale_beta "${BETA:-0}" \
+    --intuition_alpha "${ALPHA:-0}" \
     "${resume[@]}" || exit 1
 fi
 if [[ "${STOP_AFTER_STEPS:-0}" -gt 0 ]]; then

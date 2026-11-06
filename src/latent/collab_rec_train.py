@@ -17,7 +17,7 @@ import transformers
 from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, EarlyStoppingCallback
 
 from collab_rec_dataset import (SOURCES, TARGET_FORMATS, CollabLatentRDataset, build_support_table, default_collab_dir,
-                                load_rationales, load_support_rows, tokenize_texts)
+                                intuition_aux_rows, load_rationales, load_support_rows, tokenize_texts)
 from collab_rec_latent import CollabLatentModel
 from experiment_tracking import init_training_run, wandb_report_to
 
@@ -43,15 +43,15 @@ def collab_spec(category, support_source, support_mode, support_k, collab_dir, r
 
 
 class AuxLossLog(transformers.TrainerCallback):
-    """Print the mean rationale InfoNCE of the last logging_every optimizer steps."""
+    """Print the mean aux loss (rationale InfoNCE or intuition loss) of the last `every` optimizer steps."""
 
-    def __init__(self, model, every=10):
-        self.model, self.every = model, every
+    def __init__(self, model, every=10, name="rationale InfoNCE"):
+        self.model, self.every, self.name = model, every, name
 
     def on_step_end(self, args, state, control, **kwargs):
         if state.global_step % self.every == 0 and self.model.aux_log:
             vals = self.model.aux_log
-            print(f"step {state.global_step}: rationale InfoNCE mean {sum(vals) / len(vals):.4f} "
+            print(f"step {state.global_step}: {self.name} mean {sum(vals) / len(vals):.4f} "
                   f"over {len(vals)} micro-batches", flush=True)
             self.model.aux_log = []
         return control
@@ -103,6 +103,7 @@ def train(
     rationale_beta: float = 0.0,  # >0: CollabRec rationale InfoNCE (text mode, needs loss_average=micro_batch)
     aux_temperature: float = 0.05,
     aux_negatives: int = 63,
+    intuition_alpha: float = 0.0,  # >0: IntuRec intuition loss (support_source=intuition, loss_average=micro_batch)
 ):
     if target_format not in TARGET_FORMATS:
         raise ValueError(f"target_format must be one of {TARGET_FORMATS}")
@@ -111,13 +112,18 @@ def train(
     if rationale_beta > 0 and (support_mode != "text" or loss_average != "micro_batch"):
         raise ValueError("rationale_beta needs support_mode=text and loss_average=micro_batch "
                          "(the aux term is a per-micro-batch mean)")
+    if intuition_alpha > 0 and (support_source != "intuition" or support_mode != "text"
+                                or loss_average != "micro_batch" or rationale_beta > 0):
+        raise ValueError("intuition_alpha needs support_source=intuition, support_mode=text, "
+                         "loss_average=micro_batch and rationale_beta=0")
     spec = collab_spec(category, support_source, support_mode, support_k, collab_dir, rationale_tag,
                        max_support_len, target_format)
     init_training_run(dataset=category, run_name=wandb_run_name,
                       config={"base_model": base_model, "train_file": train_file, "eval_file": eval_file,
                               "output_dir": output_dir, "dataset": category, "collab_rec": spec})
     spec.update(rationale_beta=float(rationale_beta), aux_temperature=float(aux_temperature),
-                aux_negatives=int(aux_negatives), max_grad_norm=float(max_grad_norm))
+                aux_negatives=int(aux_negatives), max_grad_norm=float(max_grad_norm),
+                intuition_alpha=float(intuition_alpha))
     print("collab_rec:", spec)
     category_text = CATEGORY[category]
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -143,7 +149,8 @@ def train(
     # IntuRec averaging: without loss kwargs the Trainer divides each micro-batch's mean by the accumulation steps
     model.accepts_loss_kwargs = loss_average == "batch"
     print(f"target_format={target_format} loss_average={loss_average} micro_batch_size={micro_batch_size} "
-          f"grad_accum={gradient_accumulation_steps} max_grad_norm={max_grad_norm} rationale_beta={rationale_beta}")
+          f"grad_accum={gradient_accumulation_steps} max_grad_norm={max_grad_norm} rationale_beta={rationale_beta} "
+          f"intuition_alpha={intuition_alpha}")
     if table is not None:
         model.set_support_table(table, mask)
         print(f"support table {tuple(table.shape)}")
@@ -157,6 +164,14 @@ def train(
         print(f"rationale InfoNCE: beta={rationale_beta} tau={aux_temperature} negatives={aux_negatives} "
               f"table {tuple(r_ids.shape)}")
 
+    intuition_aux = None
+    if intuition_alpha > 0:
+        model.intuition_alpha = intuition_alpha
+        intuition_aux = intuition_aux_rows(spec, "train", seed)
+        assert len(intuition_aux[1]) == len(pd.read_csv(train_file, usecols=[0]))
+        print(f"intuition loss: alpha={intuition_alpha} random items {intuition_aux[0].shape} "
+              f"target ids {intuition_aux[1].shape}")
+
     def rows_for(path, split):
         rows = load_support_rows(spec, split)
         if rows is not None:
@@ -166,7 +181,8 @@ def train(
 
     train_data = CollabLatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample,
                                       seed=seed, category=category_text, support_rows=rows_for(train_file, "train"),
-                                      target_format=target_format, own_rows=rationale_beta > 0)
+                                      target_format=target_format, own_rows=rationale_beta > 0,
+                                      intuition_aux=intuition_aux)
     val_data = CollabLatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
                                     sample=sample if eval_sample is None else eval_sample, category=category_text,
                                     support_rows=rows_for(eval_file, "valid"), target_format=target_format)
@@ -208,7 +224,8 @@ def train(
         ),
         data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True),
         callbacks=([StopAfterSteps(stop_after_steps)] if check else [EarlyStoppingCallback(early_stopping_patience=1)])
-        + ([AuxLossLog(model)] if rationale_beta > 0 else []),
+        + ([AuxLossLog(model)] if rationale_beta > 0 else [])
+        + ([AuxLossLog(model, name="intuition loss")] if intuition_alpha > 0 else []),
     )
     model.config.use_cache = False
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

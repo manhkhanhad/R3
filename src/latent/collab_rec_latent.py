@@ -16,6 +16,11 @@ rationale-alignment InfoNCE -- the thought vs the row's own train rationale (pos
 temperature ``aux_temperature``; loss = NTP + beta * InfoNCE. Validation loss stays pure NTP
 (IntuRec selects its checkpoint by valid NTP). The contrastive support loss (gamma) is not ported.
 
+Optional (``intuition_alpha`` > 0, text mode, training only): IntuRec stage 2's intuition loss
+(model/IntuRecF2.py) -- with t = InjectNet.pool(target title tokens), r = InjectNet(q, supports)
+and r_rand = InjectNet(q, random items): softplus(<r_rand, t> - <r, t>), unnormalised, in the
+model dtype; loss = NTP + alpha * intuition loss. Random items and target index the support table.
+
 Supports are looked up from a table held as a non-persistent buffer (rebuilt by
 the train/eval scripts from ``config.collab_rec``); each example carries the
 indices of its supports, ``support_ids`` [k] (padding entries are -1).
@@ -139,6 +144,9 @@ class CollabLatentModel(LatentModel):
         self.register_buffer("rationale_mask", torch.empty(0, 1, dtype=torch.bool), persistent=False)
         self._own_rows = None
         self._thought = None
+        self._query = None
+        self.intuition_alpha = 0.0
+        self._keep_thought = False
         self.aux_log = []  # recent InfoNCE values (training)
 
     # ------------------------------------------------------------------ tables
@@ -218,29 +226,46 @@ class CollabLatentModel(LatentModel):
         if ids is not None:
             ids = ids.to(input_ids.device)[rows]
         latent = self.thought_vector(query, ids)
-        if self._own_rows is not None:
+        if self._own_rows is not None or self._keep_thought:
             if rows.tolist() != list(range(input_ids.shape[0])):
-                raise ValueError("InfoNCE expects one thought per row in order")
-            self._thought = latent
+                raise ValueError("aux losses expect one thought per row in order")
+            self._thought, self._query = latent, query
         latent = self.observe_reasoning_latent(latent)
         input_embs = self.model.embed_tokens(input_ids)
         input_embs[rows, cols] = latent.to(input_embs.dtype)
         return input_embs
 
-    def forward(self, support_ids=None, own_row=None, **kwargs):
+    def intuition_loss(self, query, thought, random_ids, target_id):
+        dtype = self.model.embed_tokens.weight.dtype
+        rand = self.thought_vector(query, random_ids.to(self.support_table.device).long()).to(dtype)
+        tid = target_id.to(self.support_table.device).long()
+        tgt = self.injectnet.pool(self.model.embed_tokens(self.support_table[tid]), self.support_mask[tid]).to(dtype)
+        pos = (thought.to(dtype) * tgt).sum(-1)
+        neg = (rand * tgt).sum(-1)
+        return F.softplus(neg - pos).mean()
+
+    def forward(self, support_ids=None, own_row=None, random_ids=None, target_id=None, **kwargs):
         if support_ids is not None:
             self._support_ids = support_ids
         use_aux = (self.training and self.rationale_beta > 0 and own_row is not None
                    and self.support_mode == "text" and self.rationale_table.numel() > 0)
+        use_intu = (self.training and self.intuition_alpha > 0 and random_ids is not None
+                    and target_id is not None and self.support_mode == "text")
         self._own_rows = own_row if use_aux else None
+        self._keep_thought = use_intu
         try:
             out = super().forward(**kwargs)
             if use_aux and out.loss is not None:
                 aux = self.rationale_infonce(self._thought, own_row)
                 out.loss = out.loss + self.rationale_beta * aux
                 self.aux_log.append(aux.item())
+            if use_intu and out.loss is not None:
+                intu = self.intuition_loss(self._query, self._thought, random_ids, target_id)
+                out.loss = out.loss + self.intuition_alpha * intu
+                self.aux_log.append(intu.item())
             return out
         finally:
-            self._own_rows = self._thought = None
+            self._own_rows = self._thought = self._query = None
+            self._keep_thought = False
             if support_ids is not None:
                 self._support_ids = None

@@ -12,9 +12,15 @@ Support sources (``support_source``):
                  (``motive_corpus/stage2/support_texts.json`` + ``support_rows_<split>.npy``).
   oracle_motive  analysis only: each row's own 1-2 ground-truth motive prototypes (k = 2, one
                  motive repeated, rows without motives -> "No specific motive."). Uses the target.
+  intuition      IntuRec stage 2 (stage 1 bypassed): each row's 15 "intuition" items, the stage-1
+                 beam outputs stored in ``<IntuRec>/data/<dataset>/<split>_extra/extra.json``
+                 (``intuition_list_15``). The table is the item catalogue (info file), every entry
+                 the quoted title ``"<title>"``, so intuitions, random items and the target all
+                 index the same table (for IntuRec's intuition loss).
   none           no supports (k = 0).
 """
 
+import glob
 import json
 import os
 
@@ -23,7 +29,7 @@ import numpy as np
 from reasoning_dataset import LatentRDataset, Tokenizer
 
 INTUREC_ROOT = "/common/home/users/m/mk.ngohuu.2024/research/IntuRec"
-SOURCES = ("peer", "motive", "oracle_motive", "none")
+SOURCES = ("peer", "motive", "oracle_motive", "intuition", "none")
 TARGET_FORMATS = ("r3", "end_predict")
 
 
@@ -60,6 +66,41 @@ def motive_texts(collab_dir):
         return [f"{p['motive']}: {p['reason']}" for p in json.load(f)] + ["No specific motive."]
 
 
+def inturec_data_dir(collab_dir):
+    return os.path.dirname(os.path.normpath(collab_dir))  # <IntuRec>/data/<dataset>
+
+
+def item_titles(collab_dir):
+    """Catalogue titles in info-file order, quoted as IntuRec writes them ('"title"')."""
+    (info,) = glob.glob(os.path.join(inturec_data_dir(collab_dir), "info", "*.txt"))
+    with open(info, encoding="utf-8") as f:
+        return ['"' + line.split("\t")[0].strip('"').strip(" ").strip("\n").strip('"') + '"' for line in f]
+
+
+def title_index(collab_dir):
+    index = {}
+    for i, t in enumerate(item_titles(collab_dir)):
+        index.setdefault(t, i)  # duplicate titles: first id (same text either way)
+    return index
+
+
+def load_extra(collab_dir, split):
+    with open(os.path.join(inturec_data_dir(collab_dir), f"{split}_extra", "extra.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def intuition_aux_rows(spec, split, seed=0):
+    """IntuRec's intuition-loss inputs: random item ids [n, k] (fixed per row) and target ids [n]."""
+    extra = load_extra(spec["collab_dir"], split)
+    k = int(spec["support_k"])
+    n_items, rng = len(item_titles(spec["collab_dir"])), np.random.default_rng(seed)
+    random_ids = np.stack([rng.choice(n_items, k, replace=False) for _ in range(len(extra))])
+    # info line i is item id i (one title contains a tab, so match by id, not by title)
+    target_ids = np.array([int(r["item_id"]) for r in extra], dtype=np.int64)
+    assert target_ids.max() < n_items
+    return random_ids.astype(np.int64), target_ids
+
+
 def build_support_table(spec, tokenizer=None):
     """Table the support ids index into: (tokens, mask) for text mode, (vectors, None) for emb."""
     source, mode, collab_dir = spec["support_source"], spec["support_mode"], spec["collab_dir"]
@@ -74,6 +115,8 @@ def build_support_table(spec, tokenizer=None):
     elif source == "motive":
         with open(os.path.join(collab_dir, "motive_corpus", "stage2", "support_texts.json"), encoding="utf-8") as f:
             texts = json.load(f)
+    elif source == "intuition":
+        texts = item_titles(collab_dir)
     else:  # oracle_motive
         texts = motive_texts(collab_dir)
     return tokenize_texts(tokenizer, texts, int(spec["max_support_len"]))
@@ -88,6 +131,10 @@ def load_support_rows(spec, split):
         return np.load(os.path.join(collab_dir, "stage2", f"support_rows_{split}.npy"))[:, :k]
     if source == "motive":
         return np.load(os.path.join(collab_dir, "motive_corpus", "stage2", f"support_rows_{split}.npy"))[:, :k]
+    if source == "intuition":
+        index = title_index(collab_dir)
+        lists = [r["intuition_list_15"] for r in load_extra(collab_dir, split)]
+        return np.array([[index[t] for t in lst[:k]] for lst in lists], dtype=np.int64)
     no_motive = len(motive_texts(collab_dir)) - 1
     with open(os.path.join(collab_dir, "motive_corpus", f"row_motives_{split}.json"), encoding="utf-8") as f:
         motives = json.load(f)
@@ -102,12 +149,13 @@ class CollabLatentRDataset(LatentRDataset):
     DataFrame index (which ``sample`` preserves).
     """
 
-    def __init__(self, *args, support_rows=None, target_format="r3", own_rows=False, **kwargs):
+    def __init__(self, *args, support_rows=None, target_format="r3", own_rows=False, intuition_aux=None, **kwargs):
         if target_format not in TARGET_FORMATS:
             raise ValueError(f"target_format must be one of {TARGET_FORMATS}")
         self.support_rows = support_rows
         self.target_format = target_format
         self.own_rows = own_rows  # add "own_row" (original CSV row) for the rationale InfoNCE
+        self.intuition_aux = intuition_aux  # (random_ids [n, k], target_ids [n]) for IntuRec's intuition loss
         super().__init__(*args, **kwargs)
 
     def get_inputs(self):
@@ -133,4 +181,8 @@ class CollabLatentRDataset(LatentRDataset):
             example["support_ids"] = [int(x) for x in self.support_rows[self.original_row(idx)]]
         if self.own_rows:
             example["own_row"] = self.original_row(idx)
+        if self.intuition_aux is not None:
+            random_ids, target_ids = self.intuition_aux
+            example["random_ids"] = [int(x) for x in random_ids[self.original_row(idx)]]
+            example["target_id"] = int(target_ids[self.original_row(idx)])
         return example

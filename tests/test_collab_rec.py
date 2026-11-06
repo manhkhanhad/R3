@@ -146,3 +146,33 @@ def test_collator_passes_own_row():
     out = collate([{"input_ids": [1, 1], "attention_mask": [1, 1], "labels": [-100, 1], "support_ids": [3, 4], "own_row": 7},
                    {"input_ids": [1], "attention_mask": [1], "labels": [1], "support_ids": [5, 6], "own_row": 9}])
     assert out["own_row"].tolist() == [7, 9]
+
+
+def test_intuition_loss_train_only_and_trains():
+    model = make_model("text")
+    ids, mask, labels = batch()
+    support = torch.tensor([[0, 1, 2], [3, 4, 5]])
+    rand, tgt = torch.tensor([[5, 4, 3], [2, 1, 0]]), torch.tensor([1, 4])
+    model.train()
+    base = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support).loss
+    model.intuition_alpha = 1.0
+    out = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support, random_ids=rand, target_id=tgt)
+    assert len(model.aux_log) == 1 and model.aux_log[0] > 0
+    assert torch.allclose(out.loss, base + torch.tensor(model.aux_log[0]), atol=1e-4)
+    out.loss.backward()
+    assert model.injectnet.W_q_2.weight.grad.abs().sum() > 0
+    assert model._thought is None and model._query is None and not model._keep_thought
+    model.eval()
+    with torch.no_grad():
+        ev = model(input_ids=ids, attention_mask=mask, labels=labels, support_ids=support, random_ids=rand,
+                   target_id=tgt).loss
+    assert torch.allclose(ev, base, atol=1e-5)  # eval loss = NTP only
+
+
+def test_intuition_loss_is_ln2_when_random_equals_supports():
+    model = make_model("text")
+    q = torch.randn(2, 1, 32)
+    support = torch.tensor([[0, 1, 2], [3, 4, 5]])
+    thought = model.thought_vector(q, support)
+    loss = model.intuition_loss(q, thought, support, torch.tensor([1, 4]))
+    assert abs(loss.item() - 0.6931) < 1e-3
