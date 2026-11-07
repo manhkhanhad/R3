@@ -16,14 +16,15 @@
 # Rationales: Qwen3.5-9B units from external_rational (target-free, history + metadata only),
 # rendered per CSV row by src/latent/rationale_text.py. Then 10-beam catalog-constrained ranking
 # on the full test split under EVAL_MODES (own model: own / shuffle / empty).
-# Env: CODE (frozen code root, required), MODE, EVAL_MODES, RUN_TAG.
+# Env: CODE (frozen code root, required), MODE, EVAL_MODES, RUN_TAG, OUT_BASE.
 set -Eeuo pipefail
 CODE=${CODE:?set CODE to the frozen code root}
 MODE=${MODE:-own}
 if [[ $MODE == own ]]; then EVAL_MODES=${EVAL_MODES:-"own shuffle empty"}; else EVAL_MODES=${EVAL_MODES:-off}; fi
 RUN_TAG=${RUN_TAG:-qwen35_9b}
 R3=/common/home/users/m/mk.ngohuu.2024/research/R3
-SCRATCH=/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3
+# OUT_BASE: where rationale texts and models go (default scratch; R3/output_dir when scratch is full).
+SCRATCH=${OUT_BASE:-/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3}
 category=Toys_and_Games
 DATA=$R3/data/$category
 stem=Toys_and_Games_5_2017-1-2018-11
