@@ -171,7 +171,18 @@ class MarginLatentModel(LatentModel):
         self.last_ce_loss = ce_loss.detach()
         self.last_margin_loss = margin_loss.detach()
 
-        total_loss = (ce_loss + self.margin_weight * margin_loss) / self.grad_accum_steps
+        total_loss = ce_loss + self.margin_weight * margin_loss
+        # Optional WIDER regulariser on the pooled r (wider_reg.py; generate_embs stored r above).
+        # This training branch bypasses LatentModel.forward, so add it here; the division by
+        # grad_accum_steps below already gives the per-step scale (no loss_scale needed).
+        if getattr(self.config, "latent_wider", None):
+            from wider_reg import wider_state
+            state = wider_state(self)
+            penalty = state.penalty() if state is not None else None
+            if penalty is not None:
+                self.last_wider_loss = penalty.detach()
+                total_loss = total_loss + state.weight * penalty
+        total_loss = total_loss / self.grad_accum_steps
 
         return CausalLMOutputWithPast(
             loss=total_loss,

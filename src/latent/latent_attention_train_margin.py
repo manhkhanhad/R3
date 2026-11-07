@@ -43,6 +43,9 @@ class MarginLossLogCallback(transformers.TrainerCallback):
             logs["ce_loss"] = ce.item()
         if margin is not None:
             logs["margin_loss"] = margin.item()
+        wider = getattr(target, "last_wider_loss", None)
+        if wider is not None:
+            logs["wider_loss"] = wider.item()
 
 
 def train(
@@ -76,6 +79,9 @@ def train(
     # margin-loss hyperparameters
     margin: float = 0.2,
     margin_weight: float = 1.0,
+    # WIDER regulariser on the pooled r (wider_reg.py); 0 = off
+    wider_weight: float = 0.0,
+    wider_momentum: float = 0.99,
     wandb_run_name: str = None,
 ):
 
@@ -109,6 +115,10 @@ def train(
     # use), so we must do it ourselves or the effective gradient is
     # gradient_accumulation_steps times too large.
     model.grad_accum_steps = gradient_accumulation_steps
+    if wider_weight > 0:
+        # MarginLatentModel adds the penalty itself, before its own /grad_accum_steps
+        model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
+        print("WIDER regulariser:", model.config.latent_wider)
 
     ##############################################################################
     ##################
