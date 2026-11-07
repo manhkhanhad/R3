@@ -5,7 +5,8 @@ items other users bought right after the row's last history items, time-causal)
 and the result is added to r:
 
     q      = W_q r                                     (d = 256)
-    s_n    = q . W_k e_n / sqrt(d) + beta * log(1 + c_n) + b[src_n]
+    z_n    = standardise_n(q . W_k normalize(e_n) / sqrt(d))   (over the row's neighbours)
+    s_n    = tau * z_n + beta * log(1 + c_n) + b[src_n]
     a      = softmax_n(s_n)            (masked over the row's neighbours)
     m      = sum_n a_n e_n
     r'     = r + g * normalize(P m)                    (zero when the set is empty)
@@ -42,6 +43,7 @@ class TransitionReader(nn.Module):
         self.proj = nn.Linear(hidden_size, hidden_size)
         self.src_bias = nn.Parameter(torch.zeros(int(spec["L"])))
         self.beta = nn.Parameter(torch.ones(()))
+        self.tau = nn.Parameter(torch.ones(()))
         self.gain = nn.Parameter(torch.tensor(float(spec.get("init_gain", 30.0))))
         self.init_gain = float(spec.get("init_gain", 30.0))
         self.register_buffer("table", torch.empty(0), persistent=False)
@@ -52,6 +54,7 @@ class TransitionReader(nn.Module):
         with torch.no_grad():
             self.src_bias.zero_()
             self.beta.fill_(1.0)
+            self.tau.fill_(1.0)
             self.gain.fill_(self.init_gain)
 
     def forward(self, r, items, src, count):
@@ -59,9 +62,18 @@ class TransitionReader(nn.Module):
         valid = items >= 0
         e = self.table[items.clamp_min(0)].float()                               # [B, N, H]
         q = self.query(r.float())                                                # [B, d]
-        k = self.key(e)                                                          # [B, N, d]
-        s = (k @ q.unsqueeze(-1)).squeeze(-1) / self.d ** 0.5
-        s = s + self.beta * torch.log1p(count.float()) + self.src_bias[src.clamp(0, len(self.src_bias) - 1)]
+        # v2: keys from unit-normalised title vectors, and the content score standardised
+        # over the row's neighbour set times a learned temperature.  v1 used raw scores:
+        # with title-vector norms ~65 the softmax was one-hot from the start and the
+        # reader received no gradient (356391).
+        k = self.key(F.normalize(e, dim=-1))                                     # [B, N, d]
+        z = (k @ q.unsqueeze(-1)).squeeze(-1) / self.d ** 0.5
+        vf = valid.float()
+        n = vf.sum(-1, keepdim=True).clamp_min(1.0)
+        mean = (z * vf).sum(-1, keepdim=True) / n
+        std = ((((z - mean) ** 2 * vf).sum(-1, keepdim=True) / n) + 1e-8).sqrt()  # eps inside: no inf grad at 1 neighbour
+        z = (z - mean) / (std + 1e-4)
+        s = self.tau * z + self.beta * torch.log1p(count.float()) + self.src_bias[src.clamp(0, len(self.src_bias) - 1)]
         s = s.masked_fill(~valid, float("-inf"))
         has = valid.any(-1)
         w = torch.where(has.unsqueeze(-1), F.softmax(s.masked_fill(~has.unsqueeze(-1), 0.0), -1),
