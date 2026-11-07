@@ -564,7 +564,8 @@ def train(
             save_only_model=save_only_model,
             load_best_model_at_end=latent_only_epochs is None,
             label_names=["labels"] if (use_category_alignment or use_side_info or steered_k > 0
-                                       or candidates is not None or category_prep is not None) else None,
+                                       or candidates is not None or category_prep is not None
+                                       or transitions is not None) else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
