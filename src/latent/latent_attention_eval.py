@@ -49,6 +49,8 @@ def main(
     # mix<K> (one beam search per predicted category, merged by category score +
     # item score); inject: oracle | pred | shuffle
     category_mode: str = None,
+    # transition latent (transition_latent.py): raw | none | shuffle | shuffle_r
+    transition_mode: str = "raw",
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -79,6 +81,14 @@ def main(
         model_class = CategoryInjectModel
     elif category_mode is not None:
         raise ValueError("category_mode needs a category-latent checkpoint")
+    trans_spec = getattr(base_config, "latent_transition", None)
+    if trans_spec:
+        from transition_latent import TransitionLatentModel
+        model_class = TransitionLatentModel
+    elif transition_mode != "raw":
+        raise ValueError("transition_mode needs a transition-latent checkpoint")
+    if transition_mode not in ("raw", "none", "shuffle", "shuffle_r"):
+        raise ValueError(f"unknown transition_mode {transition_mode}")
     if candidate_spec:
         from candidate_pooling import CandidatePoolingModel
         model_class = CandidatePoolingModel
@@ -161,6 +171,14 @@ def main(
             extra.update(random_seed=42, n_items=int(candidate_spec["n_items"]))
         model.cand_disabled = candidate_mode == "drop"
         model.eval_cand_scale = 1.0 if candidate_mode == "guided" else 0.0
+    if trans_spec:
+        from transition_latent import TransitionRowsDataset
+        dataset_class = TransitionRowsDataset
+        # the test CSV here is split.py's copy of the test split (same rows, same order)
+        extra = {"prep": torch.load(trans_spec["source"], map_location="cpu", weights_only=False)["test"],
+                 "shuffle_seed": 42 if transition_mode == "shuffle" else None}
+        model.trans_disabled = transition_mode == "none"
+        model.roll_latent = transition_mode == "shuffle_r"
     val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
                               sample=sample, n_thoughts=n_thoughts, **extra)
         
@@ -302,6 +320,10 @@ def main(
             if candidate_spec:
                 model.cand_override = (torch.tensor([e["cand_items"] for e in encodings]),
                                        torch.tensor([e["cand_logp"] for e in encodings]))
+            if trans_spec:
+                model.trans_override = (torch.tensor([e["trans_items"] for e in encodings]),
+                                        torch.tensor([e["trans_src"] for e in encodings]),
+                                        torch.tensor([e["trans_count"] for e in encodings], dtype=torch.float32))
             if inject_spec:
                 model.cat_override = torch.tensor([e["cat_list"] for e in encodings])
             if side_spec and not mixture:
@@ -343,6 +365,9 @@ def main(
             model.attention.target_item = None
         if candidate_spec and model.last_cand_weights is not None:
             w = model.last_cand_weights[:: model.last_cand_weights.size(0) // len(encodings)]
+            cand_mass.extend(w.float().cpu().tolist())
+        if trans_spec and model.last_trans_weights is not None:
+            w = model.last_trans_weights[:: model.last_trans_weights.size(0) // len(encodings)]
             cand_mass.extend(w.float().cpu().tolist())
         if idx == 0:
             print(output)

@@ -128,6 +128,10 @@ def train(
     # trained with the target category (additive) / target + predicted list (inject)
     category_injection: str = None,
     category_prep_file: str = None,  # category_prep.py output
+    # Item-transition reading latent (transition_latent.py): r reads the row's
+    # transition neighbours (transition_prep.py), r' = r + g * normalize(P m)
+    transition_prep_file: str = None,
+    transition_title_vectors: str = None,  # candidate_title_vectors.py output (item id rows)
 
 ):
 
@@ -282,6 +286,24 @@ def train(
             raise ValueError(f"unknown category_injection {category_injection}")
         model_kwargs["config"] = model_config
 
+    transitions = None
+    if transition_prep_file is not None:
+        if (use_side_info or use_category_alignment or category_text_file or thought_source or latent_only
+                or candidate_kind or category_injection or pool_history_only or attention_share_mode
+                or wider_weight > 0):
+            raise ValueError("the transition latent is a plain-R3 variant; do not combine with other options")
+        from transformers import AutoConfig
+        from transition_latent import TransitionLatentModel
+        transitions = torch.load(transition_prep_file, map_location="cpu", weights_only=False)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_transition = {
+            "source": os.path.abspath(transition_prep_file),
+            "title_vectors": os.path.abspath(transition_title_vectors),
+            "L": int(transitions["L"]), "M": int(transitions["M"]), "dim": 256, "init_gain": side_init_norm,
+        }
+        model_class = TransitionLatentModel
+        model_kwargs["config"] = model_config
+
     candidates = None
     if candidate_kind is not None:
         if use_side_info or use_category_alignment or category_text_file or thought_source or latent_only:
@@ -355,6 +377,9 @@ def train(
             print("steered reading:", model.config.latent_steered_reading)
     if candidates is not None:
         print("candidate pooling:", model.config.latent_candidate_pooling)
+    if transitions is not None:
+        model.trans.float().reset_parameters()
+        print("transition latent:", model.config.latent_transition)
     if category_injection == "additive":
         # fp32 side branch, category-indexed table (+ one invalid row for unknown categories)
         model.side_projection.float().reset_parameters()
@@ -420,6 +445,11 @@ def train(
                        "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed, **rand}
         extra_val = {"candidates": candidates["candidates"]["valid"], "logp": candidates["logp"]["valid"],
                      "n_candidates": n_candidates, "shuffle_seed": candidate_shuffle_seed, **rand}
+    if transitions is not None:
+        from transition_latent import TransitionRowsDataset
+        dataset_class = TransitionRowsDataset
+        extra_train = {"prep": transitions["train"]}
+        extra_val = {"prep": transitions["valid"]}
     train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, **extra_train)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
                              sample=sample if eval_sample is None else eval_sample, category=category, K=K, **extra_val)
@@ -507,6 +537,9 @@ def train(
     if category_prep is not None:
         from category_latent import CategoryCollator
         collator = CategoryCollator(collator)
+    if transitions is not None:
+        from transition_latent import TransitionCollator
+        collator = TransitionCollator(collator)
     trainer = transformers.Trainer(
         # deepspeed=deepspeed,
         model=model,
