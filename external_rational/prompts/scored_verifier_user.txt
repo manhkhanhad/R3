@@ -1,0 +1,55 @@
+Audit this rationale with the source history and diagnostic information below.
+The rationale is an Exploration hypothesis: no candidate or next item is supplied.
+Diagnostics describe source records, not established user intentions.
+
+HISTORY_JSON:
+{{HISTORY_JSON}}
+
+DIAGNOSTICS_JSON:
+{{DIAGNOSTICS_JSON}}
+
+RATIONALE_JSON:
+{{RATIONALE_JSON}}
+
+CLAIMS_JSON:
+{{CLAIMS_JSON}}
+
+Return exactly:
+{
+  "claim_assessments": [
+    {
+      "claim_id": "copy supplied claim ID",
+      "verdict": "supported | qualified_inference | unsupported | contradicted",
+      "event_checks": [
+        {
+          "event_id": "copy an actual history event ID",
+          "support": "supports | does_not_support | contradicts",
+          "evidence_quotes": [{"field": "actual metadata field", "quote": "exact source substring"}],
+          "reason": "why this event does or does not support this claim"
+        }
+      ],
+      "reason": "claim-level explanation"
+    }
+  ],
+  "scores": {
+    "factuality": {"score": 1, "reason": "..."},
+    "evidence_selection": {"score": 1, "reason": "..."},
+    "signal_strength": {"score": 1, "reason": "..."},
+    "intent_translation": {"score": 1, "reason": "..."},
+    "causal_logic": {"score": 1, "reason": "..."},
+    "recommendation_fit": {"score": 1, "reason": "..."},
+    "temporal_reasoning": {"score": 1, "reason": "..."},
+    "confidence_calibration": {"score": 1, "reason": "..."},
+    "task_fulfillment": {"score": 1, "reason": "..."}
+  },
+  "violations": [
+    {"kind": "one allowed violation kind", "claim_ids": ["supplied claim ID"], "reason": "..."}
+  ]
+}
+The numbers above illustrate the JSON format; choose the actual score for each
+dimension. An empty violations array is allowed only if no violation was found.
+For every observation claim, assess EXACTLY its required_event_ids, one check per
+event. Other claims must cite at least one relevant event. Each supports check
+needs a nonempty list of exact source quotes. A does_not_support or contradicts
+check may have an empty quote list when the relevant property is absent, but must
+explain that absence. Do not silently repair the rationale or omit a failing claim.

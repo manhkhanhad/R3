@@ -1,0 +1,60 @@
+Construct reusable rationale units from this target-free training-history prefix.
+The supplied interaction order is authoritative chronological order. Earlier/later
+and sequence-based transitions may use that order despite tied or absent
+timestamps. Exact durations or dates require explicit evidence.
+Use one to three distinct hypotheses only when supported; one strong unit is fine.
+Use product titles in all readable fields. Never use H1/H2/H3-style event
+labels in prose, even after a title in parentheses. Event labels belong only in
+event_ids and evidence_quotes.event_id citation fields.
+Save each rationale using three explicit reasoning fields:
+- evidence: a list of factual observations with source citations;
+- interpretation: the qualified preference hypothesis supported by that evidence;
+- recommendation: possible next-item attributes or directions.
+Do not return a combined text field. Do not add "However..." sentences,
+counterarguments, or closing limitations to these reasoning components. Keep caveats in limitations and downweight_when. Use "may" or "could"
+where the inference needs qualification, without interrupting the reasoning flow.
+Metadata fields in observations are field names present on the cited events, such
+as title, category, brand, feature, description, or rating. Each field must exist
+on every event cited by that observation. Cite only events actually provided.
+For every cited event and field, provide an exact substring from that field as
+an evidence quote. For list fields, quote a substring from one list element.
+Prefer separate observations, each citing a single event and field. Example:
+{"event_ids":["H1"],"metadata_fields":["feature"],
+ "statement":"The item identified by its supplied title is described as a carrying tote",
+ "evidence_quotes":[{"event_id":"H1","field":"feature","quote":"Carrying tote"}]}
+
+Return this JSON structure (all fields required):
+{
+  "status": "ok or insufficient_evidence",
+  "rationales": [
+    {
+      "rationale_id": "R1",
+      "facet": "specific preference dimension",
+      "relation": "continuity or refinement or transition or complementarity or other",
+      "applicability": "observable conditions under which this rationale applies",
+      "evidence": [
+        {
+          "event_ids": ["H1", "H2"],
+          "metadata_fields": ["category"],
+          "statement": "a directly supported observation identifying items by supplied titles",
+          "evidence_quotes": [
+            {"event_id": "H1", "field": "category", "quote": "exact source substring"},
+            {"event_id": "H2", "field": "category", "quote": "exact source substring"}
+          ]
+        }
+      ],
+      "interpretation": "a qualified hypothesis rather than a fact about intent",
+      "recommendation": "attributes or interest direction to consider next",
+      "limitations": ["weakness or alternative explanation"],
+      "downweight_when": ["observable condition reducing applicability"]
+    }
+  ],
+  "comparison": "brief evidence-based comparison of the hypotheses or reason to abstain"
+}
+
+Final check: all prose must use supplied item titles; history event labels may
+appear only in the structured citation fields. The evidence, interpretation, and recommendation
+fields must not append caveats; keep those in limitations and downweight_when.
+
+INPUT_JSON:
+{{HISTORY_JSON}}

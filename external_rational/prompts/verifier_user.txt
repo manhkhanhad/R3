@@ -1,0 +1,25 @@
+Audit every rationale using only HISTORY_JSON. Each assessment must contain:
+{
+  "rationale_id": "R1",
+  "decision": "accept or revise or reject",
+  "unsupported_claims": [],
+  "incorrect_citations": [],
+  "checks": {
+    "grounding": true,
+    "inference": true,
+    "relation": true,
+    "specificity": true,
+    "applicability": true,
+    "uncertainty": true
+  },
+  "reason": "concrete justification referring to supplied evidence"
+}
+The booleans above illustrate the format, not the desired answer. Set each based
+on the evidence. Accept requires all six true and no unsupported claims/citations.
+Return {"assessments": [assessment, ...]} with exactly one per rationale.
+
+HISTORY_JSON:
+{{HISTORY_JSON}}
+
+RATIONALES_JSON:
+{{RATIONALES_JSON}}
