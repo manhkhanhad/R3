@@ -132,6 +132,9 @@ def train(
     # transition neighbours (transition_prep.py), r' = r + g * normalize(P m)
     transition_prep_file: str = None,
     transition_title_vectors: str = None,  # candidate_title_vectors.py output (item id rows)
+    # CARE-style input choice: rows the current model solves without neighbours get another
+    # row's neighbour set with this probability (0 = off)
+    transition_care_neg_prob: float = 0.0,
 
 ):
 
@@ -301,6 +304,8 @@ def train(
             "title_vectors": os.path.abspath(transition_title_vectors),
             "L": int(transitions["L"]), "M": int(transitions["M"]), "dim": 256, "init_gain": side_init_norm,
         }
+        if transition_care_neg_prob > 0:
+            model_config.latent_transition["care"] = {"neg_prob": float(transition_care_neg_prob), "momentum": 0.99}
         model_class = TransitionLatentModel
         model_kwargs["config"] = model_config
 

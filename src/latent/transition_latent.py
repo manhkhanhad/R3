@@ -107,7 +107,45 @@ class TransitionLatentModel(LatentModel):
     def forward(self, *args, trans_items=None, trans_src=None, trans_count=None, **kwargs):
         if trans_items is not None:
             self._trans = (trans_items, trans_src, trans_count)
+            care = self.config.latent_transition.get("care")
+            if care and self.training and kwargs.get("labels") is not None and trans_items.size(0) > 1:
+                self._trans = self.care_neighbours(self._trans, kwargs, care)
         return super().forward(*args, **kwargs)
+
+    @torch.no_grad()
+    def care_neighbours(self, trans, kwargs, care):
+        """CARE-style input choice (training only).  Probe the current model WITHOUT
+        neighbours (r' = r): rows it already solves (per-token target NLL below a running
+        median) get, with probability ``neg_prob``, another row's neighbour set (misleading);
+        all other rows keep their real neighbours.  The decoder learns to use the
+        neighbours where the history fails and to resist them where it succeeds."""
+        labels = kwargs["labels"]
+        self.trans_disabled = True
+        try:
+            logits = super().forward(input_ids=kwargs["input_ids"], attention_mask=kwargs["attention_mask"],
+                                     use_cache=False).logits
+        finally:
+            self.trans_disabled = False
+        tgt = labels[:, 1:]
+        mask = tgt != -100
+        lp = torch.log_softmax(logits[:, :-1].float(), -1).gather(-1, tgt.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+        nll = -(lp * mask).sum(-1) / mask.sum(-1).clamp_min(1)                  # [B] per-token target NLL
+        med = nll.median()
+        m = float(care.get("momentum", 0.99))
+        self._care_threshold = med if getattr(self, "_care_threshold", None) is None \
+            else m * self._care_threshold + (1 - m) * med
+        solved = nll < self._care_threshold
+        neg = solved & (torch.rand_like(nll) < float(care.get("neg_prob", 0.5)))
+        self.last_care = {"care_solved": float(solved.float().mean()), "care_neg": float(neg.float().mean()),
+                          "care_threshold": float(self._care_threshold)}
+        self._care_calls = getattr(self, "_care_calls", 0) + 1
+        if self._care_calls % 200 == 1:
+            print(f"[care] call {self._care_calls}: {self.last_care}", flush=True)
+        if not neg.any():
+            return trans
+        other = torch.roll(torch.arange(nll.size(0), device=nll.device), 1)   # another row of the micro-batch
+        sel = neg.to(trans[0].device)
+        return tuple(torch.where(sel.view(-1, *([1] * (x.dim() - 1))), x[other.to(x.device)], x) for x in trans)
 
     def observe_reasoning_latent(self, latent):
         batch = self.trans_override if self.trans_override is not None else self._trans
