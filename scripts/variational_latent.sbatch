@@ -61,6 +61,8 @@ out="${task_dir}/latent"
 tag="$(echo "$name" | tr '[:upper:]' '[:lower:]')"
 interv_dir="analysis/results/intervention/${tag}"
 results="output_dir/variational/${name}"
+# task_dir already lives under output_dir/variational by default: keep the summary files beside it
+[[ "$(realpath -m "$results")" == "$(realpath -m "$task_dir")" ]] && results="${task_dir}/summary"
 mkdir -p "$out" "$results"
 
 cvae_args=()
