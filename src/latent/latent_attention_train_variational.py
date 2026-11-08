@@ -135,10 +135,17 @@ def train(
     if cvae:
         from cvae_latent import TargetRowsDataset
         dataset_class = TargetRowsDataset
-    train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed,
-                               category=category_text, K=K, **extra)
+    def capped(n, path):  # a sample larger than the file (e.g. a VALID_SAMPLE smoke file) means "all rows"
+        if n is None or n <= 0:
+            return -1
+        rows = sum(1 for _ in open(path)) - 1
+        return n if n < rows else -1
+
+    train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=capped(sample, train_file),
+                               seed=seed, category=category_text, K=K, **extra)
     val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
-                             sample=sample if eval_sample is None else eval_sample, category=category_text, K=K, **extra)
+                             sample=capped(sample if eval_sample is None else eval_sample, eval_file),
+                             category=category_text, K=K, **extra)
 
     if history_dropout_p > 0 or history_dropout_eval_p > 0:
         from history_dropout import build_spec, title_items
