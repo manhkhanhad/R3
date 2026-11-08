@@ -68,6 +68,7 @@ def train(
     eval_file: str = "data/train/Toys_and_Games_5_2017-1-2018-11.csv",
     output_dir: str = "./output_test/",
     sample: int = 1024,
+    eval_sample: int = None,
     seed: int = 0,
     end_k: int = -1,
     batch_size: int = 128,
@@ -170,7 +171,7 @@ def train(
     )
     val_data = CollaborativeContrastiveDataset(
         train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
-        sample=sample, category=category_text, K=K,
+        sample=sample if eval_sample is None else eval_sample, category=category_text, K=K,
     )
     hf_train_dataset = HFDataset.from_dict(
         {key: [value[key] for value in train_data] for key in train_data[0]}

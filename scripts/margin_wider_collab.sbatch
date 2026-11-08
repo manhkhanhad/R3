@@ -81,7 +81,7 @@ if [[ ! -f "$out/config.json" ]]; then
       --projection_dim 256 --temperature 0.1 \
       --user_contrastive_weight 0.1 --target_contrastive_weight 0.1 \
       --bank_size 10000 --max_user_positives 16 --max_target_positives 16 --num_negatives 256 \
-      --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True "${resume[@]}"
+      --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True --eval_sample -1 "${resume[@]}"
   else
     python "$code_root/src/latent/latent_attention_train_grounded_margin.py" "${common[@]}" \
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
