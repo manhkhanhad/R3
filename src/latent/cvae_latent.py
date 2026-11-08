@@ -79,7 +79,10 @@ class PriorLatentLayer(nn.Module):
 
     def reset_parameters(self, logvar_init, token_norm):
         self.norm.reset_parameters()
-        self.mu.reset_parameters()
+        # mu heads start at zero (prior and posterior alike): KL(q || p) = 0 at init and grows
+        # only as the posterior learns, instead of a ~100-nat gap between two random heads
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
         nn.init.zeros_(self.logvar.weight)
         nn.init.constant_(self.logvar.bias, float(logvar_init))
         # E||up(z)|| ~ token_norm for z ~ N(0, I): entries ~ N(0, token_norm^2 / (H d))
@@ -116,9 +119,11 @@ class PosteriorEncoder(nn.Module):
         self.scale = 1.0 / math.sqrt(dim)
 
     def reset_parameters(self, logvar_init):
-        for layer in (self.query, self.key, self.value, self.mu):
+        for layer in (self.query, self.key, self.value):
             layer.reset_parameters()
         self.norm.reset_parameters()
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
         nn.init.zeros_(self.logvar.weight)
         nn.init.constant_(self.logvar.bias, float(logvar_init))
 

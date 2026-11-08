@@ -31,6 +31,11 @@ def make_model(aux=True, seed=0):
     torch.manual_seed(seed)
     model = CVAELatentModel(make_config(aux))
     init_cvae(model, model.config.latent_cvae)
+    # mu heads are zero at init (KL = 0); give them distinct random weights so the tests
+    # exercise a non-degenerate prior / posterior pair
+    with torch.no_grad():
+        torch.nn.init.normal_(model.attention.mu.weight, std=0.1)
+        torch.nn.init.normal_(model.posterior.mu.weight, std=0.1)
     if aux:
         model.aux.set_table(torch.randn(N_ITEMS, EMB))
     model.grad_accum_steps = 2
