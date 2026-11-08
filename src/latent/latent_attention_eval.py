@@ -98,6 +98,20 @@ def main(
         raise ValueError(f"unknown candidate_mode {candidate_mode}")
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
+    # Variational line (cvae_latent.py / history_dropout.py), env knobs:
+    #   CVAE_MODE=mean|sample      slot = up(mu_p) (default) or a seeded prior sample
+    #   HISTORY_DROPOUT_EVAL_P=p   override the checkpoint's eval dropout probability
+    if getattr(model.config, "latent_cvae", None) and os.environ.get("CVAE_MODE", "mean") == "sample":
+        model.attention.sample = True
+        model.attention.generator = torch.Generator(device=device).manual_seed(thought_seed)
+        print("CVAE_MODE=sample", flush=True)
+    if os.environ.get("HISTORY_DROPOUT_EVAL_P") is not None:
+        spec = (getattr(model.config, "latent_bottleneck", None) or {}).get("dropout")
+        if not spec:
+            raise ValueError("HISTORY_DROPOUT_EVAL_P needs a history-dropout checkpoint")
+        spec["eval_p"] = float(os.environ["HISTORY_DROPOUT_EVAL_P"])
+        model._history_dropout_generator = torch.Generator(device=device).manual_seed(thought_seed)
+        print(f"history dropout eval_p={spec['eval_p']}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 

@@ -187,6 +187,13 @@ class LatentModel(Qwen2ForCausalLM):
             from intent_reasoning import IntentReasoningLayer
             self.attention = IntentReasoningLayer(self.attention, config.hidden_size, intent)
 
+        cvae = getattr(config, "latent_cvae", None)
+        if cvae:
+            # Variational latent (cvae_latent.py): the slot vector is up(mu_p(pooled r)) at
+            # inference; the posterior / auxiliary modules are only used by the training class.
+            from cvae_latent import attach_cvae
+            attach_cvae(self, cvae)
+
         self.last_soft_vocab_entropy = None
         self.last_soft_vocab_max_probability = None
         self.last_soft_vocab_raw_norm = None
@@ -229,6 +236,9 @@ class LatentModel(Qwen2ForCausalLM):
         if getattr(target.config, "latent_attention_share", None):
             from attention_share import enable_attention_share
             enable_attention_share(target)
+        if getattr(target.config, "latent_cvae", None):
+            from cvae_latent import load_fp32_cvae_params
+            load_fp32_cvae_params(target, str(pretrained_model_name_or_path))
         return model
 
     def pooling_mask(self, input_ids, attention_mask):
@@ -293,15 +303,27 @@ class LatentModel(Qwen2ForCausalLM):
         ``latent_bottleneck_ids`` for inputs_embeds-only scoring); ``None`` means a
         KV-cache decode step, which reuses the block cached at prefill.
         """
-        from latent_bottleneck import prompt_block, bottleneck_mask_and_positions
+        from latent_bottleneck import prompt_block, bottleneck_mask_and_positions, thought_positions
 
         thought_token_id = self.model.embed_tokens.num_embeddings - 1
+        dropout = spec.get("dropout")
         if prompt_ids is not None:
             thoughts = getattr(self.config, "latent_continuous_thoughts", None)
-            block, thought_pos = prompt_block(
-                prompt_ids, attention_mask, thought_token_id, spec["visible_prefix_ids"],
-                n_thoughts=int(thoughts["k"]) if thoughts else 1,
-            )
+            n_thoughts = int(thoughts["k"]) if thoughts else 1
+            if dropout:
+                # Stochastic history dropout (history_dropout.py): a random subset of the
+                # history title keys is hidden from target-side queries; training p in
+                # training mode, eval_p otherwise (the block is cached for decode steps).
+                from history_dropout import dropout_block
+                thought_pos = thought_positions(prompt_ids, thought_token_id, n_thoughts)
+                p = float(dropout["p"]) if self.training else float(dropout.get("eval_p", 0.0))
+                block = dropout_block(prompt_ids, attention_mask, dropout, thought_pos, p,
+                                      generator=getattr(self, "_history_dropout_generator", None))
+            else:
+                block, thought_pos = prompt_block(
+                    prompt_ids, attention_mask, thought_token_id, spec["visible_prefix_ids"],
+                    n_thoughts=n_thoughts,
+                )
             self._bottleneck_block, self._bottleneck_thought_pos = block, thought_pos
         else:
             block = getattr(self, "_bottleneck_block", None)
@@ -319,7 +341,8 @@ class LatentModel(Qwen2ForCausalLM):
             gist_k = int(thoughts["k"]) if thoughts else 1
         return bottleneck_mask_and_positions(attention_mask, block, thought_pos, query_len, dtype,
                                              gist_k=gist_k, delete_latents=bool(spec.get("delete_latents")),
-                                             history_bias=spec.get("history_bias"))
+                                             history_bias=spec.get("history_bias"),
+                                             keep_positions=bool(dropout), all_queries=bool(dropout))
 
     def forward(
         self,

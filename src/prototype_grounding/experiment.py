@@ -193,7 +193,8 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     tokenizer.padding_side = "right"
     config = AutoConfig.from_pretrained(checkpoint)
     if (getattr(config, "latent_neighbor_refinement", None) or getattr(config, "latent_bottleneck", None)
-            or getattr(config, "latent_pool_history", None) or getattr(config, "latent_attention_share", None)):
+            or getattr(config, "latent_pool_history", None) or getattr(config, "latent_attention_share", None)
+            or getattr(config, "latent_cvae", None)):
         # These live in the SFT model class.  The original GRPO class silently
         # drops the neighbor wrapper (random-initialising the plain attention
         # layer) and does not apply the L7 latent-only attention mask.

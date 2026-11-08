@@ -104,6 +104,8 @@ def bottleneck_mask_and_positions(
     gist_k: int = 0,
     delete_latents: bool = False,
     history_bias: Optional[float] = None,
+    keep_positions: bool = False,
+    all_queries: bool = False,
 ):
     """4D additive mask ``[B, 1, q, k]`` and position ids ``[B, q]`` for the last
     ``query_len`` positions of a sequence whose full 2D padding mask is
@@ -132,7 +134,9 @@ def bottleneck_mask_and_positions(
     if delete_latents:
         is_latent_key = (k_abs.unsqueeze(0) >= thought_pos.unsqueeze(1)) & (k_abs.unsqueeze(0) < readout.unsqueeze(1))
         block = block | is_latent_key
-    penalised = is_target_query.unsqueeze(2) & block.unsqueeze(1)
+    # all_queries (history dropout): hide the blocked keys from every query, so no state of
+    # this pass (separators, scaffold, kept titles) encodes a dropped item; only r (first pass) does
+    penalised = block.unsqueeze(1).expand(-1, query_len, -1) if all_queries else is_target_query.unsqueeze(2) & block.unsqueeze(1)
     if history_bias is None:
         allowed = allowed & ~penalised
     # Never leave a row empty (pad queries): let every query see itself.
@@ -143,7 +147,8 @@ def bottleneck_mask_and_positions(
         bias = bias.masked_fill(penalised & allowed, float(history_bias))
     bias = bias.masked_fill(~allowed, torch.finfo(dtype).min).unsqueeze(1)
 
-    visible = valid if (gist_k or history_bias is not None) else valid & ~block
+    # keep_positions (history dropout): hidden keys keep their position ids, as in the soft variant
+    visible = valid if (gist_k or history_bias is not None or keep_positions) else valid & ~block
     positions = (visible.long().cumsum(dim=1) - 1).clamp(min=0)[:, key_len - query_len:]
     return bias, positions
 
