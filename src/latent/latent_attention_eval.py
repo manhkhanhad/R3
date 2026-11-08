@@ -281,6 +281,29 @@ def main(
         if not bool(model.attention.bank_ready):
             raise RuntimeError("grounded reasoning checkpoint has no inference bank")
         meta = [row_metadata(val_dataset.data.iloc[i]) for i in range(len(val_dataset.data))]
+        slot_mode = os.environ.get("SLOT_MODE", "raw")
+        slot_rows = None
+        if slot_mode != "raw":
+            # Replace the grounded slot vector r1 (grounded_margin.py slot bank = train rows' r1).
+            bank = torch.load(os.path.join(base_model, "slot_bank.pt"), map_location="cpu").float()
+            bank_users = torch.load(os.path.join(base_model, "slot_bank_users.pt"), map_location="cpu")
+            n = len(meta)
+            if slot_mode == "mask":
+                slot_rows = torch.zeros(n, bank.size(1))
+            elif slot_mode == "mean":
+                slot_rows = bank.mean(0, keepdim=True).expand(n, -1)
+            elif slot_mode == "shuffle_user":
+                gen = torch.Generator().manual_seed(thought_seed)
+                users = torch.tensor([m["query_user"] for m in meta])
+                pick = torch.randint(len(bank), (n,), generator=gen)
+                clash = bank_users[pick] == users
+                while bool(clash.any()):
+                    pick[clash] = torch.randint(len(bank), (int(clash.sum()),), generator=gen)
+                    clash = bank_users[pick] == users
+                slot_rows = bank[pick]
+            else:
+                raise ValueError(f"unknown SLOT_MODE {slot_mode}")
+            print(f"SLOT_MODE={slot_mode}: bank {tuple(bank.shape)}", flush=True)
     intent = getattr(model.config, "latent_intent_reasoning", None)
     intent_mode = os.environ.get("INTENT_MODE", "map")
     intent_predictions = []
@@ -291,6 +314,9 @@ def main(
             rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)
             model.attention.query_user = torch.tensor([m["query_user"] for m in rows], device=device)
+            if slot_rows is not None:
+                start = idx * batch_size
+                model.attention.slot_override = slot_rows[start:start + len(encodings)].to(device)
         if intent and intent_mode == "oracle":
             batch_targets = targets[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.target_item = torch.tensor(batch_targets, device=device)

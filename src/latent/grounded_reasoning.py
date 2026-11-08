@@ -267,7 +267,11 @@ class GroundedReasoningLayer(nn.Module):
         r0 = self.base_attention(hidden_states=hidden_states, attention_mask=attention_mask,
                                  thought_id_idx=thought_id_idx)
         self.last_raw = r0
-        return self.refine(r0)
+        r1 = self.refine(r0)
+        override = getattr(self, "slot_override", None)   # eval-only slot intervention (SLOT_MODE)
+        if override is not None:
+            r1 = override.repeat_interleave(r1.size(0) // override.size(0), 0).to(r1)
+        return r1
 
 
 class GroundedReasoningLatentModel(LatentModel):

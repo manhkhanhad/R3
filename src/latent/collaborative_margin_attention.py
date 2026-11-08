@@ -30,6 +30,7 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
         self.contrastive_enabled = False
         self.last_margin_loss = None
         self.last_contrastive_enabled = None
+        self.last_wider_loss = None
 
     def _margin_loss(self, embeds, thought_idx, pos_nll, labels, attention_mask,
                      position_ids, cache_position, num_logits_to_keep):
@@ -140,7 +141,17 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             + self.user_contrastive_weight * user_loss
             + self.target_contrastive_weight * target_loss
             + self.cf_contrastive_weight * cf_loss
-        ) / self.grad_accum_steps
+        )
+        # Optional WIDER regulariser on the pooled r (wider_reg.py; generate_embs stored r above).
+        # Added before the /grad_accum_steps below, as in MarginLatentModel (no loss_scale needed).
+        if getattr(self.config, "latent_wider", None):
+            from wider_reg import wider_state
+            state = wider_state(self)
+            penalty = state.penalty() if state is not None else None
+            if penalty is not None:
+                self.last_wider_loss = penalty.detach()
+                total_loss = total_loss + state.weight * penalty
+        total_loss = total_loss / self.grad_accum_steps
         return CausalLMOutputWithPast(
             loss=total_loss,
             logits=out.logits,

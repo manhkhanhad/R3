@@ -29,6 +29,7 @@ class CollaborativeMarginLogCallback(CollaborativeLogCallback):
         for attr, key in (
             ("last_margin_loss", "margin_loss"),
             ("last_contrastive_enabled", "contrastive_enabled"),
+            ("last_wider_loss", "wider_loss"),
         ):
             value = getattr(target, attr, None)
             logs[key] = value.item() if value is not None else None
@@ -92,6 +93,11 @@ def train(
     num_negatives: int = 256,
     positive_min_token_accuracy: float = 1.0,
     positive_max_nll: float = float("inf"),
+    # WIDER regulariser on the pooled r (wider_reg.py); 0 = off
+    wider_weight: float = 0.0,
+    wider_momentum: float = 0.99,
+    # parity with latent_attention_train_margin.py (load best by eval loss, patience 1); off = L1 recipe
+    early_stopping: bool = False,
     wandb_run_name: str = None,
 ):
     if margin_weight > 0 and micro_batch_size < 2:
@@ -136,6 +142,10 @@ def train(
     model.positive_min_token_accuracy = positive_min_token_accuracy
     model.positive_max_nll = positive_max_nll
     model.grad_accum_steps = gradient_accumulation_steps
+    if wider_weight > 0:
+        # CollaborativeMarginLatentModel adds the penalty itself, before its own /grad_accum_steps
+        model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
+        print("WIDER regulariser:", model.config.latent_wider)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     additional_special_tokens = list(tokenizer.additional_special_tokens)
@@ -191,7 +201,8 @@ def train(
             save_strategy="epoch",
             output_dir=output_dir,
             save_total_limit=1,
-            load_best_model_at_end=False,
+            load_best_model_at_end=early_stopping,
+            metric_for_best_model="eval_loss" if early_stopping else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
             remove_unused_columns=False,
@@ -200,7 +211,7 @@ def train(
         callbacks=[
             PhaseCallback(margin_only_epochs, phase2_margin_weight),
             CollaborativeMarginLogCallback(),
-        ],
+        ] + ([transformers.EarlyStoppingCallback(early_stopping_patience=1)] if early_stopping else []),
     )
     move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False
