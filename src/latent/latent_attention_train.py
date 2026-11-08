@@ -135,6 +135,11 @@ def train(
     # CARE-style input choice: rows the current model solves without neighbours get another
     # row's neighbour set with this probability (0 = off)
     transition_care_neg_prob: float = 0.0,
+    # reader learning rate = learning_rate * this (separate AdamW parameter group)
+    transition_reader_lr_mult: float = 1.0,
+    # per-epoch phases, comma separated: r3 (neighbours off, all trainable) | reader (only the
+    # reader trains, decoder and pooling frozen) | joint (all trainable).  e.g. "r3,reader,joint"
+    transition_schedule: str = None,
 
 ):
 
@@ -577,7 +582,8 @@ def train(
             remove_unused_columns=False
         ),
         data_collator=collator,
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=1)] if latent_only_epochs is None else [],
+        callbacks = [EarlyStoppingCallback(early_stopping_patience=1)]
+        if latent_only_epochs is None and not transition_schedule else [],
     )
     if latent_only_epochs is not None:
         trainer.add_callback(BottleneckSchedule(model, int(latent_only_epochs)))
@@ -595,6 +601,21 @@ def train(
         step = max(1, len(val_data) // 64)  # 64 validation rows spread over the file
         probe_rows = [val_data[i] for i in range(0, len(val_data), step)][:64]
         trainer.add_callback(PoolingDiagnostics(probe_rows, trainer.data_collator, output_dir))
+    if transitions is not None and transition_reader_lr_mult != 1.0:
+        reader = [p for n, p in model.named_parameters() if n.startswith("trans.")]
+        rest = [p for n, p in model.named_parameters() if not n.startswith("trans.")]
+        trainer.optimizer = torch.optim.AdamW(
+            [{"params": rest, "lr": learning_rate},
+             {"params": reader, "lr": learning_rate * float(transition_reader_lr_mult)}],
+            lr=learning_rate, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+        print(f"transition reader lr x{transition_reader_lr_mult}: {len(reader)} reader tensors")
+    if transitions is not None and transition_schedule:
+        from transition_latent import TransitionSchedule
+        phases = [x.strip() for x in (transition_schedule.split(",") if isinstance(transition_schedule, str)
+                                      else transition_schedule)]
+        trainer.add_callback(TransitionSchedule(model, phases))
+        model.config.latent_transition["schedule"] = phases
+        print("transition schedule:", phases)
     model.config.use_cache = False
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

@@ -29,6 +29,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from transformers import TrainerCallback
+
 from layers import LatentModel
 from reasoning_dataset import LatentRDataset
 
@@ -151,7 +153,7 @@ class TransitionLatentModel(LatentModel):
         batch = self.trans_override if self.trans_override is not None else self._trans
         if self.training:
             self._trans = None  # do not leak into the next batch
-        if self.trans_disabled:
+        if self.trans_disabled or (self.training and getattr(self, "train_trans_off", False)):
             self.last_trans_weights = None
             out = latent
         else:
@@ -183,6 +185,29 @@ def load_fp32_trans_params(model, checkpoint):
                         params[key[len("trans."):]].copy_(f.get_tensor(key).float())
                     loaded += 1
     return loaded > 0
+
+
+class TransitionSchedule(TrainerCallback):
+    """Per-epoch training phases: r3 (neighbours off in training, all trainable), reader
+    (only ``trans.*`` trains; decoder and pooling frozen), joint (all trainable).  Evaluation
+    always uses the neighbours.  Frozen tensors get no gradient, so AdamW skips them."""
+
+    def __init__(self, model, phases):
+        self.model, self.phases = model, phases
+        self.trainable = {n: p.requires_grad for n, p in model.named_parameters()}
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        e = min(int(round(state.epoch or 0)), len(self.phases) - 1)
+        phase = self.phases[e]
+        if phase not in ("r3", "reader", "joint"):
+            raise ValueError(f"unknown transition phase {phase}")
+        self.model.train_trans_off = phase == "r3"
+        for n, p in self.model.named_parameters():
+            p.requires_grad = self.trainable[n] and (phase != "reader" or n.startswith("trans."))
+            if not p.requires_grad:
+                p.grad = None
+        n_train = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"[schedule] epoch {e + 1}: phase {phase}, trainable params {n_train}", flush=True)
 
 
 class TransitionRowsDataset(LatentRDataset):

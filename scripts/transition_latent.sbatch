@@ -20,7 +20,8 @@
 # Evals already written are skipped (requeue-safe).
 # Env: CODE_ROOT (required), OUTPUT_NAME, NUM_EPOCHS, LR, TRAIN_SAMPLE, EVAL_SAMPLE,
 #      TEST_SAMPLE, MODES, OUTPUT_ROOT, PREP, TITLE_VECTORS, CARE_NEG_PROB (CARE-style input
-#      choice: rows the model already solves without neighbours get another row's set; 0 = off).
+#      choice: rows the model already solves without neighbours get another row's set; 0 = off),
+#      READER_LR_MULT (reader lr multiplier), SCHEDULE (per-epoch phases, e.g. r3,reader,joint).
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -71,7 +72,8 @@ if [[ ! -f "$out/config.json" ]]; then
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate "${LR:-3e-4}" --cutoff_len 512 \
     --save_only_model True --save_total_limit 2 \
     --transition_prep_file "$prep" --transition_title_vectors "$title_vectors" \
-    --transition_care_neg_prob "${CARE_NEG_PROB:-0}" "${resume[@]}"
+    --transition_care_neg_prob "${CARE_NEG_PROB:-0}" \
+    --transition_reader_lr_mult "${READER_LR_MULT:-1}" ${SCHEDULE:+--transition_schedule "$SCHEDULE"} "${resume[@]}"
 fi
 [[ -f "$out/config.json" ]] || { echo "no trained model in $out" >&2; exit 1; }
 
