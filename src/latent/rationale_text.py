@@ -91,6 +91,37 @@ def build(generations, csv, out):
     return counts
 
 
+def categories(csv, meta, out):
+    """ORACLE ablation input: each row's TARGET item category path (e.g. 'Games > Board Games').
+
+    Uses the metadata 'category' list without its root ('Toys & Games'); rows whose target has no
+    category get 'unknown'. Deliberately leaks target information; never use it as a method input.
+    """
+    df = pd.read_csv(csv, usecols=["item_asin"])
+    need = set(df["item_asin"])
+    paths = {}
+    with open(meta) as handle:
+        for line in handle:
+            m = json.loads(line)
+            a = m.get("asin")
+            if a in need and a not in paths:
+                paths[a] = " > ".join((m.get("category") or [])[1:])
+    cats = [paths.get(a) or "unknown" for a in df["item_asin"]]
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "w") as handle:
+        json.dump({"csv": os.path.abspath(csv), "kind": "target_category_ORACLE", "categories": cats}, handle)
+    print(json.dumps({"rows": len(cats), "unknown": cats.count("unknown"), "distinct": len(set(cats))}))
+
+
+def load_categories(path, csv):
+    with open(path) as handle:
+        cats = json.load(handle)["categories"]
+    n_rows = len(pd.read_csv(csv, usecols=["user_id"]))
+    if len(cats) != n_rows:
+        raise ValueError(f"{path} has {len(cats)} categories for {n_rows} rows of {csv}")
+    return cats
+
+
 def load(path, csv):
     """Rationale list aligned with ``csv`` (length checked)."""
     with open(path) as handle:
@@ -103,4 +134,4 @@ def load(path, csv):
 
 
 if __name__ == "__main__":
-    fire.Fire({"build": build})
+    fire.Fire({"build": build, "categories": categories})

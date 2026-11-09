@@ -39,17 +39,20 @@ def evaluate(
     max_new_tokens: int = 128,
     limit: int = 0,
     shuffle_seed: int = 0,
+    hint_file: str = "",
+    hint_mode: str = "none",
 ):
     if not (info_file and test_data_path and result_json_data):
         raise ValueError("info_file, test_data_path and result_json_data are required")
     if not torch.cuda.is_available():
         raise RuntimeError("Ranking evaluation requires a CUDA GPU")
     rationales = rationale_text.load(rationale_file, test_data_path) if mode != "off" else None
+    hints = rationale_text.load_categories(hint_file, test_data_path) if hint_mode != "none" else None
     wandb_run = init_evaluation_run(
         dataset=category,
         config={"method": f"rationale_sft_eval_{mode}", "base_model": base_model,
                 "test_data_path": test_data_path, "rationale_file": rationale_file,
-                "mode": mode, "limit": limit, "dataset": category},
+                "mode": mode, "hint_mode": hint_mode, "limit": limit, "dataset": category},
     )
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     tokenizer.pad_token = tokenizer.eos_token
@@ -62,6 +65,7 @@ def evaluate(
     dataset = RationaleSFTDataset(
         train_file=test_data_path, tokenizer=tokenizer, max_len=4096, sample=-1, test=True,
         category=CATEGORY_NAMES[category], rationales=rationales, mode=mode, shuffle_seed=shuffle_seed,
+        hints=hints, hint_mode=hint_mode,
     )
     results = dataset.get_all()
     n = min(limit, len(dataset)) if limit else len(dataset)
@@ -107,9 +111,9 @@ def evaluate(
     with open(result_json_data, "w") as handle:
         json.dump(results, handle, indent=2)
     metrics = calculate_ranking_metrics(results, info_file)
-    print(json.dumps({"mode": mode, "rows": n, **metrics}))
+    print(json.dumps({"mode": mode, "hint": hint_mode, "rows": n, **metrics}))
     if wandb_run is not None:
-        wandb_run.log({f"evaluation/{mode}/{k}": v for k, v in metrics.items()})
+        wandb_run.log({f"evaluation/{mode}_hint-{hint_mode}/{k}": v for k, v in metrics.items()})
         wandb_run.finish()
     return metrics
 

@@ -41,7 +41,11 @@ def train(
     learning_rate: float = 3e-4,
     cutoff_len: int = 1536,
     resume_from_checkpoint: str = None,
+    hint_dir: str = "",
+    hint_mode: str = "none",
 ):
+    """hint_dir/hint_mode: ORACLE ablation — gold target category inside the rationale block
+    (hint_dir holds train_category.json / valid_category.json from rationale_text.py categories)."""
     if not (train_file and eval_file and output_dir):
         raise ValueError("train_file, eval_file and output_dir are required")
     if batch_size % micro_batch_size:
@@ -54,12 +58,16 @@ def train(
             raise ValueError(f"mode {mode!r} needs rationale_dir with train.json / valid.json")
         train_rationales = rationale_text.load(os.path.join(rationale_dir, "train.json"), train_file)
         eval_rationales = rationale_text.load(os.path.join(rationale_dir, "valid.json"), eval_file)
+    train_hints = eval_hints = None
+    if hint_mode != "none":
+        train_hints = rationale_text.load_categories(os.path.join(hint_dir, "train_category.json"), train_file)
+        eval_hints = rationale_text.load_categories(os.path.join(hint_dir, "valid_category.json"), eval_file)
 
     init_training_run(
         dataset=category,
         config={"method": f"rationale_sft_{mode}", "base_model": base_model, "train_file": train_file,
                 "eval_file": eval_file, "output_dir": output_dir, "rationale_dir": rationale_dir,
-                "mode": mode, "learning_rate": learning_rate, "batch_size": batch_size,
+                "mode": mode, "hint_mode": hint_mode, "learning_rate": learning_rate, "batch_size": batch_size,
                 "cutoff_len": cutoff_len, "dataset": category},
     )
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -71,8 +79,10 @@ def train(
 
     name = CATEGORY_NAMES[category]
     common = dict(tokenizer=tokenizer, max_len=cutoff_len, sample=-1, seed=seed, category=name, mode=mode)
-    train_data = RationaleSFTDataset(train_file=train_file, rationales=train_rationales, **common)
-    eval_data = RationaleSFTDataset(train_file=eval_file, rationales=eval_rationales, **common)
+    train_data = RationaleSFTDataset(train_file=train_file, rationales=train_rationales,
+                                     hints=train_hints, hint_mode=hint_mode, **common)
+    eval_data = RationaleSFTDataset(train_file=eval_file, rationales=eval_rationales,
+                                    hints=eval_hints, hint_mode=hint_mode, **common)
     lengths = sorted(len(x["input_ids"]) for x in train_data.inputs)
     print(f"train sequence length: median {lengths[len(lengths) // 2]}, max {lengths[-1]}, "
           f"truncated at {cutoff_len}: {sum(l >= cutoff_len for l in lengths)}", flush=True)
