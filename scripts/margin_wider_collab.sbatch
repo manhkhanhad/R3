@@ -23,7 +23,7 @@
 #              mask / mean / shuffle_user; paired bootstrap vs knn; slot-bank geometry.
 # Env: CODE_ROOT (required), METHOD (infonce|grounded), CATEGORY (Toys_and_Games), WEIGHT (0.1), MARGIN,
 #      MARGIN_WEIGHT, GATE, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE,
-#      EXTRACT_LIMIT, INTERVENTION_LIMIT, MODES, CONTROLS, SLOT_MODES, TRACE_N.
+#      EXTRACT_LIMIT, INTERVENTION_LIMIT, MODES, CONTROLS, SLOT_MODES, TRACE_N, USER_W, TARGET_W, HARD_NEG.
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -39,6 +39,7 @@ weight="${WEIGHT:-0.1}"
 case "$category" in CDs_and_Vinyl) prompt_category=musics ;; Toys_and_Games) prompt_category="toys and games" ;; Musical_Instruments) prompt_category="music instruments" ;; *) echo "no prompt category for $category" >&2; exit 2 ;; esac
 margin="${MARGIN:-0.2}"; margin_weight="${MARGIN_WEIGHT:-1.0}"
 name="${OUTPUT_NAME:-${category}_margin_${margin}_wider_${weight}_${method}}"
+# infonce variant B (MWC-I-B): USER_W=0 HARD_NEG=16 (same-user different-target hard negatives for the target head)
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
 export WANDB_NAME="${WANDB_NAME:-$name}"
@@ -79,7 +80,8 @@ if [[ ! -f "$out/config.json" ]]; then
     python "$code_root/src/latent/latent_attention_train_collaborative_margin.py" "${common[@]}" \
       --margin_only_epochs 1 --phase2_margin_weight "$margin_weight" \
       --projection_dim 256 --temperature 0.1 \
-      --user_contrastive_weight 0.1 --target_contrastive_weight 0.1 \
+      --user_contrastive_weight "${USER_W:-0.1}" --target_contrastive_weight "${TARGET_W:-0.1}" \
+      --hard_negatives "${HARD_NEG:-0}" \
       --bank_size 10000 --max_user_positives 16 --max_target_positives 16 --num_negatives 256 \
       --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True --eval_sample -1 "${resume[@]}"
   else

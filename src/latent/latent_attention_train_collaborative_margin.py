@@ -30,6 +30,7 @@ class CollaborativeMarginLogCallback(CollaborativeLogCallback):
             ("last_margin_loss", "margin_loss"),
             ("last_contrastive_enabled", "contrastive_enabled"),
             ("last_wider_loss", "wider_loss"),
+            ("last_hard_negative_rate", "hard_negative_rate"),
         ):
             value = getattr(target, attr, None)
             logs[key] = value.item() if value is not None else None
@@ -94,6 +95,8 @@ def train(
     num_negatives: int = 256,
     positive_min_token_accuracy: float = 1.0,
     positive_max_nll: float = float("inf"),
+    # same-user different-target hard negatives per anchor for the target InfoNCE; 0 = off
+    hard_negatives: int = 0,
     # WIDER regulariser on the pooled r (wider_reg.py); 0 = off
     wider_weight: float = 0.0,
     wider_momentum: float = 0.99,
@@ -142,6 +145,7 @@ def train(
     model.num_negatives = num_negatives
     model.positive_min_token_accuracy = positive_min_token_accuracy
     model.positive_max_nll = positive_max_nll
+    model.hard_negatives = hard_negatives
     model.grad_accum_steps = gradient_accumulation_steps
     if wider_weight > 0:
         # CollaborativeMarginLatentModel adds the penalty itself, before its own /grad_accum_steps
@@ -163,6 +167,7 @@ def train(
         f"phase2_margin_weight={phase2_margin_weight}, queue={bank_size}, "
         f"projection={projection_dim}, temperature={temperature}, "
         f"user_weight={user_contrastive_weight}, target_weight={target_contrastive_weight}, "
+        f"hard_negatives={hard_negatives}, "
         f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}"
     )
     train_data = CollaborativeContrastiveDataset(
