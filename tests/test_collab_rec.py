@@ -176,3 +176,53 @@ def test_intuition_loss_is_ln2_when_random_equals_supports():
     thought = model.thought_vector(q, support)
     loss = model.intuition_loss(q, thought, support, torch.tensor([1, 4]))
     assert abs(loss.item() - 0.6931) < 1e-3
+
+
+def test_grpo_trainer_uses_row_supports_and_trains_only_injectnet():
+    from types import SimpleNamespace
+    from collections import defaultdict
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "grpo_attention_tuning"))
+    from collab_rec_grpo import CollabNoiseGRPOTrainer
+
+    model = make_model("text")
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in model.injectnet.parameters():
+        p.requires_grad = True
+    ids, mask, labels = batch()
+    ids, mask, labels = ids[:1].repeat(8, 1), mask[:1].repeat(8, 1), labels[:1].repeat(8, 1)  # 2 groups x 4 generations
+    support = torch.tensor([[0, 1, 2]]).repeat(8, 1)  # (the stock baseline swaps adjacent groups)
+
+    t = CollabNoiseGRPOTrainer.__new__(CollabNoiseGRPOTrainer)
+    t.model = model
+    t.args = SimpleNamespace(device=torch.device("cpu"), past_index=-1)
+    t.is_deepspeed_enabled = False
+    t.accelerator = SimpleNamespace(device=torch.device("cpu"), process_index=0,
+                                    gather_for_metrics=lambda x: x)
+    t.num_generations, t.beta, t.temperature, t.num_iterations = 4, 0.0, 1.0, 1
+    t.epsilon_low, t.epsilon_high = 0.2, 0.28
+    t.reward_funcs, t.reward_processing_classes = [lambda **k: None], [None]
+    t.reward_weights = torch.ones(1)
+    t._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+    t.control = SimpleNamespace(should_evaluate=False)
+
+    torch.manual_seed(0)
+    out = t._generate_and_score_completions({"input_ids": ids, "attention_mask": mask, "labels": labels,
+                                              "support_ids": support})
+    assert model._support_ids is None and torch.equal(out["support_ids"], support)
+    # the thought used for scoring is the one from these supports (row 0 gets no noise)
+    model.set_support_ids(support)
+    ref = model.generate_embs(ids, mask)
+    model.set_support_ids(None)
+    assert torch.allclose(out["original_embeds"][0, 3], ref[0, 3])
+    model.set_support_ids(torch.tensor([[5, 4, 3]]).repeat(8, 1))
+    other = model.generate_embs(ids, mask)
+    model.set_support_ids(None)
+    assert not torch.allclose(out["original_embeds"][0, 3], other[0, 3])
+
+    model.train()
+    loss = t.compute_loss(model, out)
+    loss.backward()
+    assert model._support_ids is None
+    assert model.injectnet.W_q_2.weight.grad is not None and model.injectnet.W_q_2.weight.grad.abs().sum() > 0
+    assert all(p.grad is None for n, p in model.named_parameters() if not n.startswith("injectnet"))
