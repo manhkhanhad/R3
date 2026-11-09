@@ -16,6 +16,7 @@ the ordinary LatentModel path.
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -31,6 +32,33 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
         self.last_margin_loss = None
         self.last_contrastive_enabled = None
         self.last_wider_loss = None
+        # C1: item-prediction head on r. r -> item-embedding space (Qwen3 title embeddings),
+        # CE over the whole catalogue: a dense target-structure objective (every row gets a
+        # gradient; same-next-item users are pulled together through the shared item table).
+        item = getattr(config, "collaborative_item", None) or {}
+        self.item_weight = float(item.get("weight", 0.0))
+        self.item_tau = float(item.get("tau", 0.07))
+        self.last_item_loss = None
+        self.last_item_hit10 = None
+        if item:
+            hidden, dim, n_items = config.hidden_size, int(item["item_dim"]), int(item["n_items"])
+            self.item_head = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, dim))
+            self.register_buffer("item_emb", torch.zeros(n_items, dim, dtype=torch.float16))
+            self.register_buffer("item_row", torch.full((int(item["max_item_id"]) + 1,), -1, dtype=torch.int64))
+
+    def _item_loss(self, r, target_item):
+        """CE of the true next item over the catalogue from r; also Hit@10 of the head."""
+        head_dtype = self.item_head[1].weight.dtype
+        proj = F.normalize(self.item_head(r.to(head_dtype)).float(), dim=-1)
+        logits = proj @ F.normalize(self.item_emb.float(), dim=-1).T / self.item_tau
+        row = self.item_row[target_item.clamp(min=0)]
+        valid = (target_item >= 0) & (row >= 0)
+        if not bool(valid.any()):
+            return r.sum() * 0.0, r.new_zeros(())
+        loss = F.cross_entropy(logits[valid], row[valid])
+        with torch.no_grad():
+            hit = (logits[valid].topk(10, dim=-1).indices == row[valid][:, None]).any(-1).float().mean()
+        return loss, hit
 
     def _margin_loss(self, embeds, thought_idx, pos_nll, labels, attention_mask,
                      position_ids, cache_position, num_logits_to_keep):
@@ -68,6 +96,7 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
         sample_hash=None,
         target_title_features=None,
         target_item_index=None,
+        target_item=None,
         **kwargs,
     ):
         is_training_prefill = (
@@ -123,6 +152,13 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             target_title_features, target_item_index,
         )
 
+        if self.item_weight > 0 and target_item is not None:
+            item_loss, item_hit = self._item_loss(r, target_item)
+        else:
+            item_loss, item_hit = r.sum() * 0.0, None
+        self.last_item_loss = item_loss.detach() if self.item_weight > 0 else None
+        self.last_item_hit10 = item_hit
+
         self.last_ce_loss = ce_loss.detach()
         self.last_margin_loss = margin_loss.detach()
         self.last_user_contrastive_loss = user_loss.detach()
@@ -141,6 +177,7 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             + self.user_contrastive_weight * user_loss
             + self.target_contrastive_weight * target_loss
             + self.cf_contrastive_weight * cf_loss
+            + self.item_weight * item_loss
         )
         # Optional WIDER regulariser on the pooled r (wider_reg.py; generate_embs stored r above).
         # Added before the /grad_accum_steps below, as in MarginLatentModel (no loss_scale needed).
