@@ -20,8 +20,13 @@ def swap_adjacent_blocks(x, k):
     # 转换为二维结构 (n, k)
     x_2d = x.view(-1, k)
     n = x_2d.size(0)
-    # 生成交换索引：每两个相邻行交换
-    indices = torch.arange(n).view(-1, 2).flip(1).reshape(-1)
+    # 生成交换索引：每两个相邻行交换.  With one group per micro-batch (n == 1) or an
+    # odd number of groups there is no partner for the last block; leave it in place.
+    # Callers only use the mean of the result, which a permutation does not change.
+    indices = torch.arange(n, device=x.device)
+    paired = n - n % 2
+    if paired:
+        indices[:paired] = indices[:paired].view(-1, 2).flip(1).reshape(-1)
     # 重新排列并恢复原始形状
     return x_2d[indices].view(original_shape)
 

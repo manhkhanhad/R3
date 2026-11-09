@@ -190,8 +190,8 @@ def test_grpo_trainer_uses_row_supports_and_trains_only_injectnet():
     for p in model.injectnet.parameters():
         p.requires_grad = True
     ids, mask, labels = batch()
-    ids, mask, labels = ids[:1].repeat(8, 1), mask[:1].repeat(8, 1), labels[:1].repeat(8, 1)  # 2 groups x 4 generations
-    support = torch.tensor([[0, 1, 2]]).repeat(8, 1)  # (the stock baseline swaps adjacent groups)
+    ids, mask, labels = ids[:1].repeat(4, 1), mask[:1].repeat(4, 1), labels[:1].repeat(4, 1)  # one group per micro-batch, as in the runs
+    support = torch.tensor([[0, 1, 2]]).repeat(4, 1)
 
     t = CollabNoiseGRPOTrainer.__new__(CollabNoiseGRPOTrainer)
     t.model = model
@@ -215,7 +215,7 @@ def test_grpo_trainer_uses_row_supports_and_trains_only_injectnet():
     ref = model.generate_embs(ids, mask)
     model.set_support_ids(None)
     assert torch.allclose(out["original_embeds"][0, 3], ref[0, 3])
-    model.set_support_ids(torch.tensor([[5, 4, 3]]).repeat(8, 1))
+    model.set_support_ids(torch.tensor([[5, 4, 3]]).repeat(4, 1))
     other = model.generate_embs(ids, mask)
     model.set_support_ids(None)
     assert not torch.allclose(out["original_embeds"][0, 3], other[0, 3])
