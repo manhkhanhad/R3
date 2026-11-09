@@ -29,7 +29,9 @@ def main(pilot_dir, variants="A,B,B_think"):
     methods = {"last-item category": {r: [base[r]["last_item"]] for r in rows},
                "learned classifier": {r: base[r]["classifier_top3"] for r in rows},
                "kNN-50 neighbour vote": {r: base[r]["knn_top3"] for r in rows}}
-    for v in variants.split(","):
+    # python-fire turns "A,B,C" into a tuple; accept both forms.
+    variants = variants.split(",") if isinstance(variants, str) else list(variants)
+    for v in variants:
         path = os.path.join(pilot_dir, f"{v}.jsonl")
         if not os.path.exists(path):
             continue
