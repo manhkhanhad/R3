@@ -98,6 +98,9 @@ def main(
         raise ValueError(f"unknown candidate_mode {candidate_mode}")
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
+    if getattr(model.config, "latent_cf_grounded", None):
+        from cf_grounded_margin import restore_fp32
+        restore_fp32(model, base_model)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
@@ -275,10 +278,15 @@ def main(
     if thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)
-    grounded = getattr(model.config, "latent_grounded_reasoning", None)
+    cf_grounded = getattr(model.config, "latent_cf_grounded", None)
+    grounded = getattr(model.config, "latent_grounded_reasoning", None) or cf_grounded
     if grounded:
         from grounded_reasoning import row_metadata
-        if not bool(model.attention.bank_ready):
+        if cf_grounded:
+            from cf_grounded_margin import eval_donors
+            cf_idx, cf_feat = eval_donors(model, val_dataset.data, os.environ.get("GROUNDING_MODE", "knn"),
+                                          seed=thought_seed)
+        elif not bool(model.attention.bank_ready):
             raise RuntimeError("grounded reasoning checkpoint has no inference bank")
         meta = [row_metadata(val_dataset.data.iloc[i]) for i in range(len(val_dataset.data))]
         slot_mode = os.environ.get("SLOT_MODE", "raw")
@@ -314,6 +322,10 @@ def main(
             rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)
             model.attention.query_user = torch.tensor([m["query_user"] for m in rows], device=device)
+            if cf_grounded:
+                start = idx * batch_size
+                model.attention.donor_idx = cf_idx[start:start + len(encodings)].to(device)
+                model.attention.donor_feat = cf_feat[start:start + len(encodings)].to(device)
             if slot_rows is not None:
                 start = idx * batch_size
                 model.attention.slot_override = slot_rows[start:start + len(encodings)].to(device)

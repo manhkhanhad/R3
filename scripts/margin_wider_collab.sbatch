@@ -17,6 +17,8 @@
 #              + user/target multi-positive InfoNCE (tau 0.1, 0.1/0.1, queue 10k, token-acc gate GATE=0.5).
 #              Eval = 356322 pipeline: ranking, experiment.py interventions raw/mask/mean/shuffle_user,
 #              paired bootstrap, latent geometry, operator trace.
+#   cfg3     : G3 cf_grounded_margin.py: 32 CF-prior donors (history overlap, time-causal, other users),
+#              outcome evidence centred, evidence-swap margin, WIDER on r0. Controls knn off random swap.
 #   grounded : grounded_margin.py: r1 = r0 + s*||r0||*dir(donor evidence), 32 time-causal donors (other
 #              users' r0 + observed next item, Qwen3 item embeddings), margin on r1, WIDER on r1.
 #              Eval: donor controls knn / off / shuffle_outcome and slot interventions (SLOT_MODE on r1)
@@ -86,6 +88,13 @@ if [[ ! -f "$out/config.json" ]]; then
       --item_weight "${ITEM_W:-0}" --item_tau "${ITEM_TAU:-0.07}" --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" \
       --bank_size 10000 --max_user_positives 16 --max_target_positives 16 --num_negatives 256 \
       --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True --eval_sample -1 "${resume[@]}"
+  elif [[ "$method" == cfg3 ]]; then
+    python "$code_root/src/latent/latent_attention_train_cf_grounded_margin.py" "${common[@]}" \
+      --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
+      --topn 32 --init_scale 0.5 --tau_item 0.07 --tau_util "${TAU_UTIL:-0.1}" \
+      --item_weight 0.2 --retrieval_weight 0.1 \
+      --evidence_margin "${EV_MARGIN:-0.2}" --evidence_weight "${EV_WEIGHT:-1.0}" \
+      --slot_bank_rows "${EXTRACT_LIMIT:-10000}" "${resume[@]}"
   else
     python "$code_root/src/latent/latent_attention_train_grounded_margin.py" "${common[@]}" \
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
@@ -133,10 +142,11 @@ if [[ "$method" == infonce ]]; then
     --output "analysis/results/latent_operator_trace/${tag}.json"
 else
   python "$code_root/scripts/latent_rank.py" "$out/slot_bank.pt" "$results/latent_rank.json"
-  for c in ${CONTROLS:-knn off shuffle_outcome}; do GROUNDING_MODE="$c" rank_eval "$c"; done
+  controls="${CONTROLS:-knn off shuffle_outcome}"; [[ "$method" == cfg3 ]] && controls="${CONTROLS:-knn off random swap}"
+  for c in $controls; do GROUNDING_MODE="$c" rank_eval "$c"; done
   for s in ${SLOT_MODES:-mask mean shuffle_user}; do GROUNDING_MODE=knn SLOT_MODE="$s" rank_eval "slot_$s"; done
   others=""
-  for c in ${CONTROLS:-knn off shuffle_outcome}; do if [[ $c != knn ]]; then others+="$c "; fi; done
+  for c in $controls; do if [[ $c != knn ]]; then others+="$c "; fi; done
   for s in ${SLOT_MODES:-mask mean shuffle_user}; do others+="slot_$s "; done
   python "$code_root/scripts/paired_bootstrap_eval.py" "$task_dir" knn $others | tee "$results/paired_bootstrap.txt"
 fi
