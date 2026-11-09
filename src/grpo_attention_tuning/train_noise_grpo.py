@@ -37,6 +37,7 @@ def train(
 
     num_generations: int = 8, # grpo args
     beta: float = 0.01, # KL coefficient
+    kl_anchor: bool = False, # reference log-probs from the reference model's own r (grpo_trainer.py)
     num_iterations: int = 2, # number of iterations
     epsilon: float = 0.2, # clipping value
     epsilon_high: float = 0.28, # 其实这两个一个是high，一个是low. 当没有high的时候，low就是high
@@ -172,6 +173,7 @@ def train(
         trainer_kwargs = dict(calibration_steps=collab_calibration_steps, target_ratio=collab_target_ratio)
     trainer = trainer_class(
         **trainer_kwargs,
+        kl_anchor=kl_anchor,
     # from grpo_trainer import HalfGRPORecTrainer
     # trainer = HalfGRPORecTrainer(
         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,

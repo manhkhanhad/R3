@@ -14,7 +14,9 @@
 
 # R3 stage 2 (noise-GRPO, attention-only, LLM frozen) on a stage-1 checkpoint, any category
 # (CATEGORY, default Toys_and_Games); outputs on scratch, results copied to output_dir/grpo_stage2/<tag>.
-# Known issue (unchanged, stock R3): reference log-probs use the policy's r, so the KL term is ~0.
+# Known issue (stock R3): reference log-probs use the policy's r, so the KL term is ~0.
+#   KL_ANCHOR=1: reference log-probs from the reference model's own (frozen stage-1) r, same
+#   noise -> a real KL trust region (beta = BETA, default 0.01).
 #   VARIANT=collab  (L9B): + collaborative InfoNCE with the L8b queue (NLL gate 25%,
 #                    per-user cap 2, per-target cap 4, dedup cos 0.9), lambda auto-
 #                    calibrated over 20 steps to 30% of the GRPO gradient norm.
@@ -44,6 +46,9 @@ tag="${TAG:?set TAG, e.g. musical_l9b_collab}"
 smoke="${SMOKE:-0}"
 lr="${LR:-1e-5}"
 eval_mode="${EVAL:-full}"
+beta="${BETA:-0.01}"
+kl_args=()
+[[ "${KL_ANCHOR:-0}" == 1 ]] && kl_args=(--kl_anchor True)
 
 case "$variant" in
   collab) collab_args=(--collab True) ;;
@@ -70,7 +75,7 @@ info_file=$(ls ${data}/info/${category}_5_*.txt)
 task_dir="${OUTPUT_ROOT:-/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir}/${category}_R3_grpo_${tag}"
 out="${task_dir}/model"
 mkdir -p "$out"
-echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; eval ${eval_mode}"
+echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; beta ${beta}; kl_anchor ${KL_ANCHOR:-0}; eval ${eval_mode}"
 
 if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
   echo "[$(date --iso-8601=seconds)] GRPO stage 2"
@@ -78,9 +83,9 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
     --category "$category" --base_model "$base_model" --output_dir "$out" \
     --train_file "$train_file" --eval_file "$eval_file" --info_file "$info_file" \
     --num_generations 8 --sample "$sample" --num_epochs 1 \
-    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --beta 0.01 --seed 42 \
+    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --beta "$beta" --seed 42 \
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28 \
-    "${collab_args[@]}"
+    "${collab_args[@]}" "${kl_args[@]}"
 fi
 
 echo "[$(date --iso-8601=seconds)] ranking"

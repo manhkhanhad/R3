@@ -32,8 +32,16 @@ def swap_adjacent_blocks(x, k):
 
 class NoiseGRPORecTrainer(GRPOTrainer):
 
-    def __init__(self, prefix_allowed_tokens_fn, *args, **kwargs) -> None:
+    def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # kl_anchor: the reference log-probs use the REFERENCE model's own latent r (its frozen
+        # stage-1 attention, same noise), as in standard GRPO where pi_ref sees the same input.
+        # Stock R3 fed the reference the policy's embeddings (already holding the policy's r);
+        # with the decoder frozen that made pi_ref == pi_theta, so KL == 0 and no trust region.
+        self.kl_anchor = kl_anchor
+        if kl_anchor and self.beta == 0.0:
+            raise ValueError("kl_anchor needs beta > 0")
+        print(f"GRPO KL: beta={self.beta}, reference r from {'the reference attention (anchor)' if kl_anchor else 'the policy (stock, KL ~ 0)'}", flush=True)
         data_collator = DataCollatorForSeq2Seq(self.processing_class, pad_to_multiple_of=8, return_tensors="pt", padding=True)
         def data_collate_fn(batch):
             new_batch = data_collator(batch)
@@ -148,6 +156,13 @@ class NoiseGRPORecTrainer(GRPOTrainer):
             #     old_per_token_logps = None
             if self.beta == 0.0:
                 ref_per_token_logps = None
+            elif self.kl_anchor:
+                ref = self.accelerator.unwrap_model(self.ref_model)
+                ref_embeds = ref.generate_embs(prompt_completion_ids, prompt_completion_mask)
+                ref_embeds[torch.arange(batch_size), where_thought_ids[:, 1]] += noise.to(ref_embeds.dtype)
+                ref_per_token_logps = self.my_get_per_token_logps(
+                    ref, prompt_completion_ids, ref_embeds, prompt_completion_mask, logits_to_keep
+                )
             else:
                 ref_per_token_logps = self.my_get_per_token_logps(
                     self.ref_model, prompt_completion_ids, original_embeds, prompt_completion_mask, logits_to_keep
