@@ -41,6 +41,7 @@ def train(
     reward_type: str = "noise", # "noise" = stock R3 stage 2; "rank" = beam-search ranking reward (rank_grpo.py)
     attention_fp32: bool = False, # keep the trained pooling attention in fp32 (bf16 rounds away most lr-1e-5 updates)
     rank_penalty: float = 0.5, # rank reward: wrong beam at rank k gets -rank_penalty/log2(k+1)
+    rank_skip_nohit: bool = True, # rank reward: groups without a hit get advantage 0
     num_iterations: int = 2, # number of iterations
     epsilon: float = 0.2, # clipping value
     epsilon_high: float = 0.28, # 其实这两个一个是high，一个是low. 当没有high的时候，low就是high
@@ -183,7 +184,7 @@ def train(
         if micro_batch_size % num_generations:
             raise ValueError("reward_type=rank needs micro_batch_size to be a multiple of num_generations")
         from rank_grpo import RankGRPORecTrainer
-        trainer_class, trainer_kwargs = RankGRPORecTrainer, dict(rank_penalty=rank_penalty)
+        trainer_class, trainer_kwargs = RankGRPORecTrainer, dict(rank_penalty=rank_penalty, skip_nohit=rank_skip_nohit)
     elif reward_type != "noise":
         raise ValueError(f"unknown reward_type {reward_type}")
     trainer = trainer_class(

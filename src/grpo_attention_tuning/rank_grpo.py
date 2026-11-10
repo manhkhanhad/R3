@@ -10,6 +10,9 @@ perplexity.  Here the group is the model's own ranked list:
     -alpha / log2(k + 1)  (a wrong title ranked high is penalised more; MiniOneRec/ReRe-style
     ranking reward, so groups without a hit still give a signal);
   * advantage = (reward - group mean) / (group std + 1e-4)  (standard GRPO);
+    with ``skip_nohit`` (default) a group whose beams all miss the target gets advantage 0:
+    its rewards depend only on rank position, so the gradient would just push down whatever
+    is ranked first and flatten every list (361059/361060 lowered their own hit rate);
   * the loss is the parent's: token-level clipped surrogate on log p(beam | prompt, r) plus
     beta * k3 KL to the reference.  With ``kl_anchor`` the reference scores the beams with
     its own frozen stage-1 r.  No noise is added to r (zeros are passed to the parent).
@@ -38,12 +41,14 @@ def rank_rewards(hits, alpha):
 
 
 class RankGRPORecTrainer(NoiseGRPORecTrainer):
-    def __init__(self, *args, rank_penalty=0.5, gen_max_new_tokens=128, **kwargs):
+    def __init__(self, *args, rank_penalty=0.5, skip_nohit=True, gen_max_new_tokens=128, **kwargs):
         super().__init__(*args, **kwargs)
         self.rank_penalty = float(rank_penalty)
+        self.skip_nohit = bool(skip_nohit)
         self.gen_max_new_tokens = int(gen_max_new_tokens)
         print(f"rank GRPO: G={self.num_generations} beams, reward +1 hit / -{self.rank_penalty}/log2(k+1) miss, "
-              f"beta={self.beta}, kl_anchor={self.kl_anchor}", flush=True)
+              f"beta={self.beta}, kl_anchor={self.kl_anchor}, groups without a hit: "
+              f"{'advantage 0' if self.skip_nohit else 'rank penalty only'}", flush=True)
 
     @torch.no_grad()
     def _beam_search(self, model, prompts):
@@ -107,7 +112,10 @@ class RankGRPORecTrainer(NoiseGRPORecTrainer):
                 hit_rank.append(hits.index(True) + 1)
         rewards = torch.tensor(rewards, device=device, dtype=torch.float32)
         grouped = rewards.view(-1, G)
-        advantages = ((grouped - grouped.mean(1, keepdim=True)) / (grouped.std(1, keepdim=True) + 1e-4)).view(-1)
+        advantages = (grouped - grouped.mean(1, keepdim=True)) / (grouped.std(1, keepdim=True) + 1e-4)
+        if self.skip_nohit:
+            advantages = advantages * torch.tensor(hit_any, device=device).unsqueeze(1)
+        advantages = advantages.view(-1)
 
         prompt_ids = out[:, :P]
         prompt_mask = (prompt_ids != tok.pad_token_id).long()
