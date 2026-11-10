@@ -35,6 +35,9 @@ DATA=$R3/data/$category
 stem=Toys_and_Games_5_2017-1-2018-11
 GEN=$R3/external_rational/results
 RAT_DIR=$SCRATCH/rationale_sft/toys_${RUN_TAG}
+# RAT_PREBUILT: a directory that already holds train/valid/test.json (e.g. src/latent/v2_reasoning.py);
+# the Qwen-bank build step is then skipped.
+RAT_DIR=${RAT_PREBUILT:-$RAT_DIR}
 OUT=$SCRATCH/output_dir/${category}_rationale_sft_${MODE}_${RUN_TAG}
 [[ $HINT == gold ]] && OUT=${OUT}_goldcat
 log() { echo "[$(date -Is)] $*"; }
@@ -48,7 +51,12 @@ cd "$CODE"
 log "host=$(hostname) job=${SLURM_JOB_ID:-local} code=$CODE mode=$MODE hint=$HINT eval='$EVAL_MODES' out=$OUT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-if [[ $MODE != off ]]; then
+if [[ $MODE != off && -n ${RAT_PREBUILT:-} ]]; then
+    for split in train valid test; do
+        [[ -f $RAT_DIR/$split.json ]] || { log "missing $RAT_DIR/$split.json"; exit 1; }
+    done
+    log "using prebuilt rationales in $RAT_DIR"
+elif [[ $MODE != off ]]; then
     declare -A gen=([train]=$GEN/toys_full_qwen35_9b [valid]=$GEN/toys_valid_qwen35_9b [test]=$GEN/toys_test_qwen35_9b)
     for split in train valid test; do
         python src/latent/rationale_text.py build --generations "${gen[$split]}/generation/generations" \
