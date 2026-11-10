@@ -17,6 +17,9 @@
 # Known issue (stock R3): reference log-probs use the policy's r, so the KL term is ~0.
 #   KL_ANCHOR=1: reference log-probs from the reference model's own (frozen stage-1) r, same
 #   noise -> a real KL trust region (beta = BETA, default 0.01).
+#   REWARD=rank: ranking-reward GRPO (rank_grpo.py): group = the model's own top-8 constrained
+#   beam-search titles; reward +1 for the target, -RANK_PENALTY/log2(k+1) for a wrong title at rank k.
+#   ATTN_FP32=1: train the pooling attention in fp32 (in bf16 most lr-1e-5 updates round to zero).
 #   VARIANT=collab  (L9B): + collaborative InfoNCE with the L8b queue (NLL gate 25%,
 #                    per-user cap 2, per-target cap 4, dedup cos 0.9), lambda auto-
 #                    calibrated over 20 steps to 30% of the GRPO gradient norm.
@@ -49,6 +52,9 @@ eval_mode="${EVAL:-full}"
 beta="${BETA:-0.01}"
 kl_args=()
 [[ "${KL_ANCHOR:-0}" == 1 ]] && kl_args=(--kl_anchor True)
+reward="${REWARD:-noise}"
+kl_args+=(--reward_type "$reward" --rank_penalty "${RANK_PENALTY:-0.5}")
+[[ "${ATTN_FP32:-0}" == 1 ]] && kl_args+=(--attention_fp32 True)
 
 case "$variant" in
   collab) collab_args=(--collab True) ;;
@@ -75,7 +81,7 @@ info_file=$(ls ${data}/info/${category}_5_*.txt)
 task_dir="${OUTPUT_ROOT:-/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir}/${category}_R3_grpo_${tag}"
 out="${task_dir}/model"
 mkdir -p "$out"
-echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; beta ${beta}; kl_anchor ${KL_ANCHOR:-0}; eval ${eval_mode}"
+echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; beta ${beta}; kl_anchor ${KL_ANCHOR:-0}; reward ${reward}; attn_fp32 ${ATTN_FP32:-0}; eval ${eval_mode}"
 
 if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
   echo "[$(date --iso-8601=seconds)] GRPO stage 2"

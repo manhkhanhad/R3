@@ -181,8 +181,9 @@ class LatentModel(Qwen2ForCausalLM):
         hidden_states = output_mid['hidden_states']
         input_embs = self.model.embed_tokens(input_ids)
 
+        attn_dtype = next(self.attention.parameters()).dtype  # fp32 when trained in fp32 (attention_fp32)
         reasoning_latent = self.attention(
-            hidden_states=hidden_states[-1], attention_mask=attention_mask,
+            hidden_states=hidden_states[-1].to(attn_dtype), attention_mask=attention_mask,
             thought_id_idx=where_thought_ids[:, 1],
         )
         reasoning_latent = self.project_reasoning_latent(reasoning_latent)

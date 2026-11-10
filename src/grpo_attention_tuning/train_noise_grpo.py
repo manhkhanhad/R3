@@ -38,6 +38,9 @@ def train(
     num_generations: int = 8, # grpo args
     beta: float = 0.01, # KL coefficient
     kl_anchor: bool = False, # reference log-probs from the reference model's own r (grpo_trainer.py)
+    reward_type: str = "noise", # "noise" = stock R3 stage 2; "rank" = beam-search ranking reward (rank_grpo.py)
+    attention_fp32: bool = False, # keep the trained pooling attention in fp32 (bf16 rounds away most lr-1e-5 updates)
+    rank_penalty: float = 0.5, # rank reward: wrong beam at rank k gets -rank_penalty/log2(k+1)
     num_iterations: int = 2, # number of iterations
     epsilon: float = 0.2, # clipping value
     epsilon_high: float = 0.28, # 其实这两个一个是high，一个是low. 当没有high的时候，low就是high
@@ -97,6 +100,9 @@ def train(
         torch_dtype=torch.bfloat16,
     )
     model.attention.end_k = end_k
+    if attention_fp32:
+        model.attention.float()
+        print("pooling attention kept in fp32", flush=True)
     for param in model.model.parameters():
         param.requires_grad = False
     for param in model.lm_head.parameters():
@@ -171,6 +177,15 @@ def train(
                       collab_prefill_batch_size, "cuda")
         trainer_class = CollaborativeGRPOTrainer
         trainer_kwargs = dict(calibration_steps=collab_calibration_steps, target_ratio=collab_target_ratio)
+    if reward_type == "rank":
+        if collab:
+            raise ValueError("reward_type=rank is not combined with collab")
+        if micro_batch_size % num_generations:
+            raise ValueError("reward_type=rank needs micro_batch_size to be a multiple of num_generations")
+        from rank_grpo import RankGRPORecTrainer
+        trainer_class, trainer_kwargs = RankGRPORecTrainer, dict(rank_penalty=rank_penalty)
+    elif reward_type != "noise":
+        raise ValueError(f"unknown reward_type {reward_type}")
     trainer = trainer_class(
         **trainer_kwargs,
         kl_anchor=kl_anchor,
