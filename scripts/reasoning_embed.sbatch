@@ -16,5 +16,9 @@ OUT=${OUT:-/common/home/users/m/mk.ngohuu.2024/research/R3/output_dir/reasoning_
 ENV=/common/home/users/m/mk.ngohuu.2024/.conda/envs/racer
 export LD_LIBRARY_PATH=$ENV/lib:${LD_LIBRARY_PATH:-} HF_HUB_OFFLINE=1
 echo "[$(date -Is)] host=$(hostname) job=${SLURM_JOB_ID:-local} out=$OUT"
-"$ENV/bin/python" -u "$CODE/src/reasoning_geometry/embed.py" --out "$OUT"
+if [[ -n ${PARTS:-} ]]; then
+    "$ENV/bin/python" -u "$CODE/src/reasoning_geometry/embed_parts.py" --parts "$PARTS" --out "$OUT"
+else
+    "$ENV/bin/python" -u "$CODE/src/reasoning_geometry/embed.py" --out "$OUT"
+fi
 echo "[$(date -Is)] done"
