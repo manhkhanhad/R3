@@ -15,7 +15,7 @@ from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 
 from experiment_tracking import init_training_run, move_callback_to_end, wandb_report_to
 from latent_attention_train_grounded_margin import CATEGORY_TEXT, GroundedLogCallback
-from motive_contrastive import MotiveDataset, MotiveMarginLatentModel, build_positive_index
+from motive_contrastive import HingeLabelCollator, MotiveDataset, MotiveMarginLatentModel, build_positive_index
 
 
 class MotivePhaseCallback(transformers.TrainerCallback):
@@ -94,6 +94,9 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
+    if margin_mode not in ("fixed", "self", "novel"):
+        raise ValueError(f"unknown margin_mode {margin_mode}")
+    MotiveDataset.novel_hinge = margin_mode == "novel"
     train_data = MotiveDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
                                sample=sample, seed=seed, category=text, K=K)
     val_data = MotiveDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
@@ -116,8 +119,6 @@ def train(
     model.grad_accum_steps = grad_accum
     model.config.loss_type = "ce"
     model.margin, model.margin_weight = margin, margin_weight
-    if margin_mode not in ("fixed", "self"):
-        raise ValueError(f"unknown margin_mode {margin_mode}")
     model.margin_mode = margin_mode
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
@@ -126,7 +127,7 @@ def train(
     print(f"MWC-M: margin={margin} x{margin_weight}; WIDER={getattr(model.config, 'latent_wider', None)}; "
           f"margin_mode={margin_mode}, margin_epochs={margin_epochs}; motive={config.latent_motive}", flush=True)
 
-    collator = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    collator = HingeLabelCollator(DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True))
     trainer = transformers.Trainer(
         model=model, train_dataset=hf_train, eval_dataset=hf_val, processing_class=tokenizer,
         args=transformers.TrainingArguments(

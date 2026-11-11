@@ -113,7 +113,14 @@ def build_positive_index(train_file, item_emb, threshold=0.8, cap=64, seed=0, wi
 
 
 class MotiveDataset(LatentRDataset):
-    """Plain R3 rows plus the train-row id (CSV row position) for the bank."""
+    """Plain R3 rows plus the train-row id (CSV row position) for the bank.
+
+    With ``novel_hinge = True`` (MWC-M4) a row also carries ``hinge_labels``: its labels with every
+    target token that the history can supply (``novel_token_mask``) set to -100, so the history-swap
+    hinge only charges the latent for what the history does not contain.
+    """
+
+    novel_hinge = False
 
     def pre(self, idx):
         example = super().pre(idx)
@@ -121,7 +128,63 @@ class MotiveDataset(LatentRDataset):
             row = self.data.iloc[idx]
             example["row_id"] = int(self.data.index[idx])
             example["is_copy"] = int(copy_row(row))   # logging only (never enters a loss)
+            if self.novel_hinge:
+                titles = row["history_item_title"]
+                titles = ast.literal_eval(titles) if isinstance(titles, str) else titles
+                novel = novel_token_mask(self.tokenizer.tokenizer, example["labels"], titles)
+                example["hinge_labels"] = [l if keep else -100 for l, keep in zip(example["labels"], novel)]
         return example
+
+
+def _token_key(tokenizer, token_id):
+    """Normalised surface form of one token ('' for special / punctuation-only tokens)."""
+    if token_id in set(tokenizer.all_special_ids):
+        return ""
+    s = tokenizer.decode([token_id]).strip().lower()
+    return s if any(ch.isalnum() for ch in s) else ""
+
+
+def novel_token_mask(tokenizer, labels, history_titles):
+    """True for target-label tokens the history titles cannot supply (MWC-M4).
+
+    A target token is copyable when its normalised surface form occurs among the tokens of any
+    history title (tokenised both with and without a leading space, since BPE splits differ);
+    special and punctuation-only tokens count as copyable.  Prompt positions (label -100) are False.
+    """
+    history = set()
+    for title in history_titles:
+        for text in (str(title), " " + str(title), '"' + str(title) + '"'):
+            for tid in tokenizer.encode(text, add_special_tokens=False):
+                key = _token_key(tokenizer, tid)
+                if key:
+                    history.add(key)
+    out = []
+    for label in labels:
+        if label == -100:
+            out.append(False)
+            continue
+        key = _token_key(tokenizer, label)
+        out.append(bool(key) and key not in history)
+    return out
+
+
+class HingeLabelCollator:
+    """Wrap a DataCollatorForSeq2Seq: pad ``hinge_labels`` exactly like ``labels`` (same side, -100)."""
+
+    def __init__(self, base):
+        self.base = base
+
+    def __call__(self, features):
+        hinge = [f.pop("hinge_labels") for f in features] if "hinge_labels" in features[0] else None
+        batch = self.base(features)
+        if hinge is not None:
+            length = batch["labels"].size(1)
+            left = getattr(self.base.tokenizer, "padding_side", "right") == "left"
+            padded = [([-100] * (length - len(h)) + h) if left else (h + [-100] * (length - len(h))) for h in hinge]
+            batch["hinge_labels"] = torch.tensor(padded, dtype=torch.long)
+            if not torch.equal(batch["hinge_labels"] != -100, (batch["hinge_labels"] != -100) & (batch["labels"] != -100)):
+                raise RuntimeError("hinge_labels misaligned with labels after padding")
+        return batch
 
 
 def copy_row(row):
@@ -217,7 +280,8 @@ class MotiveMarginLatentModel(LatentModel):
         loss = torch.stack(losses).mean() if losses else anchors.sum() * 0.0
         return loss, {k: torch.tensor(float(np.mean(v))) for k, v in stats.items() if v}
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, row_id=None, is_copy=None, **kwargs):
+    def forward(self, input_ids=None, attention_mask=None, labels=None, row_id=None, is_copy=None,
+                hinge_labels=None, **kwargs):
         kwargs.pop("num_items_in_batch", None)
         training_prefill = (self.training and labels is not None and input_ids is not None
                             and attention_mask is not None and kwargs.get("inputs_embeds") is None)
@@ -236,9 +300,30 @@ class MotiveMarginLatentModel(LatentModel):
             perm = torch.roll(rows, 1)
             neg = embeds.clone()
             neg[rows, thought_idx] = embeds[perm, thought_idx[perm]].detach()
-            neg_nll = self._per_example_nll(self._decode(neg, attention_mask).logits, labels)
+            neg_logits = self._decode(neg, attention_mask).logits
+            neg_nll = self._per_example_nll(neg_logits, labels)
             hinge = F.relu(self.margin + pos_nll - neg_nll)
-            if self.margin_mode == "self":
+            if self.margin_mode == "novel":
+                # MWC-M4: hinge on the NLL of novel target tokens only (tokens the history cannot supply);
+                # rows without novel tokens contribute nothing (averaged over the whole micro-batch).
+                if hinge_labels is None:
+                    raise ValueError("margin_mode=novel needs hinge_labels from the dataset")
+                has_novel = (hinge_labels[:, 1:] != -100).any(dim=1)
+                pos_novel = self._per_example_nll(pos_out.logits, hinge_labels)
+                neg_novel = self._per_example_nll(neg_logits, hinge_labels)
+                hinge = F.relu(self.margin + pos_novel - neg_novel) * has_novel.float()
+                weight = has_novel.float()
+                margin_loss = hinge.sum() / hinge.numel()
+                with torch.no_grad():
+                    target_tokens = (labels[:, 1:] != -100).sum(1).clamp(min=1).float()
+                    hinge_stats["novel_token_share"] = ((hinge_labels[:, 1:] != -100).sum(1) / target_tokens).mean()
+                    if is_copy is not None:
+                        c = is_copy.bool()
+                        if bool(c.any()):
+                            hinge_stats["novel_token_share_copy"] = ((hinge_labels[c][:, 1:] != -100).sum(1) / target_tokens[c]).mean()
+                        if bool((~c).any()):
+                            hinge_stats["novel_token_share_noncopy"] = ((hinge_labels[~c][:, 1:] != -100).sum(1) / target_tokens[~c]).mean()
+            elif self.margin_mode == "self":
                 # Demand latent dependence only where the history alone does not determine the target.
                 weight = (1.0 - torch.exp(-neg_nll.detach().float())).clamp(0.0, 1.0)
                 margin_loss = (weight * hinge).mean()
