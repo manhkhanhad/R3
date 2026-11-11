@@ -80,7 +80,9 @@ class SelfAttentionLayer(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor,
                 thought_id_idx) -> torch.Tensor:
-        # hidden_states = hidden_states.to(torch.float32)
+        # run in the layer's own dtype (fp32 after GRPO with --attention_fp32; callers such as
+        # experiment.py pass bf16 hidden states directly)
+        hidden_states = hidden_states.to(self.query.weight.dtype)
         attention_mask = SelfAttentionLayer.mask_to_weights(attention_mask.clone(), thought_id_idx, self.end_k)
 
         cos, sin = self.rope(
