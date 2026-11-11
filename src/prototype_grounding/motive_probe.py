@@ -83,7 +83,7 @@ def main():
                     within_sim.append(float(C[r_][mine[similar]].mean()))
                 if (~similar).any():
                     within_dis.append(float(C[r_][mine[~similar]].mean()))
-    m = lambda v: float(np.mean(v)) if v else None
+    m = lambda v: float(np.mean(v)) if len(v) else None
     out = {
         "checkpoint": args.checkpoint, "rows": n, "threshold": args.t, "k": args.k,
         "cross_user": {"anchors": len(same_c), "cos_same_item": m(same_c), "cos_random_other": m(rand_c),
