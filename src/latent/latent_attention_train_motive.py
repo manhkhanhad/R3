@@ -62,6 +62,9 @@ def train(
     max_positives: int = 16,
     num_negatives: int = 256,
     projection_dim: int = 256,
+    within_mode: str = "user",
+    sasrec_file: str = "",
+    sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
     wandb_run_name: str = None,
 ):
@@ -77,8 +80,9 @@ def train(
     text = CATEGORY_TEXT[category]
 
     item_emb = torch.load(item_emb_file, map_location="cpu", weights_only=False)["embeddings"].float()
-    index, items, users, stats = build_positive_index(train_file, item_emb, within_threshold)
-    print(f"motive positives (threshold {within_threshold}): {stats}", flush=True)
+    index, items, users, stats = build_positive_index(train_file, item_emb, within_threshold, within_mode=within_mode,
+                                                      sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
+    print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
     train_data = MotiveDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
                                sample=sample, seed=seed, category=text, K=K)
@@ -93,7 +97,8 @@ def train(
     config.latent_motive = {"bank_size": int(stats["rows"]), "projection_dim": projection_dim,
                             "temperature": temperature, "weight": motive_weight,
                             "max_positives": max_positives, "num_negatives": num_negatives,
-                            "within_threshold": within_threshold, "warmup_epochs": warmup_epochs}
+                            "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
+                            "within_mode": within_mode, "sasrec_k": sasrec_k}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)

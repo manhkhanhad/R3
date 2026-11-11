@@ -35,12 +35,41 @@ from margin_loss_attention import MarginLatentModel
 from reasoning_dataset import LatentRDataset
 
 
-def build_positive_index(train_file, item_emb, threshold=0.8, cap=64, seed=0):
+def sasrec_neighbours(seq_emb, users, k=20, pool=400, chunk=2048):
+    """Top-k SASRec sequence neighbours per row: other users only, at most one row per user."""
+    z = F.normalize(seq_emb.float(), dim=-1)
+    user_codes = torch.as_tensor(pd.factorize(users)[0])
+    out = []
+    for s in range(0, len(z), chunk):
+        sims = z[s:s + chunk] @ z.T
+        rows = torch.arange(s, min(len(z), s + chunk))
+        sims[(user_codes[rows][:, None] == user_codes[None, :])] = -2.0     # drops self and own user
+        cand = sims.topk(pool, dim=1).indices.numpy()
+        for r_, cs in enumerate(cand):
+            seen, picked = set(), []
+            for j in cs:
+                cu = int(user_codes[j])
+                if cu in seen:
+                    continue
+                seen.add(cu)
+                picked.append(int(j))
+                if len(picked) == k:
+                    break
+            out.append(picked)
+    return out
+
+
+def build_positive_index(train_file, item_emb, threshold=0.8, cap=64, seed=0, within_mode="user",
+                         sasrec_file=None, sasrec_k=20):
     """CSR positive lists per train row: (cross_ptr, cross_idx, within_ptr, within_idx).
 
-    cross: other users' rows with the same next item; within: the same user's other rows whose
-    next item is identical or has title cosine >= threshold.  Lists are capped at ``cap``
-    (random subset) to bound memory; sampling at train time draws from the filled ones.
+    cross: other users' rows with the same next item.
+    within (``within_mode="user"``, MWC-M): the same user's other rows whose next item is identical
+    or has title cosine >= threshold.
+    within (``within_mode="sasrec"``, MWC-M2): among the top-``sasrec_k`` SASRec sequence neighbours
+    (other users, one row per user), those whose next item is identical or has title cosine
+    >= threshold; all same-user rows are neutral.
+    Lists are capped at ``cap`` (random subset); sampling at train time draws from filled rows.
     """
     train = pd.read_csv(train_file)
     items = train["item_id"].astype(np.int64).values
@@ -51,10 +80,18 @@ def build_positive_index(train_file, item_emb, threshold=0.8, cap=64, seed=0):
     for i, (it, u) in enumerate(zip(items, users)):
         by_item[it].append(i)
         by_user[u].append(i)
+    neighbours = None
+    if within_mode == "sasrec":
+        seq = torch.load(sasrec_file, map_location="cpu", weights_only=False)
+        if seq["sizes"]["train"] != len(train):
+            raise ValueError("SASRec sequence file does not match the train split")
+        neighbours = sasrec_neighbours(seq["embeddings"][: len(train)], users, sasrec_k)
+    elif within_mode != "user":
+        raise ValueError(f"unknown within_mode {within_mode}")
     cross, within = [], []
     for i in range(len(train)):
         c = [j for j in by_item[items[i]] if users[j] != users[i]]
-        rows = [j for j in by_user[users[i]] if j != i]
+        rows = neighbours[i] if neighbours is not None else [j for j in by_user[users[i]] if j != i]
         if rows:
             sim = (emb[items[rows]] @ emb[items[i]]).numpy()
             w = [j for j, s in zip(rows, sim) if items[j] == items[i] or s >= threshold]
