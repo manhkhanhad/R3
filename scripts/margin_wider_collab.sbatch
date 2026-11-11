@@ -17,6 +17,8 @@
 #              + user/target multi-positive InfoNCE (tau 0.1, 0.1/0.1, queue 10k, token-acc gate GATE=0.5).
 #              Eval = 356322 pipeline: ranking, experiment.py interventions raw/mask/mean/shuffle_user,
 #              paired bootstrap, latent geometry, operator trace.
+#   motive   : MWC-M motive_contrastive.py: epoch 1 margin+WIDER, then same-motive InfoNCE (cross-user same item;
+#              same user similar item, title cos >= WITHIN_T); eval as infonce.
 #   cfg3     : G3 cf_grounded_margin.py: 32 CF-prior donors (history overlap, time-causal, other users),
 #              outcome evidence centred, evidence-swap margin, WIDER on r0. Controls knn off random swap.
 #   grounded : grounded_margin.py: r1 = r0 + s*||r0||*dir(donor evidence), 32 time-causal donors (other
@@ -88,6 +90,11 @@ if [[ ! -f "$out/config.json" ]]; then
       --item_weight "${ITEM_W:-0}" --item_tau "${ITEM_TAU:-0.07}" --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" \
       --bank_size 10000 --max_user_positives 16 --max_target_positives 16 --num_negatives 256 \
       --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True --eval_sample -1 "${resume[@]}"
+  elif [[ "$method" == motive ]]; then
+    python "$code_root/src/latent/latent_attention_train_motive.py" "${common[@]}" \
+      --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
+      --warmup_epochs 1 --motive_weight "${MOTIVE_W:-0.1}" --temperature 0.1 \
+      --within_threshold "${WITHIN_T:-0.8}" --max_positives 16 --num_negatives 256 --projection_dim 256 "${resume[@]}"
   elif [[ "$method" == cfg3 ]]; then
     python "$code_root/src/latent/latent_attention_train_cf_grounded_margin.py" "${common[@]}" \
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
@@ -119,7 +126,7 @@ rank_eval() {  # $1 = output label; env passed through
   cp "$task_dir/eval_$1.json" "$results/"
 }
 
-if [[ "$method" == infonce ]]; then
+if [[ "$method" == infonce || "$method" == motive ]]; then
   rank_eval raw
   interv_dir="analysis/results/intervention/${tag}"
   echo "[$(date --iso-8601=seconds)] r interventions: extract train latents (mean / shuffle bank)"
