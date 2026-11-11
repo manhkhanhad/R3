@@ -73,6 +73,7 @@ def train(
     within_mode: str = "user",
     margin_mode: str = "fixed",
     margin_epochs: int = -1,
+    adaptive_alpha: float = 0.5,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -94,7 +95,7 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
-    if margin_mode not in ("fixed", "self", "novel"):
+    if margin_mode not in ("fixed", "self", "novel", "adaptive"):
         raise ValueError(f"unknown margin_mode {margin_mode}")
     MotiveDataset.novel_hinge = margin_mode == "novel"
     train_data = MotiveDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
@@ -112,7 +113,7 @@ def train(
                             "max_positives": max_positives, "num_negatives": num_negatives,
                             "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
-                            "margin_mode": margin_mode, "margin_epochs": margin_epochs}
+                            "margin_mode": margin_mode, "margin_epochs": margin_epochs, "adaptive_alpha": adaptive_alpha}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -120,12 +121,13 @@ def train(
     model.config.loss_type = "ce"
     model.margin, model.margin_weight = margin, margin_weight
     model.margin_mode = margin_mode
+    model.adaptive_alpha = adaptive_alpha
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")["input_ids"][0] == len(tokenizer) - 1
     print(f"MWC-M: margin={margin} x{margin_weight}; WIDER={getattr(model.config, 'latent_wider', None)}; "
-          f"margin_mode={margin_mode}, margin_epochs={margin_epochs}; motive={config.latent_motive}", flush=True)
+          f"margin_mode={margin_mode}, margin_epochs={margin_epochs}, adaptive_alpha={adaptive_alpha}; motive={config.latent_motive}", flush=True)
 
     collator = HingeLabelCollator(DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True))
     trainer = transformers.Trainer(

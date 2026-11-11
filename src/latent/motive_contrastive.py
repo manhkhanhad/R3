@@ -222,6 +222,7 @@ class MotiveMarginLatentModel(LatentModel):
         # MWC-M3a: "self" weights each row's hinge by stopgrad(1 - exp(-NLL(y | x, r_other))), i.e. by how
         # badly the history alone (another row's latent in the slot) predicts the target.
         self.margin_mode = "fixed"
+        self.adaptive_alpha = 0.5   # MWC-M6: m_i = min(m, alpha * NLL(y | x, r_other))
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
         self.contrastive_enabled = False
@@ -300,10 +301,34 @@ class MotiveMarginLatentModel(LatentModel):
             perm = torch.roll(rows, 1)
             neg = embeds.clone()
             neg[rows, thought_idx] = embeds[perm, thought_idx[perm]].detach()
-            neg_logits = self._decode(neg, attention_mask).logits
-            neg_nll = self._per_example_nll(neg_logits, labels)
+            if self.margin_mode == "adaptive":
+                # MWC-M6: one-sided (the gap may only be created by improving the own latent) and an
+                # adaptive margin m_i = min(m, alpha * sg(NLL(y|x, r_other))): no gap is demanded where the
+                # history alone already explains the target.
+                with torch.no_grad():
+                    neg_logits = self._decode(neg, attention_mask).logits
+                    neg_nll = self._per_example_nll(neg_logits, labels).float()
+            else:
+                neg_logits = self._decode(neg, attention_mask).logits
+                neg_nll = self._per_example_nll(neg_logits, labels)
             hinge = F.relu(self.margin + pos_nll - neg_nll)
-            if self.margin_mode == "novel":
+            if self.margin_mode == "adaptive":
+                margin_i = torch.clamp(self.adaptive_alpha * neg_nll, max=self.margin)
+                hinge = F.relu(margin_i + pos_nll - neg_nll)
+                weight = (hinge > 0).float()
+                margin_loss = hinge.mean()
+                with torch.no_grad():
+                    hinge_stats["adaptive_margin"] = margin_i.mean()
+                    hinge_stats["hinge_active"] = weight.mean()
+                    if is_copy is not None:
+                        c = is_copy.bool()
+                        if bool(c.any()):
+                            hinge_stats["adaptive_margin_copy"] = margin_i[c].mean()
+                            hinge_stats["hinge_active_copy"] = weight[c].mean()
+                        if bool((~c).any()):
+                            hinge_stats["adaptive_margin_noncopy"] = margin_i[~c].mean()
+                            hinge_stats["hinge_active_noncopy"] = weight[~c].mean()
+            elif self.margin_mode == "novel":
                 # MWC-M4: hinge on the NLL of novel target tokens only (tokens the history cannot supply);
                 # rows without novel tokens contribute nothing (averaged over the whole micro-batch).
                 if hinge_labels is None:
