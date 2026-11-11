@@ -20,6 +20,7 @@
 #   REWARD=rank: ranking-reward GRPO (rank_grpo.py): group = the model's own top-8 constrained
 #   beam-search titles; reward +1 for the target, -RANK_PENALTY/log2(k+1) for a wrong title at rank k;
 #   RANK_SKIP_NOHIT (default True): groups whose beams all miss the target get advantage 0.
+#   RESUME_FROM=<checkpoint dir>: resume training (model, optimizer, scheduler, step) from a saved checkpoint.
 #   ATTN_FP32=1: train the pooling attention in fp32 (in bf16 most lr-1e-5 updates round to zero).
 #   VARIANT=collab  (L9B): + collaborative InfoNCE with the L8b queue (NLL gate 25%,
 #                    per-user cap 2, per-target cap 4, dedup cos 0.9), lambda auto-
@@ -56,6 +57,7 @@ kl_args=()
 reward="${REWARD:-noise}"
 kl_args+=(--reward_type "$reward" --rank_penalty "${RANK_PENALTY:-0.5}" --rank_skip_nohit "${RANK_SKIP_NOHIT:-True}")
 [[ "${ATTN_FP32:-0}" == 1 ]] && kl_args+=(--attention_fp32 True)
+[[ -n "${RESUME_FROM:-}" ]] && kl_args+=(--resume_from_checkpoint "$RESUME_FROM")
 
 case "$variant" in
   collab) collab_args=(--collab True) ;;
