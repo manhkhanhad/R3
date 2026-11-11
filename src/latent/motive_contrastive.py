@@ -118,8 +118,25 @@ class MotiveDataset(LatentRDataset):
     def pre(self, idx):
         example = super().pre(idx)
         if not self.test:
+            row = self.data.iloc[idx]
             example["row_id"] = int(self.data.index[idx])
+            example["is_copy"] = int(copy_row(row))   # logging only (never enters a loss)
         return example
+
+
+def copy_row(row):
+    """Same-day near-copy of a history item (same brand, title Jaccard >= 0.3); used for logging only."""
+    import re
+    norm = lambda s: str(s).strip(' "\n')
+    tok = lambda t: set(re.findall(r"\w+", norm(t).lower()))
+    brand = lambda t: (norm(t).split(" ") or [""])[0].lower()
+    times = ast.literal_eval(row["history_timestamp"]) if isinstance(row["history_timestamp"], str) else row["history_timestamp"]
+    titles = ast.literal_eval(row["history_item_title"]) if isinstance(row["history_item_title"], str) else row["history_item_title"]
+    if not times or int(row["timestamp"]) != max(int(t) for t in times):
+        return False
+    target = row["item_title"]
+    return any(brand(target) == brand(t) and len(tok(target) & tok(t)) / max(1, len(tok(target) | tok(t))) >= 0.3
+               for t in titles)
 
 
 class MotiveMarginLatentModel(LatentModel):
@@ -139,6 +156,11 @@ class MotiveMarginLatentModel(LatentModel):
         self.max_positives = int(spec.get("max_positives", 16))
         self.num_negatives = int(spec.get("num_negatives", 256))
         self.margin, self.margin_weight = 0.2, 1.0
+        # MWC-M3a: "self" weights each row's hinge by stopgrad(1 - exp(-NLL(y | x, r_other))), i.e. by how
+        # badly the history alone (another row's latent in the slot) predicts the target.
+        self.margin_mode = "fixed"
+        # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
+        self.margin_active = True
         self.contrastive_enabled = False
         self.grad_accum_steps = 1
         self.last_losses = {}
@@ -195,7 +217,7 @@ class MotiveMarginLatentModel(LatentModel):
         loss = torch.stack(losses).mean() if losses else anchors.sum() * 0.0
         return loss, {k: torch.tensor(float(np.mean(v))) for k, v in stats.items() if v}
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, row_id=None, **kwargs):
+    def forward(self, input_ids=None, attention_mask=None, labels=None, row_id=None, is_copy=None, **kwargs):
         kwargs.pop("num_items_in_batch", None)
         training_prefill = (self.training and labels is not None and input_ids is not None
                             and attention_mask is not None and kwargs.get("inputs_embeds") is None)
@@ -209,12 +231,29 @@ class MotiveMarginLatentModel(LatentModel):
         pos_nll = self._per_example_nll(pos_out.logits, labels)
         ce = pos_nll.mean()
         margin_loss = ce.new_zeros(())
-        if input_ids.size(0) > 1 and self.margin_weight > 0:
+        hinge_stats = {}
+        if input_ids.size(0) > 1 and self.margin_weight > 0 and self.margin_active:
             perm = torch.roll(rows, 1)
             neg = embeds.clone()
             neg[rows, thought_idx] = embeds[perm, thought_idx[perm]].detach()
             neg_nll = self._per_example_nll(self._decode(neg, attention_mask).logits, labels)
-            margin_loss = F.relu(self.margin + pos_nll - neg_nll).mean()
+            hinge = F.relu(self.margin + pos_nll - neg_nll)
+            if self.margin_mode == "self":
+                # Demand latent dependence only where the history alone does not determine the target.
+                weight = (1.0 - torch.exp(-neg_nll.detach().float())).clamp(0.0, 1.0)
+                margin_loss = (weight * hinge).mean()
+            else:
+                weight = torch.ones_like(hinge)
+                margin_loss = hinge.mean()
+            with torch.no_grad():
+                hinge_stats["hinge_weight"] = weight.mean()
+                if is_copy is not None:
+                    c = is_copy.bool()
+                    hinge_stats["copy_rate"] = c.float().mean()
+                    if bool(c.any()):
+                        hinge_stats["hinge_weight_copy"] = weight[c].mean()
+                    if bool((~c).any()):
+                        hinge_stats["hinge_weight_noncopy"] = weight[~c].mean()
         loss = ce + self.margin_weight * margin_loss
         wider = None
         if getattr(self.config, "latent_wider", None):
@@ -234,6 +273,7 @@ class MotiveMarginLatentModel(LatentModel):
         self.last_losses = {
             "ce_loss": ce.detach(), "margin_loss": margin_loss.detach(), "motive_loss": motive.detach(),
             "contrastive_enabled": torch.tensor(float(self.contrastive_enabled)),
+            "margin_active": torch.tensor(float(self.margin_active)), **hinge_stats,
             "bank_filled": self.bank_filled.float().mean(),
             **({"wider_loss": wider.detach()} if wider is not None else {}), **mstats,
         }

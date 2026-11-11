@@ -95,6 +95,7 @@ if [[ ! -f "$out/config.json" ]]; then
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
       --warmup_epochs 1 --motive_weight "${MOTIVE_W:-0.1}" --temperature 0.1 \
       --within_threshold "${WITHIN_T:-0.8}" --within_mode "${WITHIN_MODE:-user}" --sasrec_k "${SASREC_K:-20}" \
+      --margin_mode "${MARGIN_MODE:-fixed}" --margin_epochs "${MARGIN_EPOCHS:--1}" \
       --sasrec_file "${SASREC_FILE:-output_dir/sasrec_latent/prep/Toys_sasrec_sequence.pt}" --max_positives 16 --num_negatives 256 --projection_dim 256 "${resume[@]}"
   elif [[ "$method" == cfg3 ]]; then
     python "$code_root/src/latent/latent_attention_train_cf_grounded_margin.py" "${common[@]}" \

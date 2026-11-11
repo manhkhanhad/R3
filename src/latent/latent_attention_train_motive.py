@@ -21,9 +21,11 @@ from motive_contrastive import MotiveDataset, MotiveMarginLatentModel, build_pos
 class MotivePhaseCallback(transformers.TrainerCallback):
     """Contrastive term on once ``warmup_epochs`` epochs have elapsed (from state.epoch, so resumes land right)."""
 
-    def __init__(self, warmup_epochs):
+    def __init__(self, warmup_epochs, margin_epochs=-1):
         self.warmup_epochs = warmup_epochs
+        self.margin_epochs = margin_epochs   # > 0: history-swap hinge only for the first margin_epochs (MWC-M3b)
         self.announced = None
+        self.margin_announced = None
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
         target = model.module if hasattr(model, "module") else model
@@ -33,6 +35,12 @@ class MotivePhaseCallback(transformers.TrainerCallback):
             print(f"[phase] epoch {state.epoch or 0.0:.3f}: motive InfoNCE {'ON' if enabled else 'off'}; "
                   f"bank filled {float(target.bank_filled.float().mean()):.3f}", flush=True)
             self.announced = enabled
+        if self.margin_epochs > 0:
+            active = (state.epoch or 0.0) < self.margin_epochs - 1e-6
+            target.margin_active = active
+            if active != self.margin_announced:
+                print(f"[phase] epoch {state.epoch or 0.0:.3f}: history-swap hinge {'ON' if active else 'off'}", flush=True)
+                self.margin_announced = active
 
 
 def train(
@@ -63,6 +71,8 @@ def train(
     num_negatives: int = 256,
     projection_dim: int = 256,
     within_mode: str = "user",
+    margin_mode: str = "fixed",
+    margin_epochs: int = -1,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -98,19 +108,23 @@ def train(
                             "temperature": temperature, "weight": motive_weight,
                             "max_positives": max_positives, "num_negatives": num_negatives,
                             "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
-                            "within_mode": within_mode, "sasrec_k": sasrec_k}
+                            "within_mode": within_mode, "sasrec_k": sasrec_k,
+                            "margin_mode": margin_mode, "margin_epochs": margin_epochs}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
     model.grad_accum_steps = grad_accum
     model.config.loss_type = "ce"
     model.margin, model.margin_weight = margin, margin_weight
+    if margin_mode not in ("fixed", "self"):
+        raise ValueError(f"unknown margin_mode {margin_mode}")
+    model.margin_mode = margin_mode
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
     assert tokenizer("<|Thought|>")["input_ids"][0] == len(tokenizer) - 1
     print(f"MWC-M: margin={margin} x{margin_weight}; WIDER={getattr(model.config, 'latent_wider', None)}; "
-          f"motive={config.latent_motive}", flush=True)
+          f"margin_mode={margin_mode}, margin_epochs={margin_epochs}; motive={config.latent_motive}", flush=True)
 
     collator = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
     trainer = transformers.Trainer(
@@ -123,7 +137,7 @@ def train(
             load_best_model_at_end=False, report_to=wandb_report_to(), remove_unused_columns=False,
         ),
         data_collator=collator,
-        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs)],
+        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs)],
     )
     move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False
