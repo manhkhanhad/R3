@@ -132,6 +132,9 @@ def train(
     diffusion_chain_prob: float = 0.5,
     diffusion_width: int = 2048,
     diffusion_depth: int = 3,
+    # recursive refinement (recursive_refine.py, diffusion_mode=recursive): TRM-style cycles
+    recursive_cycles: int = 8,
+    recursive_n_latent: int = 6,
 
 ):
 
@@ -174,6 +177,8 @@ def train(
             "diffusion_weight": diffusion_weight,
             "diffusion_ce_weight": diffusion_ce_weight,
             "diffusion_chain_prob": diffusion_chain_prob,
+            "recursive_cycles": recursive_cycles,
+            "recursive_n_latent": recursive_n_latent,
             "learning_rate": learning_rate,
         },
     )
@@ -292,7 +297,7 @@ def train(
         if category_injection is not None or use_side_info or use_category_alignment or category_text_file \
                 or thought_source or latent_only or candidate_kind or pool_history_only:
             raise ValueError("diffusion refinement is a plain-R3 variant; do not combine with other options")
-        if diffusion_mode not in ("diffusion", "regress"):
+        if diffusion_mode not in ("diffusion", "regress", "recursive"):
             raise ValueError(f"unknown diffusion_mode {diffusion_mode}")
         from transformers import AutoConfig
         from diffusion_refine import DiffusionRefineModel
@@ -306,6 +311,11 @@ def train(
             "width": diffusion_width, "depth": diffusion_depth, "eval_seed": 0,
         }
         model_class = DiffusionRefineModel
+        if diffusion_mode == "recursive":
+            from recursive_refine import RecursiveRefineModel
+            model_config.latent_diffusion_refine.update(
+                {"cycles": recursive_cycles, "n_latent": recursive_n_latent})
+            model_class = RecursiveRefineModel
         model_kwargs["config"] = model_config
 
     candidates = None
@@ -395,11 +405,14 @@ def train(
     if diffusion_prep is not None:
         # fp32 denoiser, freshly initialised (HF leaves missing weights uninitialised)
         model.diffuse.float()
-        for m in model.diffuse.modules():
-            if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm)):
-                m.reset_parameters()
-        with torch.no_grad():
-            model.diffuse.gain.fill_(30.0)
+        if hasattr(model, "reset_refiner"):
+            model.reset_refiner()
+        else:
+            for m in model.diffuse.modules():
+                if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm)):
+                    m.reset_parameters()
+            with torch.no_grad():
+                model.diffuse.gain.fill_(30.0)
         model.set_item_table(diffusion_prep["embeddings"], diffusion_prep["valid"])
         print("diffusion refinement:", model.config.latent_diffusion_refine)
     if use_side_info:

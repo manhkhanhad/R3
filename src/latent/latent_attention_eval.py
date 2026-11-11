@@ -52,6 +52,8 @@ def main(
     # diffusion-refined thought (diffusion_refine.py): raw (sampled x0_hat) | oracle
     # (target item's vector) | shuffle (another user's x0_hat) | mean (mean x0_hat)
     diffusion_eval_mode: str = "raw",
+    # recursive refinement (recursive_refine.py): number of cycles at test time (default: as trained)
+    recursive_cycles: int = None,
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -86,6 +88,9 @@ def main(
     if diffusion_spec:
         from diffusion_refine import DiffusionRefineModel
         model_class = DiffusionRefineModel
+        if diffusion_spec.get("mode") == "recursive":
+            from recursive_refine import RecursiveRefineModel
+            model_class = RecursiveRefineModel
     elif diffusion_eval_mode != "raw":
         raise ValueError("diffusion_eval_mode needs a diffusion-refine checkpoint")
     if diffusion_eval_mode not in ("raw", "oracle", "shuffle", "mean"):
@@ -269,6 +274,10 @@ def main(
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)
     x0_bank = None
+    if recursive_cycles is not None:
+        if not (diffusion_spec and diffusion_spec.get("mode") == "recursive"):
+            raise ValueError("recursive_cycles needs a recursive-refine checkpoint")
+        model.eval_cycles = int(recursive_cycles)
     if diffusion_spec:
         x0_bank = diffusion_x0_bank(model, tokenizer, new_encodings, val_dataset.data, diffusion_spec,
                                     diffusion_eval_mode, thought_seed, result_json_data)
@@ -405,7 +414,7 @@ def diffusion_x0_bank(model, tokenizer, batches, frame, spec, mode, seed, result
     model.set_item_table(prep["embeddings"], prep["valid"])
     rows = torch.as_tensor(frame.index.to_numpy())
     target = prep["target"]["test"][rows].long()
-    parts = []
+    parts, cycle_parts = [], []
     for encodings in batches:
         width = max(len(e["input_ids"]) for e in encodings)
         ids = torch.tensor([[tokenizer.pad_token_id] * (width - len(e["input_ids"])) + e["input_ids"] for e in encodings])
@@ -413,6 +422,8 @@ def diffusion_x0_bank(model, tokenizer, batches, frame, spec, mode, seed, result
         with torch.no_grad():
             model.generate_embs(ids.to(device), mask.to(device))
         parts.append(model.last_x0.float().cpu())
+        if getattr(model, "last_cycles", None) is not None:
+            cycle_parts.append(model.last_cycles.float().cpu())
     bank = torch.cat(parts)
     item_x0, item_valid = model.item_x0.cpu(), model.item_valid.cpu()
     seen = prep["seen_target"]["test"][rows].bool()
@@ -420,6 +431,12 @@ def diffusion_x0_bank(model, tokenizer, batches, frame, spec, mode, seed, result
                "seen": nearest_item_metrics(bank[seen], target[seen], item_x0, item_valid),
                "unseen": nearest_item_metrics(bank[~seen], target[~seen], item_x0, item_valid),
                "n_unseen": int((~seen).sum())}
+    if cycle_parts:
+        # recursive refinement: nearest-item readout of the answer after every cycle
+        cycles = torch.cat(cycle_parts, dim=1)
+        readout["per_cycle"] = [nearest_item_metrics(c, target, item_x0, item_valid) for c in cycles]
+        readout["per_cycle_step_change"] = [0.0] + [
+            (cycles[i] - cycles[i - 1]).norm(dim=-1).mean().item() for i in range(1, len(cycles))]
     print("diffusion x0 retrieval:", json.dumps(readout))
     out_dir = os.path.dirname(os.path.abspath(result_path))
     with open(os.path.join(out_dir, "diffusion_x0.json"), "w") as f:
