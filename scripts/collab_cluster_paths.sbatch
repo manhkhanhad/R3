@@ -20,7 +20,7 @@ mode="${1:-full}"
 gen_batch=8; (( is_3090 )) && gen_batch=4
 rows=3000; tune=1000
 [[ "$mode" == smoke ]] && { rows=16; tune=8; }
-out=${results}/cluster_paths/${mode}
+out=${results}/cluster_paths/${PATHS_TAG:-$mode}
 (
   cd src/prototype_grounding
   python cluster_paths_decode.py --cluster_model "$cluster_oracle" --r3_model "$v1" --rows "$rows" --topk 5 \

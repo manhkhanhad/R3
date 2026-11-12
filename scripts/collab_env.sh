@@ -24,7 +24,7 @@ v1=${scratch}/output_dir/Musical_Instruments_v1/latent
 v1_valid_preds=${results}/eval/v1_valid_predictions
 tables=${data}/info/collab_reasoning
 build_tag="${BUILD_TAG:-full}"
-cluster_oracle=/common/home/users/m/mk.ngohuu.2024/research/R3/output_dir/Musical_Instruments_R3_side_oracle_cfcluster150/latent
+cluster_oracle=${scratch}/output_dir/Musical_Instruments_R3_side_oracle_cfcluster150/latent
 
 gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n '1p' || true)"
 is_3090=0; [[ "$gpu_name" == *"3090"* ]] && is_3090=1

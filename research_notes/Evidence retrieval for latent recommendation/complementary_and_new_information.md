@@ -46,6 +46,7 @@ No published recommender work I found trains a second model only on the first mo
 The strongest documented gains on hard rows come from two inputs: **item text and semantics** (cold and long-tail items) and **similar users retrieved via LLM embeddings of history** (long-tail users). LLM-ESR gives the clearest per-group numbers, on Amazon Beauty with SASRec: tail items H@10 0.087 → 0.226, tail users 0.427 → 0.558. Recformer reports cold-item gains on Amazon **Instruments**. Cross-domain methods need overlapped users. LLM-generated pseudo cross-domain items (LLMCDSR) are the proposed fix for non-overlapped users, but come with hallucination risk. Intent and multi-interest methods help sparsity on aggregate, but give no per-hard-user evidence.
 
 ### Cited Findings
+
 - **LLM-ESR** (NeurIPS 2024, arXiv 2405.20646, verified).
   - Method: dual-view (LLM semantic + CF) item embeddings, plus retrieval-augmented self-distillation from the top-N similar users. Each user's history is turned into text, encoded by an LLM, and neighbours are found by cosine similarity; N = 10 is best.
   - Data: Yelp, Fashion and Beauty. Fashion has 4,722 items and **avg seq length 3.82**, similar to the user's 4.4. Beauty has avg length 7.57.
