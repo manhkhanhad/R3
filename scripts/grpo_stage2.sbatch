@@ -112,9 +112,13 @@ log_dir="analysis/logs/R3_grpo_${tag}"
 result_dir="analysis/results/intervention/${tag}"
 mkdir -p "$log_dir" "$result_dir"
 echo "[$(date --iso-8601=seconds)] train-latent extraction and geometry"
+if [[ -f "analysis/evidence/${category}/${tag}/train/thoughts.pt" && "${REEXTRACT:-0}" != 1 ]]; then
+  echo "[$(date --iso-8601=seconds)] train latents already extracted; skipping (REEXTRACT=1 to redo)"
+else
 python "$code/src/prototype_grounding/experiment.py" extract \
   --split train --batch-size 32 --checkpoint "$out" --tag "$tag" --category "$category" \
   >"$log_dir/extract_train.log" 2>&1
+fi
 python "$code/src/prototype_grounding/experiment.py" latent-distribution \
   --checkpoint "$out" --tag "$tag" --category "$category" --component r \
   >"$log_dir/latent_distribution.log" 2>&1

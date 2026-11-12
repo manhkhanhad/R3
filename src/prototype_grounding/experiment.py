@@ -1236,9 +1236,10 @@ def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(np.arange(1, 21), exact_counts[:20], color="tab:purple")
-    ax.set(title="Frequency of the 20 most common exact latent templates (stored precision)",
-           xlabel="template frequency rank", ylabel="training examples", xticks=np.arange(1, 21))
+    k = min(20, len(exact_counts))  # a collapsed latent can have fewer than 20 distinct templates
+    ax.bar(np.arange(1, k + 1), exact_counts[:k], color="tab:purple")
+    ax.set(title=f"Frequency of the {k} most common exact latent templates (stored precision)",
+           xlabel="template frequency rank", ylabel="training examples", xticks=np.arange(1, k + 1))
     fig.tight_layout()
     fig.savefig(fig_dir / f"{prefix}latent_template_frequency.png", dpi=180)
     plt.close(fig)
