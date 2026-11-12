@@ -72,8 +72,11 @@ if [[ $HINT == gold ]]; then
     hint_args=(--hint_dir "$RAT_DIR" --hint_mode gold)
 fi
 
-if [[ -f $OUT/model.safetensors ]]; then
-    log "model exists, skipping training"
+# TRAINING_DONE marks a finished run (the best model is saved in place during training, so
+# model.safetensors alone does not mean training finished). Older runs without the marker but with a
+# promoted final model can set SKIP_TRAINING=1.
+if [[ -f $OUT/TRAINING_DONE || ${SKIP_TRAINING:-0} == 1 ]]; then
+    log "training finished already, skipping training"
 else
     log "training"
     python -u src/latent/rationale_sft_train.py --category $category \

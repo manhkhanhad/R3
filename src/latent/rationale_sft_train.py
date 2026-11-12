@@ -6,6 +6,7 @@ Only the <|Thought|> latent is gone; mode=off is the latent-free control, mode=o
 row's own rationale. One GPU.
 """
 
+import json
 import os
 import sys
 
@@ -16,7 +17,41 @@ sys.path.insert(0, os.path.dirname(current_dir))
 import fire
 import torch
 import transformers
-from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, EarlyStoppingCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, TrainerCallback
+
+
+class BestModelCallback(TrainerCallback):
+    """Keep ONE copy of the model: overwrite <output_dir> only when eval_loss improves; early stopping.
+
+    Replaces HF checkpointing (which keeps best + latest and writes the new checkpoint before deleting
+    the old one). No optimizer/scheduler state is saved, so training cannot resume mid-run; a restart
+    retrains from the start. TRAINING_DONE is written by train() when training has finished.
+    """
+
+    def __init__(self, model, tokenizer, output_dir, patience=1):
+        self.model, self.tokenizer, self.output_dir, self.patience = model, tokenizer, output_dir, patience
+        self.best, self.bad = float("inf"), 0
+        self.history = []
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        loss = (metrics or {}).get("eval_loss")
+        if loss is None:
+            return
+        self.history.append({"epoch": state.epoch, "eval_loss": loss})
+        if loss < self.best:
+            self.best, self.bad = loss, 0
+            self.model.config.use_cache = True
+            self.model.save_pretrained(self.output_dir)   # overwrites the previous best in place
+            self.tokenizer.save_pretrained(self.output_dir)
+            self.model.config.use_cache = False
+            print(f"[best-model] epoch {state.epoch:.2f}: eval_loss {loss:.4f} -> saved to {self.output_dir}", flush=True)
+        else:
+            self.bad += 1
+            print(f"[best-model] epoch {state.epoch:.2f}: eval_loss {loss:.4f} (best {self.best:.4f}), "
+                  f"patience {self.bad}/{self.patience}", flush=True)
+            if self.bad >= self.patience:
+                control.should_training_stop = True
+        return control
 
 from experiment_tracking import init_training_run, wandb_report_to
 from rationale_sft_dataset import RationaleSFTDataset
@@ -87,6 +122,11 @@ def train(
     print(f"train sequence length: median {lengths[len(lengths) // 2]}, max {lengths[-1]}, "
           f"truncated at {cutoff_len}: {sum(l >= cutoff_len for l in lengths)}", flush=True)
 
+    os.makedirs(output_dir, exist_ok=True)
+    stale = os.path.join(output_dir, "TRAINING_DONE")
+    if os.path.exists(stale):
+        os.remove(stale)
+    best_cb = BestModelCallback(model, tokenizer, output_dir, patience=1)
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
@@ -104,22 +144,18 @@ def train(
             logging_steps=1,
             optim="adamw_torch",
             eval_strategy="epoch",
-            save_strategy="epoch",
-            save_total_limit=1,
-            save_only_model=True,
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
+            save_strategy="no",               # BestModelCallback keeps the single best copy instead
             report_to=wandb_report_to(),
             remove_unused_columns=False,
             seed=seed,
         ),
         data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
+        callbacks=[best_cb],
     )
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-    model.config.use_cache = True
-    model.save_pretrained(output_dir)   # best checkpoint (load_best_model_at_end)
-    tokenizer.save_pretrained(output_dir)
+    # the best model is already in output_dir (saved by BestModelCallback); record completion
+    with open(os.path.join(output_dir, "TRAINING_DONE"), "w") as handle:
+        json.dump({"best_eval_loss": best_cb.best, "evals": best_cb.history}, handle, indent=1)
 
 
 if __name__ == "__main__":
