@@ -25,7 +25,6 @@ def tiny(**spec):
     torch.manual_seed(0)
     model = LaRecLatentModel(config)
     model.head.reset(0)
-    model.reset_alignment()
     with torch.no_grad():
         model.head.down.weight.normal_(0, 0.1)  # non-trivial head for the tests
     model.set_teacher_states(torch.randn(20, K, HIDDEN), torch.tensor([True] * 19 + [False]))
@@ -80,8 +79,16 @@ def test_aux_losses_only_in_training_and_reach_the_head():
 
 def test_step_alignment_prefers_matching_teacher_state():
     model = tiny(negatives=7)
-    student = model.teacher_states[[0, 1]].clone()
-    assert model.step_alignment(student, torch.tensor([0, 1])) < model.step_alignment(student, torch.tensor([1, 0]))
+    latents = model.teacher_states[[0, 1]].float()
+    assert model.step_alignment(latents, torch.tensor([0, 1])) < model.step_alignment(latents, torch.tensor([1, 0]))
+
+
+def test_step_alignment_sums_over_steps():
+    # a perfectly wrong latent (uniform similarity) costs about K * log(negatives + 1)
+    model = tiny(negatives=7)
+    latents = torch.randn(2, K, HIDDEN)
+    loss = model.step_alignment(latents, torch.tensor([0, 1]))
+    assert loss > 0.5 * K * torch.log(torch.tensor(8.0))
 
 
 def test_swap_gives_each_row_the_next_rows_chain():
@@ -128,15 +135,60 @@ def test_cot_parsing_and_leak_filter():
     assert redact(["A D'Addario EJ45 set."], target, ["D'Addario EJ16"]) == ["A D'Addario set."]
 
 
-def test_anisotropic_teacher_states_are_standardised_and_learnable():
+def test_unit_cot_extraction(tmp_path):
+    from unit_cot import main as unit_main, unit_steps
+    unit = {"evidence": [{"statement": "Bought a Baby Einstein toy"}, {"statement": "Then a piano"}],
+            "interpretation": "Likes the brand", "recommendation": "More musical toys"}
+    assert unit_steps({"rationales": [unit]}) == [
+        "Bought a Baby Einstein toy. Then a piano.", "Likes the brand.", "More musical toys."]
+    assert unit_steps({"rationales": []}) is None
+    assert unit_steps(None) is None
+    # two units concatenate per component
+    two = {"rationales": [unit, {"evidence": [{"statement": "Also a puzzle"}],
+                                 "interpretation": "Patient child", "recommendation": "Puzzles"}]}
+    assert unit_steps(two)[0].endswith("Also a puzzle.") and unit_steps(two)[2] == "More musical toys. Puzzles."
+
+    gen = tmp_path / "generations"
+    gen.mkdir()
+    rows = [{"history_id": "T:train:0", "status": "ok", "parsed": {"rationales": [unit]}},
+            {"history_id": "T:train:1", "status": "error", "parsed": None},
+            {"history_id": "T:train:2", "status": "ok", "parsed": {"rationales": []}}]
+    import json as js
+    for i, r in enumerate(rows):
+        (gen / f"{i:06d}.json").write_text(js.dumps(r))
+    (gen / "config.json").write_text("{}")  # non-numbered files are ignored
+    csv = tmp_path / "train.csv"
+    pd.DataFrame({"history_item_title": [str(["A"])] * 4}).to_csv(csv, index=False)
+    out = tmp_path / "cot.json"
+    unit_main(str(gen), str(csv), str(out))
+    spec = js.loads(out.read_text())
+    assert spec["k"] == 3 and spec["prompt_mode"] == "unit" and len(spec["steps"]) == 4
+    assert spec["steps"][0] is not None and spec["steps"][1] is None
+    assert spec["steps"][2] is None and spec["steps"][3] is None  # no file for row 3
+
+
+def test_unit_encode_row_uses_labels():
+    from teacher_states import encode_row
+
+    class Tok:
+        def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True):
+            assert "bought next" in msgs[1]["content"] and "Evidence" in msgs[1]["content"]
+            return "P|"
+
+        def __call__(self, text, add_special_tokens=False):
+            class R: pass
+            r = R(); r.input_ids = list(range(len(text.split()))); return r
+
+    ids, spans = encode_row(Tok(), ["A"], None, ["e1 e2", "i1", "r1"], mode="unit")
+    assert len(spans) == 3 and spans[0][0] >= 1 and spans[-1][1] == len(ids) - 1
+    assert all(a <= b for a, b in spans)
+
+
+def test_narrower_teacher_gets_a_linear_align_head():
     model = tiny(negatives=7)
-    shared = torch.randn(HIDDEN) * 50  # a dominant common direction, as in final-layer states
-    raw = shared + torch.randn(20, K, HIDDEN)
-    model.set_teacher_states(raw, torch.ones(20, dtype=torch.bool))
-    t = model.teacher_states.float()
-    cos = torch.nn.functional.cosine_similarity(t[0], t[1], dim=-1).abs().mean()
-    assert cos < 0.5  # raw rows would have cosine ~1
-    model.reset_alignment()
-    model.train()
-    student = (shared + raw[[0, 1]] - shared).clone()  # the student carries the same shared direction
-    assert model.step_alignment(student, torch.tensor([0, 1])) < model.step_alignment(student, torch.tensor([1, 0]))
+    model.set_teacher_states(torch.randn(20, K, 16), torch.ones(20, dtype=torch.bool))
+    assert model.align_head is not None and model.align_head.out_features == 16
+    latents = torch.randn(2, K, HIDDEN, requires_grad=True)
+    loss = model.step_alignment(latents, torch.tensor([0, 1]))
+    loss.backward()
+    assert model.align_head.weight.grad.abs().sum() > 0 and latents.grad.abs().sum() > 0

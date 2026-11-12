@@ -18,12 +18,15 @@
 # L = CE + alpha*InfoNCE(step states, teacher states) + gamma*direction loss.
 # Then constrained-beam ranking on the test set, and with each user's latent chain swapped
 # for another user's (first 2,000 rows).
-# Usage: sbatch scripts/larec_train.sbatch [full|smoke] [k] [alpha] [gamma]
+# Usage: sbatch scripts/larec_train.sbatch [full|smoke] [k] [alpha] [gamma] [tag] [pool]
+# tag names the variant: v2 = paper-literal L_SA on z_k, losses summed over steps (2026-10-28)
+# pool: which teacher states to use, mean (default; larec_cot.sbatch with pool=mean) or last
 source scripts/collab_env.sh
-mode="${1:-full}"; k="${2:-6}"; alpha="${3:-1.0}"; gamma="${4:-1.0}"
+mode="${1:-full}"; k="${2:-6}"; alpha="${3:-1.0}"; gamma="${4:-1.0}"; tag="${5:-v2}"; pool="${6:-mean}"
 source scripts/distill_paths.sh "$mode"
 states=${distill_root}/larec_${mode}_k${k}/train_states.pt
-name=larec_k${k}_a${alpha}_g${gamma}
+[[ "$pool" == mean ]] && states=${distill_root}/larec_${mode}_k${k}/train_states_mean.pt
+name=larec${tag}_${pool}_k${k}_a${alpha}_g${gamma}
 
 export WANDB_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(4))')"
 export WANDB_NAME="R3_${name}_${mode}"

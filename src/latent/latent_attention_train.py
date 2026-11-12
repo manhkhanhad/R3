@@ -86,6 +86,7 @@ def train(
     larec_gamma: float = 1.0,  # process-direction alignment weight
     larec_tau: float = 0.1,
     larec_negatives: int = 255,
+    larec_standardize: bool = True,  # standardise teacher states per step/dimension at load
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
     save_total_limit: int = 5,
 
@@ -273,7 +274,8 @@ def train(
         model_config = AutoConfig.from_pretrained(base_model)
         model_config.latent_larec = {
             "k": larec_k, "alpha": larec_alpha, "gamma": larec_gamma, "tau": larec_tau,
-            "negatives": larec_negatives, "states": os.path.abspath(larec_states),
+            "negatives": larec_negatives, "standardize_teacher": larec_standardize,
+            "states": os.path.abspath(larec_states),
         }
         model_class = LaRecLatentModel
         model_kwargs["config"] = model_config
@@ -288,7 +290,6 @@ def train(
     model.attention.end_k = end_k
     if use_larec:
         model.head.reset(seed)
-        model.reset_alignment()
         model.set_teacher_states(larec_teacher["states"], larec_teacher["valid"])
     if use_rationale:
         model.config.latent_rationale = {"dir": os.path.abspath(rationale_dir), "mode": rationale_mode}
