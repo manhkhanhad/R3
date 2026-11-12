@@ -223,6 +223,9 @@ class MotiveMarginLatentModel(LatentModel):
         # badly the history alone (another row's latent in the slot) predicts the target.
         self.margin_mode = "fixed"
         self.adaptive_alpha = 0.5   # MWC-M6: m_i = min(m, alpha * NLL(y | x, r_other))
+        self.selfnorm_ema = None     # M3a-n: running mean of u (re-initialised from the first batch after a resume)
+        self.selfnorm_momentum = 0.99
+        self.selfnorm_cap = 2.0
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
         self.contrastive_enabled = False
@@ -352,6 +355,18 @@ class MotiveMarginLatentModel(LatentModel):
                 # Demand latent dependence only where the history alone does not determine the target.
                 weight = (1.0 - torch.exp(-neg_nll.detach().float())).clamp(0.0, 1.0)
                 margin_loss = (weight * hinge).mean()
+            elif self.margin_mode == "selfnorm":
+                # M3a-n: the M3a signal u = 1 - exp(-NLL(y|x, r_other)) made *relative*: w = min(cap, u / EMA(mean u)).
+                # Mean weight stays ~1 all through training (total hinge pressure as in MWC-M); pressure moves from
+                # rows the history already explains to rows it does not.  (M3a's absolute weight decayed with CE.)
+                u = (1.0 - torch.exp(-neg_nll.detach().float())).clamp(0.0, 1.0)
+                batch_mean = float(u.mean())
+                if self.selfnorm_ema is None:
+                    self.selfnorm_ema = batch_mean
+                weight = torch.clamp(u / max(self.selfnorm_ema, 1e-6), max=self.selfnorm_cap)
+                margin_loss = (weight * hinge).mean()
+                self.selfnorm_ema = self.selfnorm_momentum * self.selfnorm_ema + (1 - self.selfnorm_momentum) * batch_mean
+                hinge_stats["selfnorm_ema"] = torch.tensor(self.selfnorm_ema)
             else:
                 weight = torch.ones_like(hinge)
                 margin_loss = hinge.mean()
