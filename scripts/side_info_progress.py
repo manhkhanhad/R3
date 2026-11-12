@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 
-VARIANTS = ["oracle_raw", "oracle_token", "null_raw", "text_control", "sasrec_raw", "plain_token"]
+VARIANTS = ["oracle_raw", "oracle_token", "null_raw", "text_control", "sasrec_raw", "plain_token", "oracle_cfitem", "oracle_cfcluster", "oracle_cfcluster150"]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # checkpoints live in scratch, or in the repo output_dir for runs moved there when scratch was full
 OUTPUT_ROOTS = ["/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir", os.path.join(ROOT, "output_dir")]

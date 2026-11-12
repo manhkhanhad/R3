@@ -4,3 +4,4 @@ data/
 analysis/
 run_logs/
 wandb
+external_rational/results/

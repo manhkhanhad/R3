@@ -77,7 +77,16 @@ def train(
     margin: float = 0.2,
     margin_weight: float = 1.0,
     wandb_run_name: str = None,
+    gradient_checkpointing: bool = False,
+    eval_sample: int = None,
+    early_stopping_patience: int = 1,
+    load_best_model_at_end: bool = True,
+    save_only_model: bool = False,
 ):
+    if margin_weight > 0 and micro_batch_size < 2:
+        raise ValueError("margin training requires micro_batch_size >= 2; accumulation does not create shuffle donors")
+    if batch_size % micro_batch_size:
+        raise ValueError("batch_size must be divisible by micro_batch_size")
 
     init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant"}
@@ -129,7 +138,7 @@ def train(
     ##############################################################################
 
     train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K)
-    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K)
+    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample if eval_sample is None else eval_sample, category=category, K=K)
 
     print("LOAD DATA FINISHED")
 
@@ -164,7 +173,9 @@ def train(
             save_strategy="epoch",
             output_dir=output_dir,
             save_total_limit=1,
-            load_best_model_at_end=True,
+            load_best_model_at_end=load_best_model_at_end,
+            save_only_model=save_only_model,
+            gradient_checkpointing=gradient_checkpointing,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
@@ -173,10 +184,8 @@ def train(
         data_collator=DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
-        callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=1),
-            MarginLossLogCallback(),
-        ],
+        callbacks=([EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
+                   if early_stopping_patience > 0 else []) + [MarginLossLogCallback()],
     )
     model.config.use_cache = False
 

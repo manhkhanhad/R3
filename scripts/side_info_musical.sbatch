@@ -15,7 +15,7 @@
 
 # Decoder-insensitivity side-information tests (analysis/document/decoder_insensitivity_to_latent.md).
 # Usage: sbatch --job-name=R3_side_<variant> scripts/side_info_musical.sbatch <variant> [full|smoke]
-# variants: oracle_raw oracle_token null_raw text_control sasrec_raw plain_token
+# variants: oracle_raw oracle_token null_raw text_control sasrec_raw plain_token oracle_cfitem oracle_cfcluster
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -41,6 +41,10 @@ eval_flags=()
 case "$variant" in
   oracle_raw)   train_flags=(--side_info_kind oracle_category --side_info_file "$cat_file") ;;
   oracle_token) train_flags=(--side_info_kind oracle_category --side_info_file "$cat_file" --side_token_scale True) ;;
+  # CF oracles (ceiling comparison with the category oracle); tables from src/latent/build_sasrec_oracle_tables.py
+  oracle_cfitem)    train_flags=(--side_info_kind oracle_category --side_info_file ${data}/info/Musical_Instruments_sasrec_item.pt) ;;
+  oracle_cfcluster) train_flags=(--side_info_kind oracle_category --side_info_file ${data}/info/Musical_Instruments_sasrec_cluster412.pt) ;;
+  oracle_cfcluster150) train_flags=(--side_info_kind oracle_category --side_info_file ${data}/info/Musical_Instruments_sasrec_cluster150.pt) ;;  # entropy-matched to the category oracle
   null_raw)     train_flags=(--side_info_kind random_category --side_info_file "$cat_file") ;;
   sasrec_raw)   train_flags=(--side_info_kind sasrec_sequence --side_info_file "$sasrec") ;;
   plain_token)  train_flags=(--side_info_kind none --side_token_scale True) ;;

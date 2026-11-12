@@ -21,7 +21,8 @@ import torch
 import torch.nn.functional as F
 import transformers
 from datasets import Dataset as HFDataset
-from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
+from layers import LatentModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -29,6 +30,7 @@ from collaborative_contrastive_attention import CollaborativeContrastiveLatentMo
 from experiment_tracking import init_training_run, move_callback_to_end, wandb_report_to
 from projected_correction_training_utils import CATEGORY_TEXT, NeighborLogCallback, TimedDataset, TwoRateTrainer, build_bank
 from projected_neighbor_refinement import ProjectedNeighborRefinementLayer
+from outcome_memory import OutcomeMemoryDataset, OutcomeMemoryLayer
 
 
 class PairedCorrectionModel(CollaborativeContrastiveLatentModel):
@@ -57,7 +59,8 @@ class PairedCorrectionModel(CollaborativeContrastiveLatentModel):
         layer = self.attention
         if self.pair_step % 2 == 0:
             return layer.bank_mean.to(raw).expand_as(raw)
-        eligible = layer.bank_time[None, :] < times.to(layer.bank_time.device)[:, None]
+        eligible = (layer.eligible(len(raw)) if isinstance(layer, OutcomeMemoryLayer) else
+                    layer.bank_time[None, :] < times.to(layer.bank_time.device)[:, None])
         random_score = torch.rand(eligible.shape, device=eligible.device).masked_fill(~eligible, -1)
         idx = random_score.argmax(dim=1)
         sampled = layer.bank_raw[idx].to(raw)
@@ -65,13 +68,17 @@ class PairedCorrectionModel(CollaborativeContrastiveLatentModel):
                            layer.bank_mean.to(raw).expand_as(raw))
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, query_time=None,
-                inputs_embeds=None, **kwargs):
+                inputs_embeds=None, query_user=None, **kwargs):
         layer = self.attention
         if not isinstance(layer, ProjectedNeighborRefinementLayer):
             raise TypeError("PairedCorrectionModel requires projected neighbour refinement")
+        previous_time = layer.query_time
+        previous_user = getattr(layer, "query_user", None)
         layer.query_time = query_time
+        if isinstance(layer, OutcomeMemoryLayer):
+            layer.query_user = query_user
         try:
-            if not self.training or labels is None or input_ids is None or inputs_embeds is not None:
+            if not self.training or labels is None or input_ids is None or inputs_embeds is not None or self.pair_weight == 0:
                 return super().forward(input_ids=input_ids, attention_mask=attention_mask,
                                        labels=labels, inputs_embeds=inputs_embeds, **kwargs)
             if query_time is None:
@@ -103,7 +110,9 @@ class PairedCorrectionModel(CollaborativeContrastiveLatentModel):
                 attentions=own.attentions,
             )
         finally:
-            layer.query_time = None
+            layer.query_time = previous_time
+            if isinstance(layer, OutcomeMemoryLayer):
+                layer.query_user = previous_user
 
 
 class PairedCorrectionLogCallback(NeighborLogCallback):
@@ -123,7 +132,11 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
           seed: int = 42, sample: int = -1, eval_sample: int = -1,
           batch_size: int = 128, micro_batch_size: int = 4, num_epochs: int = 1,
           learning_rate: float = 5e-5, module_learning_rate: float = 5e-4,
-          cutoff_len: int = 512, gradient_checkpointing: bool = False):
+          cutoff_len: int = 512, gradient_checkpointing: bool = False,
+          outcome_grounded: bool = False, memory_value_mode: str = "outcome",
+          retrieval_space: str = "auto"):
+    if memory_value_mode not in {"outcome", "latent_only", "shuffle_outcome"}:
+        raise ValueError("unknown memory_value_mode")
     if batch_size % micro_batch_size:
         raise ValueError("batch_size must be divisible by micro_batch_size")
     if not 0 <= pair_weight or pair_margin < 0:
@@ -131,8 +144,18 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
     init_training_run(dataset=category, config={"base_model": base_model,
                                                 "output_dir": output_dir, "dataset": category})
     transformers.set_seed(seed)
-    model = PairedCorrectionModel.from_pretrained(base_model, torch_dtype=torch.bfloat16)
-    source_user, source_target = model.user_projection, model.target_projection
+    source_config = AutoConfig.from_pretrained(base_model)
+    collaborative = getattr(source_config, "collaborative_contrastive", None) or {}
+    if retrieval_space == "auto":
+        retrieval_space = "projected" if collaborative else "history"
+    if retrieval_space not in {"history", "projected"}:
+        raise ValueError("retrieval_space must be auto, history, or projected")
+    if not collaborative and (not outcome_grounded or pair_weight != 0 or retrieval_space != "history"):
+        raise ValueError("plain/margin sources require outcome_grounded, history retrieval, and pair_weight=0")
+    model_class = PairedCorrectionModel if collaborative else LatentModel
+    model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16)
+    source_user = getattr(model, "user_projection", None)
+    source_target = getattr(model, "target_projection", None)
     with open(os.path.join(bank_dir, "summary.json"), encoding="utf-8") as stream:
         bank_summary = json.load(stream)
     def sha256(path):
@@ -143,7 +166,7 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
         return digest.hexdigest()
 
     if sha256(os.path.join(base_model, "model.safetensors")) != bank_summary.get("checkpoint_sha256"):
-        raise ValueError("train bank and Attempt-10 checkpoint have different model hashes")
+        raise ValueError("train bank and source checkpoint have different model hashes")
     if bank_summary.get("split") != "train" or sha256(train_file) != bank_summary.get("split_sha256"):
         raise ValueError("retrieval bank must match the training split")
     raw = torch.load(os.path.join(bank_dir, "thoughts.pt"), map_location="cpu", weights_only=True).float()
@@ -154,20 +177,31 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
         raise ValueError("bank thoughts and metadata must align with the training CSV")
     item_emb = torch.load(item_emb_file, map_location="cpu", weights_only=False)["embeddings"]
     spec = {"projected": True, "mode": "knn", "topn": topn,
-            "projection_dim": model.config.collaborative_contrastive.get("projection_dim", 256),
+            "projection_dim": collaborative.get("projection_dim", 256),
             "key_dim": 256, "value_hidden": 512, "bank_size": len(raw),
             "n_items": len(item_emb), "item_dim": int(item_emb.shape[1]),
             "max_delta_ratio": max_delta_ratio, "user_weight": user_weight}
-    layer = ProjectedNeighborRefinementLayer(model.attention, model.config.hidden_size, spec)
+    if outcome_grounded:
+        spec.update(outcome_grounded=True, memory_value_mode=memory_value_mode,
+                    retrieval_space=retrieval_space,
+                    eligibility="other_user_outcome_before_latest_history",
+                    source_checkpoint_sha256=bank_summary["checkpoint_sha256"],
+                    train_split_sha256=bank_summary["split_sha256"])
+    layer_class = OutcomeMemoryLayer if outcome_grounded else ProjectedNeighborRefinementLayer
+    layer = layer_class(model.attention, model.config.hidden_size, spec)
     layer.reset_new_parameters()
     for module in (layer.query, layer.key, layer.value, layer.gate,
                    layer.user_projection, layer.target_projection):
         module.to(torch.bfloat16)
     build_bank(layer, bank_dir, train_file, item_emb_file)
-    layer.initialize_from_attempt10(source_user, source_target, raw)
+    if outcome_grounded and retrieval_space == "history":
+        layer.initialize_history_bank(raw)
+    else:
+        layer.initialize_from_attempt10(source_user, source_target, raw)
     model.attention = layer
-    del model.user_projection, model.target_projection
-    delattr(model.config, "collaborative_contrastive")
+    if collaborative:
+        del model.user_projection, model.target_projection
+        delattr(model.config, "collaborative_contrastive")
     model.config.latent_neighbor_refinement = spec
     model.config.architectures = ["LatentModel"]
     model.pair_weight, model.pair_margin = pair_weight, pair_margin
@@ -176,9 +210,10 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
     if tokenizer("<|Thought|>")["input_ids"][0] != len(tokenizer) - 1:
         raise ValueError("source tokenizer has an unexpected thought token")
     text = CATEGORY_TEXT[category]
-    train_data = TimedDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
+    dataset_class = OutcomeMemoryDataset if outcome_grounded else TimedDataset
+    train_data = dataset_class(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
                               sample=sample, seed=seed, category=text, K=0)
-    val_data = TimedDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
+    val_data = dataset_class(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
                             sample=eval_sample, seed=seed, category=text, K=0)
     to_hf = lambda d: HFDataset.from_dict({k: [x[k] for x in d] for k in d[0]})
     collator = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8,
@@ -193,8 +228,10 @@ def train(base_model: str, bank_dir: str, train_file: str, eval_file: str,
             gradient_accumulation_steps=batch_size // micro_batch_size,
             num_train_epochs=num_epochs, learning_rate=learning_rate, bf16=True,
             logging_steps=1, warmup_steps=20, optim="adamw_torch",
-            eval_strategy="epoch", save_strategy="steps", save_steps=25,
-            save_total_limit=2, gradient_checkpointing=gradient_checkpointing,
+            eval_strategy="epoch", save_strategy="epoch" if outcome_grounded else "steps", save_steps=25,
+            save_total_limit=1 if outcome_grounded else 2, save_only_model=outcome_grounded,
+            load_best_model_at_end=outcome_grounded,
+            gradient_checkpointing=gradient_checkpointing,
             output_dir=output_dir,
             report_to=wandb_report_to(), remove_unused_columns=False, seed=seed,
         ),

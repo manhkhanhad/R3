@@ -9,6 +9,7 @@ import json
 from transformers import GenerationConfig,  AutoTokenizer
 from layers import LatentModel
 from reasoning_dataset import  LatentRDataset
+from outcome_memory import OutcomeMemoryDataset
 from transformers import  LogitsProcessorList, TemperatureLogitsWarper
 from LogitProcesser import CFEnhancedLogitsProcessor, get_hash, get_prefix_data
 from experiment_tracking import init_evaluation_run
@@ -65,7 +66,11 @@ def main(
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
-    val_dataset=LatentRDataset(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
+    outcome_memory = (getattr(model.config, "latent_neighbor_refinement", None) or {}).get("outcome_grounded", False)
+    if outcome_memory:
+        torch.manual_seed(seed)
+    dataset_class = OutcomeMemoryDataset if outcome_memory else LatentRDataset
+    val_dataset=dataset_class(train_file=test_data_path, tokenizer=tokenizer,max_len=2560, category=category, test=True,K=4, seed=seed,
                               sample=sample)
         
     encodings = [val_dataset.__getitem__(i) for i in range(len(val_dataset))]
@@ -121,16 +126,22 @@ def main(
             )
             logits_processor = LogitsProcessorList([TemperatureLogitsWarper(temperature=temperature), ccc])
 
+            memory_kwargs = {}
+            if outcome_memory:
+                memory_kwargs = {key: torch.tensor([e[key] for e in encodings], device=device)
+                                 for key in ("query_time", "query_user")}
             generation_output = model.generate(
                 torch.tensor([_ for _ in padding_encodings["input_ids"]]).to(device),
                 generation_config=generation_config,
                 return_dict_in_generate=True,
                 output_scores=True,
+                **memory_kwargs,
                 logits_processor=logits_processor,
                 attention_mask=torch.tensor([_ for _ in padding_encodings["attention_mask"]]).to(device),
             )
     
-        s = generation_output.sequences[:, minLen-5:]
+        decode_start = maxLen if outcome_memory else minLen-5
+        s = generation_output.sequences[:, decode_start:]
         # sequence_scores = [[0 for i in range(len(generation_output.scores))] for _ in range(num_beams)]
         # for i in range(num_beams):
         #     for j in range(L, len(generation_output.sequences[i])):

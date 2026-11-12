@@ -156,7 +156,10 @@ class LatentModel(Qwen2ForCausalLM):
 
         neighbor = getattr(config, "latent_neighbor_refinement", None)
         if neighbor:
-            if neighbor.get("projected", False):
+            if neighbor.get("outcome_grounded", False):
+                from outcome_memory import OutcomeMemoryLayer
+                self.attention = OutcomeMemoryLayer(self.attention, config.hidden_size, neighbor)
+            elif neighbor.get("projected", False):
                 from projected_neighbor_refinement import wrap_with_projected_neighbor_refinement
                 self.attention = wrap_with_projected_neighbor_refinement(
                     self.attention, config.hidden_size, neighbor
@@ -231,10 +234,23 @@ class LatentModel(Qwen2ForCausalLM):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        query_time=None,
+        query_user=None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if input_ids is not None and inputs_embeds is None and input_ids.size() == attention_mask.size():
-            inputs_embeds = self.generate_embs(input_ids, attention_mask)
+            if (getattr(self.config, "latent_neighbor_refinement", None) or {}).get("outcome_grounded", False):
+                previous = self.attention.query_time, self.attention.query_user
+                if query_time is not None:
+                    self.attention.query_time = query_time
+                if query_user is not None:
+                    self.attention.query_user = query_user
+                try:
+                    inputs_embeds = self.generate_embs(input_ids, attention_mask)
+                finally:
+                    self.attention.query_time, self.attention.query_user = previous
+            else:
+                inputs_embeds = self.generate_embs(input_ids, attention_mask)
             input_ids = None
         # elif input_ids is not None and inputs_embeds is None and input_ids.size()!=attention_mask.size():
             # 这个时候是在做生成任务，已经有了cache所以用input_ids即可
