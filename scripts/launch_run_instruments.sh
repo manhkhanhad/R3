@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=20           # Number of CPU to request for the job
 #SBATCH --mem=64GB                 # How much memory does your job require?
 #SBATCH --gres=gpu:2                # Do you require GPUS? If not delete this line
-#SBATCH --time=02-00:00:00         # How long to run the job for? Jobs exceed this time will be terminated
+#SBATCH --time=01-00:00:00         # How long to run the job for? Jobs exceed this time will be terminated
                                 # Format <DD-HH:MM:SS> eg. 5 days 05-00:00:00
                                 # Format <DD-HH:MM:SS> eg. 24 hours 1-00:00:00 or 24:00:00
 #SBATCH --mail-type=END,FAIL  # When should you receive an email?
@@ -18,13 +18,13 @@
                                 # You must provide an absolute path eg /common/home/module/username/
                                 # If no paths are provided, the output file will be placed in your current working directory
 # Remove if you do not want the workload scheduler to requeue your job after preemption --requeue
-#SBATCH --constraint="a40"
+#SBATCH --constraint="a40|3090"
 ################################################################
 ## EDIT AFTER THIS LINE IF YOU ARE OKAY WITH DEFAULT SETTINGS ##
 ################################################################
 
-#SBATCH --partition=hadylauwresearch                 # The partition you've been assigned
-#SBATCH --qos=hadylauwresearch-priority      # What is the QOS assigned to you? Check with myinfo command
+#SBATCH --partition=researchshort                 # The partition you've been assigned
+#SBATCH --qos=research-1-qos      # What is the QOS assigned to you? Check with myinfo command
 #SBATCH --mail-user=mk.ngohuu.2024@phdcs.smu.edu.sg # Who should receive the email notifications
 #SBATCH --job-name=R3     # Give the job a name
 
@@ -53,52 +53,65 @@ echo ${train_file} ${test_file} ${info_file} ${eval_file}
 port=$((RANDOM % 5000 + 10000))
 export CUDA_VISIBLE_DEVICES=0,1
 task_name="latent_${category}"
-out=./output_dir/${category}_v0/latent
+task_dir="/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir/${category}_v1"
+out=${task_dir}/latent
 mkdir -p ${out}
+export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
+export WANDB_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(8))')"
+export WANDB_NAME="${category}_v1_SFT"
+export WANDB_TAGS="${category},v1,SFT"
+
+
+#==========================================
+# SFT TRAINING
+#==========================================
 
 # Replace with your actual base model path
 # for example: Qwen/Qwen2.5-1.5B
-BASE_MODEL=Qwen/Qwen2.5-1.5B-Instruct
-torchrun --nproc_per_node=2 --nnodes=1 --master_port=$port \
-    src/latent/latent_attention_train.py \
-    --base_model $BASE_MODEL \
-    --micro_batch_size 2 \
-    --train_file ${train_file} --eval_file ${eval_file} \
-    --output_dir ${out} --category ${category} --sample -1 \
-    > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
+# BASE_MODEL=Qwen/Qwen2.5-1.5B-Instruct
+# torchrun --nproc_per_node=2 --nnodes=1 --master_port=$port \
+#     src/latent/latent_attention_train.py \
+#     --base_model $BASE_MODEL \
+#     --micro_batch_size 2 \
+#     --train_file ${train_file} --eval_file ${eval_file} \
+#     --output_dir ${out} --category ${category} --sample -1 \
+#     > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
 
-# available gpu
-array=(0 1)
+# # available gpu
+# array=(0 1)
 
-# total number of gpus
-nn=2
-mkdir -p ./output_dir/${category}_v0
-python src/utils/split.py --input_path $test_file \
-        --output_path ./output_dir/${category}_v0 --nn ${nn}
+# # total number of gpus
+# nn=2
+# mkdir -p ${task_dir}
+# python src/utils/split.py --input_path $test_file \
+#         --output_path ${task_dir} --nn ${nn}
 
-model_ckpt=./output_dir/${category}_v0/latent
-for (( i=0; i<$nn; i++ ))
-do
-    export CUDA_VISIBLE_DEVICES=${array[$i]}
-    echo ${category}/${i}.csv
-    python src/latent/latent_attention_eval.py --batch_size 8 \
-        --base_model $model_ckpt --sample -1 \
-        --info_file ${info_file} --category ${category} \
-        --test_data_path ./output_dir/${category}_v0/${i}.csv \
-        --result_json_data ./output_dir/${category}_v0/${i}.json &
-done
-wait
+# model_ckpt=${out}
+# for (( i=0; i<$nn; i++ ))
+# do
+#     export CUDA_VISIBLE_DEVICES=${array[$i]}
+#     echo ${category}/${i}.csv
+#     python src/latent/latent_attention_eval.py --batch_size 8 \
+#         --base_model $model_ckpt --sample -1 \
+#         --info_file ${info_file} --category ${category} \
+#         --test_data_path ${task_dir}/${i}.csv \
+#         --result_json_data ${task_dir}/${i}.json &
+# done
+# wait
 
-echo "SFT EVALUATION"
-python src/utils/merge.py --input_path ./output_dir/${category}_v0/ \
-        --output_path ${model_ckpt}/final_result.json --nn ${nn}
-python src/utils/calc.py --path ${model_ckpt}/final_result.json \
-        --item_path ${info_file}
+# echo "SFT EVALUATION"
+# python src/utils/merge.py --input_path ${task_dir}/ \
+#         --output_path ${model_ckpt}/final_result.json --nn ${nn}
+# python src/utils/calc.py --path ${model_ckpt}/final_result.json \
+#         --item_path ${info_file}
 
 #==========================================
 # TRAINING WITH ATTENTION GRPO
 #==========================================
 
+export WANDB_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(8))')"
+export WANDB_NAME="${category}_v1_RL"
+export WANDB_TAGS="${category},v1,RL"
 
 
 path_to_data=data/${category}
@@ -109,14 +122,14 @@ info_file=$(ls -f ${path_to_data}/info/${category}*.txt)
 for lr in 5e-5; do #1e-4 1e-5 5e-4 5e-5;
 export CUDA_VISIBLE_DEVICES=0,1
 task_name=nomul_attn_lr_${lr}
-base_model=output_dir/${category}_v0/latent/checkpoint-1557
-out=./output_dir/${category}_v0/${task_name}
+base_model=${task_dir}/latent/checkpoint-1557
+out=${task_dir}/${task_name}
 mkdir -p $out
 torchrun --nnodes=1 --nproc_per_node=2 --master_port=$((RANDOM % 9999 + 10000)) \
         src/grpo_attention_tuning/train_noise_grpo.py --category $category \
         --num_generations 8 --sample -1 --num_epochs 1 --info_file $info_file \
         --base_model $base_model --output_dir $out --beta 0.01 \
-        --batch_size 256 --micro_batch_size 8 --lr $lr --seed 42 \
+        --batch_size 256 --micro_batch_size 2 --lr $lr --seed 42 \
         --train_file $train_file --eval_file $eval_file \
         --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28 \
         > >(tee -a ${out}/${task_name}.log) 2> >(tee -a ${out}/${task_name}.err >&2)
@@ -125,24 +138,24 @@ torchrun --nnodes=1 --nproc_per_node=2 --master_port=$((RANDOM % 9999 + 10000)) 
 array=(0 1)
 nn=2
 model_ckpt=${out}
-mkdir -p ./output_dir/${category}_v0
+mkdir -p ${task_dir}
 python src/utils/split.py --input_path $test_file \
-        --output_path ./output_dir/${category}_v0 --nn ${nn}
+        --output_path ${task_dir} --nn ${nn}
 
 # 遍历数组并输出内容
 for (( i=0; i<$nn; i++ ))
 do
         export CUDA_VISIBLE_DEVICES=${array[$i]}
-        echo output_dir/${category}_v0/${i}.csv
+        echo ${task_dir}/${i}.csv
         python src/grpo_attention_tuning/noise_eval.py \
                 --batch_size 12 --base_model $model_ckpt --sample -1 \
                 --info_file ${info_file} --category ${category} --end_k -1 \
-                --test_data_path ./output_dir/${category}_v0/${i}.csv \
-                --result_json_data ./output_dir/${category}_v0/${i}.json &
+                --test_data_path ${task_dir}/${i}.csv \
+                --result_json_data ${task_dir}/${i}.json &
         done
 wait
 echo "RL EVALUATION"
-python src/utils/merge.py --input_path ./output_dir/${category}_v0/ \
+python src/utils/merge.py --input_path ${task_dir}/ \
         --output_path ${model_ckpt}/final_result.json --nn ${nn}
 
 python src/utils/calc.py --path ${model_ckpt}/final_result.json \

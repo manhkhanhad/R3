@@ -2,6 +2,7 @@ import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 import pandas as pd
 import fire
 import torch
@@ -12,6 +13,8 @@ from model import LatentModel #, NoisyLatentModel
 from latent_grpo_dataset import D3Dataset, get_prefix_data
 from transformers import LogitsProcessorList, TemperatureLogitsWarper
 from latent_grpo_processor import CFEnhancedLogitsProcessor, get_hash
+from experiment_tracking import init_evaluation_run
+from utils.ranking_metrics import calculate_ranking_metrics
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -31,8 +34,20 @@ def main(
         seed: int = 42,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
-        length_penalty: float = 1.0
+        length_penalty: float = 1.0,
+        wandb_run_name: str = None,
 ):
+
+    dataset_name = category
+    wandb_run = init_evaluation_run(
+        dataset=dataset_name,
+        run_name=wandb_run_name,
+        config={
+            "base_model": base_model,
+            "test_data_path": test_data_path,
+            "dataset": dataset_name,
+        },
+    )
 
     category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games",
                      "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games",
@@ -167,8 +182,11 @@ def main(
     with open(result_json_data, 'w') as f:
         json.dump(test_data, f, indent=4)
 
+    if wandb_run is not None:
+        metrics = calculate_ranking_metrics(test_data, info_file)
+        wandb_run.log({f"evaluation_shard/{key}": value for key, value in metrics.items()})
+        wandb_run.finish()
+
 
 if __name__ == '__main__':
     fire.Fire(main)
-
-

@@ -51,7 +51,7 @@ def calculate_ranking_metrics(
         for index, prediction in enumerate(predictions):
             if prediction not in known_items:
                 unknown_predictions += 1
-            if rank is None and prediction == target:
+            if prediction == target:
                 rank = index
 
         if rank is None:

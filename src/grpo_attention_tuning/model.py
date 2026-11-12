@@ -138,6 +138,18 @@ class LatentModel(Qwen2ForCausalLM):
             sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
             from decomposed_attention import build_decomposed_attention
             self.attention = build_decomposed_attention(config.hidden_size, decomposition)
+        elif getattr(config, "latent_multi_aspect", None):
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
+            from multi_aspect_attention import build_multi_aspect_attention
+            self.attention = build_multi_aspect_attention(config.hidden_size, config.latent_multi_aspect)
+        elif getattr(config, "latent_staged_refine", None):
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
+            from staged_refine_attention import build_staged_refine_attention
+            self.attention = build_staged_refine_attention(config.hidden_size, config.latent_staged_refine)
         else:
             self.attention = SelfAttentionLayer(config.hidden_size)
 

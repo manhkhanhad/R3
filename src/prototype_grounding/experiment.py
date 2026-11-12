@@ -28,7 +28,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
+from transformers import AutoConfig, AutoTokenizer, GenerationConfig, LogitsProcessorList, TemperatureLogitsWarper
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "grpo_attention_tuning"))
@@ -188,7 +188,20 @@ def load_model(checkpoint: Path = CHECKPOINT) -> tuple[LatentModel, AutoTokenize
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    model = LatentModel.from_pretrained(checkpoint, torch_dtype=torch.bfloat16).to(device).eval()
+    config = AutoConfig.from_pretrained(checkpoint)
+    if getattr(config, "latent_neighbor_refinement", None):
+        # This wrapper lives in the SFT model class.  The original GRPO class
+        # silently drops it and random-initializes the plain attention layer.
+        sys.path.insert(0, str(ROOT / "src" / "latent"))
+        from layers import LatentModel as CorrectedLatentModel
+        model, loading = CorrectedLatentModel.from_pretrained(
+            checkpoint, torch_dtype=torch.bfloat16, output_loading_info=True,
+        )
+        if loading["missing_keys"] or loading["unexpected_keys"]:
+            raise RuntimeError(f"Corrected checkpoint did not load exactly: {loading}")
+    else:
+        model = LatentModel.from_pretrained(checkpoint, torch_dtype=torch.bfloat16)
+    model = model.to(device).eval()
     model.config.use_cache = False
     return model, tokenizer, device
 

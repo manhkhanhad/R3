@@ -144,6 +144,18 @@ class LatentModel(Qwen2ForCausalLM):
         if decomposition:
             from decomposed_attention import build_decomposed_attention
             self.attention = build_decomposed_attention(config.hidden_size, decomposition)
+        elif getattr(config, "latent_multi_aspect", None):
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
+            from multi_aspect_attention import build_multi_aspect_attention
+            self.attention = build_multi_aspect_attention(config.hidden_size, config.latent_multi_aspect)
+        elif getattr(config, "latent_staged_refine", None):
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "latent"))
+            from staged_refine_attention import build_staged_refine_attention
+            self.attention = build_staged_refine_attention(config.hidden_size, config.latent_staged_refine)
         else:
             self.attention = SelfAttentionLayer(config.hidden_size)
 
@@ -153,6 +165,19 @@ class LatentModel(Qwen2ForCausalLM):
             self.attention = wrap_with_residual_correction(
                 self.attention, config.hidden_size, residual
             )
+
+        neighbor = getattr(config, "latent_neighbor_refinement", None)
+        if neighbor:
+            if neighbor.get("projected", False):
+                from projected_neighbor_refinement import wrap_with_projected_neighbor_refinement
+                self.attention = wrap_with_projected_neighbor_refinement(
+                    self.attention, config.hidden_size, neighbor
+                )
+            else:
+                from neighbor_refinement_attention import wrap_with_neighbor_refinement
+                self.attention = wrap_with_neighbor_refinement(
+                    self.attention, config.hidden_size, neighbor
+                )
 
         self.last_soft_vocab_entropy = None
         self.last_soft_vocab_max_probability = None
@@ -179,6 +204,10 @@ class LatentModel(Qwen2ForCausalLM):
         self.last_soft_vocab_norm = diagnostics["soft_norm"]
         return soft_latent
 
+    def observe_reasoning_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        """Optional training hook; the baseline leaves the latent unchanged."""
+        return latent
+
     def generate_embs(self, input_ids, attention_mask):
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
@@ -191,6 +220,7 @@ class LatentModel(Qwen2ForCausalLM):
             hidden_states=hidden_states[-1], attention_mask=attention_mask,
             thought_id_idx=where_thought_ids[:, 1],
         )
+        reasoning_latent = self.observe_reasoning_latent(reasoning_latent)
         reasoning_latent = self.project_reasoning_latent(reasoning_latent)
         input_embs[where_thought_ids[:, 0], where_thought_ids[:, 1]] = reasoning_latent.to(
             input_embs.dtype
@@ -235,4 +265,3 @@ class LatentModel(Qwen2ForCausalLM):
             num_logits_to_keep=num_logits_to_keep,
             **kwargs,
         )
-

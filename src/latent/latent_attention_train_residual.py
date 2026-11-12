@@ -17,6 +17,7 @@ import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(current_dir))
 
 import fire
 import torch
@@ -26,6 +27,7 @@ from transformers import AutoTokenizer, DataCollatorForSeq2Seq
 from layers import LatentModel
 from reasoning_dataset import LatentRDataset
 from residual_correction_attention import ResidualCorrectionAttentionLayer
+from experiment_tracking import init_training_run, wandb_report_to
 
 
 class ResidualLogCallback(transformers.TrainerCallback):
@@ -135,7 +137,9 @@ def train(
     orthogonal_to_mu: bool = False,
     group_by_length: bool = False,
     resume_from_checkpoint: str = None,
+    wandb_run_name: str = None,
 ):
+    init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
     category_dict = {
         "Office_Products": "office products", "Books": "books", "steam": "games",
         "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games",
@@ -216,7 +220,7 @@ def train(
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             group_by_length=group_by_length,
-            report_to="none",
+            report_to=wandb_report_to(),
             remove_unused_columns=False,
         ),
         data_collator=DataCollatorForSeq2Seq(

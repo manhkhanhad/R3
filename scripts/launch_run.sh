@@ -35,10 +35,8 @@
 # Purge the environment, load the modules we require.
 # Refer to https://violet.scis.dev/docs/Advanced%20settings/module for more information
 
-module purge
-eval "$(conda shell.bash hook)"
-module load CUDA/12.4.0
-conda activate rrec
+
+
 
 # CDs_and_Vinyl
 category="CDs_and_Vinyl"
