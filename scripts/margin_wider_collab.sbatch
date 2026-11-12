@@ -113,7 +113,7 @@ if [[ ! -f "$out/config.json" ]]; then
   fi
 fi
 [[ -f "$out/config.json" ]] || { echo "no trained model in $out" >&2; exit 1; }
-ls -d "$out"/checkpoint-* >/dev/null 2>&1 && cp "$(ls -d "$out"/checkpoint-* | sort -t- -k2 -n | tail -1)/trainer_state.json" "$results/" || true
+if [[ -f "$out/trainer_state.json" ]]; then cp "$out/trainer_state.json" "$results/"; else ls -d "$out"/checkpoint-* >/dev/null 2>&1 && cp "$(ls -d "$out"/checkpoint-* | sort -t- -k2 -n | tail -1)/trainer_state.json" "$results/" || true; fi
 
 python "$code_root/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 1
 rank_eval() {  # $1 = output label; env passed through

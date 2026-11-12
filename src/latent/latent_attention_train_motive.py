@@ -1,6 +1,8 @@
 """Train MWC-M: margin + WIDER warm-up, then same-motive InfoNCE (motive_contrastive.py)."""
 
+import glob
 import os
+import shutil
 import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +18,22 @@ from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 from experiment_tracking import init_training_run, move_callback_to_end, wandb_report_to
 from latent_attention_train_grounded_margin import CATEGORY_TEXT, GroundedLogCallback
 from motive_contrastive import HingeLabelCollator, MotiveDataset, MotiveMarginLatentModel, build_positive_index
+
+
+class SingleCheckpointCallback(transformers.TrainerCallback):
+    """Storage: delete the previous checkpoint *before* the next epoch save, so a run never holds two
+    (HF writes the new one first and rotates after; ~9 GB each with optimizer state).  A preemption during
+    the save then restarts from scratch instead of resuming; it never leaves two full checkpoints."""
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if control.should_save:
+            remove_checkpoints(args.output_dir, "before epoch save")
+
+
+def remove_checkpoints(output_dir, why):
+    for path in sorted(glob.glob(os.path.join(output_dir, "checkpoint-*"))):
+        shutil.rmtree(path, ignore_errors=True)
+        print(f"[storage] removed {path} ({why})", flush=True)
 
 
 class MotivePhaseCallback(transformers.TrainerCallback):
@@ -140,7 +158,7 @@ def train(
             load_best_model_at_end=False, report_to=wandb_report_to(), remove_unused_columns=False,
         ),
         data_collator=collator,
-        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs)],
+        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs), SingleCheckpointCallback()],
     )
     move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False
@@ -148,6 +166,9 @@ def train(
     model.config.use_cache = True
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
+    # Keep only the final model: the training log goes next to it, then the resume checkpoint is dropped.
+    trainer.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
+    remove_checkpoints(output_dir, "training finished, final model saved")
 
 
 if __name__ == "__main__":
