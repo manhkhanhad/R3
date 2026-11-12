@@ -83,7 +83,7 @@ def train(
             optim="adamw_torch",
             eval_strategy="epoch",
             save_strategy="epoch",
-            save_total_limit=3,
+            save_total_limit=1,
             report_to=wandb_report_to(),
             remove_unused_columns=False,
             seed=seed,

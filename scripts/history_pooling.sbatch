@@ -72,7 +72,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
     --output_dir "$out" --category "$category" \
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "$num_epochs" --learning_rate 3e-4 --cutoff_len 512 \
-    --save_only_model False --save_total_limit 3 \
+    --save_only_model False --save_total_limit 1 \
     --pool_history_only True "${resume[@]}"
 fi
 echo "[$(date --iso-8601=seconds)] pooling check"

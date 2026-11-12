@@ -80,7 +80,7 @@ def train(
     side_token_scale: bool = False,
     category_text_file: str = None,  # text positive control: category-embedding .pt with "paths"
     save_only_model: bool = False,  # checkpoints without optimizer state (~3 GB instead of ~9 GB)
-    save_total_limit: int = 5,
+    save_total_limit: int = 1,
     # L7 structural bottleneck: target tokens see only the latent + fixed instruction
     # prefix, never the history, in training and generation (latent_bottleneck.py)
     latent_only: bool = False,

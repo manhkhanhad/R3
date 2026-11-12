@@ -70,7 +70,7 @@ if [[ ! -f "$out/config.json" ]]; then
     --sample "${TRAIN_SAMPLE:--1}" "${eval_sample[@]}" \
     --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate "${LR:-3e-4}" --cutoff_len 512 \
-    --save_only_model True --save_total_limit 2 \
+    --save_only_model True --save_total_limit 1 \
     --transition_prep_file "$prep" --transition_title_vectors "$title_vectors" \
     --transition_care_neg_prob "${CARE_NEG_PROB:-0}" \
     --transition_reader_lr_mult "${READER_LR_MULT:-1}" ${SCHEDULE:+--transition_schedule "$SCHEDULE"} "${resume[@]}"

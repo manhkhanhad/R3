@@ -68,7 +68,7 @@ if [[ ! -f "$out/config.json" ]]; then
     --sample "${TRAIN_SAMPLE:--1}" "${eval_sample[@]}" \
     --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate "${LR:-3e-4}" --cutoff_len 512 \
-    --save_only_model True --save_total_limit 2 \
+    --save_only_model True --save_total_limit 1 \
     --category_injection additive --category_prep_file "$prep" "${resume[@]}"
 fi
 [[ -f "$out/config.json" ]] || { echo "no trained model in $out" >&2; exit 1; }

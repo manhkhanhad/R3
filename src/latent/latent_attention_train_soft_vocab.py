@@ -150,7 +150,7 @@ def train(
             eval_strategy="epoch",
             save_strategy="epoch",
             output_dir=output_dir,
-            save_total_limit=5,
+            save_total_limit=1,
             load_best_model_at_end=True,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,

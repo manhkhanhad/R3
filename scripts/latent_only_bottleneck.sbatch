@@ -70,7 +70,7 @@ if [[ ${SKIP_TRAIN:-0} != 1 ]]; then
     --output_dir "$out" --category "$category" \
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128 \
     --num_epochs "${NUM_EPOCHS:-3}" --cutoff_len 512 \
-    --save_only_model True --save_total_limit 2 \
+    --save_only_model True --save_total_limit 1 \
     --latent_only True
 fi
 
