@@ -39,9 +39,13 @@ def remove_checkpoints(output_dir, why):
 class MotivePhaseCallback(transformers.TrainerCallback):
     """Contrastive term on once ``warmup_epochs`` epochs have elapsed (from state.epoch, so resumes land right)."""
 
-    def __init__(self, warmup_epochs, margin_epochs=-1):
+    def __init__(self, warmup_epochs, margin_epochs=-1, early_margin_mode="fixed", late_margin_mode=""):
         self.warmup_epochs = warmup_epochs
         self.margin_epochs = margin_epochs   # > 0: history-swap hinge only for the first margin_epochs (MWC-M3b)
+        # MW-3b-L: with late_margin_mode set, the hinge is not switched off after margin_epochs but switched
+        # to late_margin_mode (e.g. novel / adaptive) for the remaining epochs.
+        self.early_margin_mode = early_margin_mode
+        self.late_margin_mode = late_margin_mode
         self.announced = None
         self.margin_announced = None
 
@@ -54,11 +58,17 @@ class MotivePhaseCallback(transformers.TrainerCallback):
                   f"bank filled {float(target.bank_filled.float().mean()):.3f}", flush=True)
             self.announced = enabled
         if self.margin_epochs > 0:
-            active = (state.epoch or 0.0) < self.margin_epochs - 1e-6
-            target.margin_active = active
-            if active != self.margin_announced:
-                print(f"[phase] epoch {state.epoch or 0.0:.3f}: history-swap hinge {'ON' if active else 'off'}", flush=True)
-                self.margin_announced = active
+            early = (state.epoch or 0.0) < self.margin_epochs - 1e-6
+            if self.late_margin_mode:
+                target.margin_active = True
+                target.margin_mode = self.early_margin_mode if early else self.late_margin_mode
+                phase = target.margin_mode
+            else:
+                target.margin_active = early
+                phase = "ON" if early else "off"
+            if phase != self.margin_announced:
+                print(f"[phase] epoch {state.epoch or 0.0:.3f}: history-swap hinge {phase}", flush=True)
+                self.margin_announced = phase
 
 
 def train(
@@ -91,6 +101,7 @@ def train(
     within_mode: str = "user",
     margin_mode: str = "fixed",
     margin_epochs: int = -1,
+    late_margin_mode: str = "",
     adaptive_alpha: float = 0.5,
     selfnorm_cap: float = 2.0,
     sasrec_file: str = "",
@@ -114,9 +125,12 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
-    if margin_mode not in ("fixed", "self", "selfnorm", "novel", "adaptive"):
-        raise ValueError(f"unknown margin_mode {margin_mode}")
-    MotiveDataset.novel_hinge = margin_mode == "novel"
+    modes = ("fixed", "self", "selfnorm", "novel", "adaptive")
+    if margin_mode not in modes or (late_margin_mode and late_margin_mode not in modes):
+        raise ValueError(f"unknown margin_mode {margin_mode} / late_margin_mode {late_margin_mode}")
+    if late_margin_mode and margin_epochs <= 0:
+        raise ValueError("late_margin_mode needs margin_epochs > 0 (the epoch at which the mode switches)")
+    MotiveDataset.novel_hinge = "novel" in (margin_mode, late_margin_mode)
     train_data = MotiveDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
                                sample=sample, seed=seed, category=text, K=K)
     val_data = MotiveDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
@@ -132,7 +146,7 @@ def train(
                             "max_positives": max_positives, "num_negatives": num_negatives,
                             "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
-                            "margin_mode": margin_mode, "margin_epochs": margin_epochs, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap}
+                            "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -160,7 +174,7 @@ def train(
             load_best_model_at_end=False, report_to=wandb_report_to(), remove_unused_columns=False,
         ),
         data_collator=collator,
-        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs), SingleCheckpointCallback()],
+        callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs, margin_mode, late_margin_mode),SingleCheckpointCallback()],
     )
     move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False
