@@ -1,7 +1,13 @@
 *.csv
 output_dir/
 data/
-analysis/
+analysis/cache/
+analysis/config/
+analysis/evidence/
+analysis/figures/
+analysis/logs/
+analysis/prototypes/
+analysis/results/
 run_logs/
 wandb
 external_rational/results/
