@@ -373,7 +373,7 @@ class MotiveMarginLatentModel(LatentModel):
             if wider is not None:
                 loss = loss + state.weight * wider
         motive, mstats = ce.new_zeros(()), {}
-        if self.contrastive_enabled and row_id is not None:
+        if self.contrastive_enabled and row_id is not None and self.motive_weight > 0:
             motive, mstats = self._motive_loss(r, row_id)
             loss = loss + self.motive_weight * motive
         if row_id is not None:
