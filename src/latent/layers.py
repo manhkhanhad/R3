@@ -179,6 +179,10 @@ class LatentModel(Qwen2ForCausalLM):
         self.last_soft_vocab_norm = diagnostics["soft_norm"]
         return soft_latent
 
+    def observe_reasoning_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        """Optional hook on the pooled latent; the baseline leaves it unchanged."""
+        return latent
+
     def generate_embs(self, input_ids, attention_mask):
         output_mid = super().forward(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         # generate embeddings
@@ -191,6 +195,7 @@ class LatentModel(Qwen2ForCausalLM):
             hidden_states=hidden_states[-1], attention_mask=attention_mask,
             thought_id_idx=where_thought_ids[:, 1],
         )
+        reasoning_latent = self.observe_reasoning_latent(reasoning_latent)
         reasoning_latent = self.project_reasoning_latent(reasoning_latent)
         input_embs[where_thought_ids[:, 0], where_thought_ids[:, 1]] = reasoning_latent.to(
             input_embs.dtype

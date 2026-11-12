@@ -42,7 +42,15 @@ def train(
     local_rank: int = 0,
     deepspeed: str ="./deepspeed.json",
     category: str="Toys_and_Games",
-    K: int = 0
+    K: int = 0,
+    task: str = "item",  # item | category (predict the target item's category path)
+    category_file: str = None,  # category-embedding .pt with "paths"/"valid", for task=category
+    save_only_model: bool = False,
+    save_total_limit: int = 5,
+    # item task guided by a frozen precomputed latent (e.g. category-R3's r_cat), row-aligned with the CSVs
+    guide_train_file: str = None,
+    guide_eval_file: str = None,
+    guide_init_norm: float = 30.0,
 
 ):
 
@@ -61,12 +69,27 @@ def train(
         device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
-    model = LatentModel.from_pretrained(
-        base_model,
-        # load_in_8bit=True,
-        torch_dtype=torch.bfloat16,
-        # device_map=device_map,
-    )
+    use_guide = guide_train_file is not None
+    if use_guide:
+        if task != "item" or not guide_eval_file or sample > 0:
+            raise ValueError("guidance needs task=item, guide_eval_file, and sample=-1 (row-aligned tables)")
+        from transformers import AutoConfig
+        from guided_latent import GuidedLatentModel, load_guide
+        guide_train, guide_eval = load_guide(guide_train_file), load_guide(guide_eval_file)
+        model_config = AutoConfig.from_pretrained(base_model)
+        model_config.latent_guidance = {
+            "dimension": int(guide_train.shape[1]), "init_norm": guide_init_norm,
+            "train_file": os.path.abspath(guide_train_file), "eval_file": os.path.abspath(guide_eval_file),
+        }
+        model = GuidedLatentModel.from_pretrained(base_model, config=model_config, torch_dtype=torch.bfloat16)
+        model.set_guide_table(torch.cat([guide_train, guide_eval]))
+    else:
+        model = LatentModel.from_pretrained(
+            base_model,
+            # load_in_8bit=True,
+            torch_dtype=torch.bfloat16,
+            # device_map=device_map,
+        )
     model.attention.end_k = end_k
     model.config.loss_type = "ce"
     
@@ -88,8 +111,23 @@ def train(
     ##################
     ##############################################################################
 
-    train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category, K = K)
-    val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, category=category, K = K)
+    if task == "category":
+        from category_dataset import CategoryRDataset
+        train_data = CategoryRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category, K=K, category_file=category_file)
+        val_data = CategoryRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, category=category, K=K, category_file=category_file)
+        print(f"category task: dropped {train_data.dropped_rows} train / {val_data.dropped_rows} eval rows without a valid category")
+    elif task == "item":
+        train_data = LatentRDataset(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category, K = K)
+        val_data = LatentRDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, category=category, K = K)
+    else:
+        raise ValueError(f"unknown task {task}")
+    if use_guide:
+        # table = [train rows; eval rows]; each example carries its row index
+        assert len(train_data) == len(guide_train) and len(val_data) == len(guide_eval), "guide tables must match the CSVs"
+        for i, ex in enumerate(train_data.inputs):
+            ex["guide_index"] = i
+        for i, ex in enumerate(val_data.inputs):
+            ex["guide_index"] = len(guide_train) + i
 
     print("LOAD DATA FINISHED")
 
@@ -126,8 +164,10 @@ def train(
             eval_strategy="epoch",
             save_strategy="epoch",
             output_dir=output_dir,
-            save_total_limit=5,
+            save_total_limit=save_total_limit,
+            save_only_model=save_only_model,
             load_best_model_at_end=True,
+            label_names=["labels"] if use_guide else None,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to="none",
