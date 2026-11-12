@@ -38,15 +38,41 @@ from latent_grpo_processor import CFEnhancedLogitsProcessor, get_hash  # noqa: E
 
 
 CHECKPOINT = ROOT / "output_dir/CDs_and_Vinyl/nomul_attn_lr_5e-5"
-DATA_ROOT = ROOT / "data/CDs_and_Vinyl"
 ANALYSIS = ROOT / "analysis"
-SPLIT_FILES = {
-    "train": DATA_ROOT / "train/CDs_and_Vinyl_5_2015-10-2018-11.csv",
-    "valid": DATA_ROOT / "valid/CDs_and_Vinyl_5_2015-10-2018-11.csv",
-    "test": DATA_ROOT / "test/CDs_and_Vinyl_5_2015-10-2018-11.csv",
-}
-INFO_FILE = DATA_ROOT / "info/CDs_and_Vinyl_5_2015-10-2018-11.txt"
 THOUGHT = "<|Thought|>"
+
+# Human-readable category noun used in the training-time prompt template
+# (matches the `category_dict` in src/grpo_attention_tuning/{train_noise_grpo,noise_eval}.py).
+CATEGORY_PROMPT_MAP = {
+    "Office_Products": "office products", "Books": "books", "steam": "games",
+    "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games",
+    "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors",
+    "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie",
+    "yelp": "resturant",
+}
+
+
+def _glob_one(pattern: Path) -> Path:
+    matches = sorted(pattern.parent.glob(pattern.name))
+    if not matches:
+        raise FileNotFoundError(f"no file matches {pattern}")
+    return matches[0]
+
+
+def configure_category(category: str) -> None:
+    """Point every dataset-derived global at `category` (default: CDs_and_Vinyl)."""
+    global CATEGORY, CATEGORY_PROMPT, DATA_ROOT, SPLIT_FILES, INFO_FILE
+    CATEGORY = category
+    CATEGORY_PROMPT = CATEGORY_PROMPT_MAP[category]
+    DATA_ROOT = ROOT / "data" / category
+    SPLIT_FILES = {
+        split: _glob_one(DATA_ROOT / split / f"{category}*.csv")
+        for split in ("train", "valid", "test")
+    }
+    INFO_FILE = _glob_one(DATA_ROOT / "info" / f"{category}*.txt")
+
+
+configure_category("CDs_and_Vinyl")
 SEEDS = (13, 42, 73)
 KS = (32, 64, 128, 256)
 
@@ -105,10 +131,10 @@ class PromptDataset(Dataset):
         instruction = (
             "Below is an instruction that describes a task, paired with an input that provides further context. "
             "Write a response that appropriately completes the request. \n\n### Instruction:\n"
-            "Given a list of musics the user recetenly enjoy, please write a new musics that the user may bought\n"
+            f"Given a list of {CATEGORY_PROMPT} the user recetenly enjoy, please write a new {CATEGORY_PROMPT} that the user may bought\n"
         )
         prompt = (
-            f"### User Input: \nThe user has palyed the following musicss before: {titles}"
+            f"### User Input: \nThe user has palyed the following {CATEGORY_PROMPT}s before: {titles}"
             f"\n\n### Response: \n{THOUGHT}"
         )
         target = f'"{str(row.item_title)}"\n'
@@ -235,7 +261,7 @@ def extract(split: str, batch_size: int, limit: int = -1,
                   "hit_at_3": bool(ranks.get(i, 10**9) <= 3),
                   "hit_at_5": bool(ranks.get(i, 10**9) <= 5),
                   "hit_at_10": bool(ranks.get(i, 10**9) <= 10)})
-    out = ANALYSIS / "evidence/CDs_and_Vinyl"
+    out = ANALYSIS / f"evidence/{CATEGORY}"
     if tag:
         out = out / tag
     out = out / split
@@ -255,7 +281,7 @@ def extract(split: str, batch_size: int, limit: int = -1,
 
 
 def load_evidence(split: str, tag: str = "") -> tuple[torch.Tensor, pd.DataFrame]:
-    base = ANALYSIS / "evidence/CDs_and_Vinyl"
+    base = ANALYSIS / f"evidence/{CATEGORY}"
     if tag:
         base = base / tag
     base = base / split
@@ -553,6 +579,7 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
                if needs_prototypes else None)
     train_vectors, train_meta = load_evidence("train", tag)
     train_mean = train_vectors.mean(0).to(device)
+    train_norm_mean = train_vectors.norm(dim=-1).mean().to(device)
     prefix_data = get_prefix_data(str(INFO_FILE), tokenizer)
     rng = torch.Generator(device=device).manual_seed(seed)
     current_rows: list[dict[str, Any]] = []
@@ -588,6 +615,16 @@ def generate_rankings(split: str, bank: str, k: int, seed: int, topk: int,
                     idx = (idx + 1) % len(train_vectors)
                 picked.append(idx)
             grounded = train_vectors[picked].to(device)
+        elif mode == "z_alone":
+            # mu-free residual: z_i = q - mu, re-normed to the typical raw-r norm so a
+            # magnitude mismatch (mu's norm dominates q) doesn't get read as a content result.
+            z = q - train_mean
+            grounded = z / (z.norm(dim=-1, keepdim=True) + 1e-8) * train_norm_mean
+        elif mode == "noise_matched":
+            # Null control for z_alone: same fixed norm, but a direction uncorrelated with q,
+            # so any z_alone vs. noise_matched gap isolates z_i's content, not its magnitude.
+            noise = torch.randn(q.shape, generator=rng, device=device)
+            grounded = noise / (noise.norm(dim=-1, keepdim=True) + 1e-8) * train_norm_mean
         elif mode.startswith("noise_"):
             scale = float(mode.split("_", 1)[1])
             grounded = q + torch.randn(q.shape, generator=rng, device=device) * train_vectors.std().to(device) * scale
@@ -745,18 +782,18 @@ def build_cf_clusters(n_clusters: int = 64, rank: int = 32, seed: int = 42) -> N
     factors = vt.T[:, ::-1] * singular[::-1]
     factors /= np.linalg.norm(factors, axis=1, keepdims=True).clip(1e-8)
     _, clusters = kmeans2(factors, n_clusters, iter=50, minit="++", seed=seed)
-    out = ANALYSIS / "cache/cf_item_clusters.csv"
+    out = ANALYSIS / f"cache/{CATEGORY}_cf_item_clusters.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"item_id": np.arange(n_items), "cf_cluster": clusters}).to_csv(out, index=False)
     mapping = dict(enumerate(clusters.tolist()))
     for split in SPLIT_FILES:
-        meta_path = ANALYSIS / f"evidence/CDs_and_Vinyl/{split}/metadata.csv"
+        meta_path = ANALYSIS / f"evidence/{CATEGORY}/{split}/metadata.csv"
         if meta_path.exists():
             meta = pd.read_csv(meta_path)
-            meta["target_category"] = "CDs_and_Vinyl"
+            meta["target_category"] = CATEGORY
             meta["cf_cluster"] = meta.target_item.map(mapping).fillna(-1).astype(int)
             meta.to_csv(meta_path, index=False)
-    atomic_json(ANALYSIS / "cache/cf_item_clusters.json", {
+    atomic_json(ANALYSIS / f"cache/{CATEGORY}_cf_item_clusters.json", {
         "method": "train-only binary user-item matrix truncated SVD followed by k-means",
         "rank": rank, "n_clusters": n_clusters, "seed": seed, "users": len(users),
         "items": n_items, "edges": len(edges), "train_split_sha256": sha256(SPLIT_FILES["train"]),
@@ -839,7 +876,7 @@ def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
     """Measure and visualize diversity/collapse in extracted train thoughts."""
     seed_all(seed)
     rng = np.random.default_rng(seed)
-    base = ANALYSIS / "evidence/CDs_and_Vinyl"
+    base = ANALYSIS / f"evidence/{CATEGORY}"
     if tag:
         base = base / tag
     base = base / "train"
@@ -847,9 +884,9 @@ def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
     vectors = stored_vectors.float()
     meta = pd.read_csv(base / "metadata.csv")
     if "cf_cluster" not in meta.columns:
-        cf_path = ANALYSIS / "cache/cf_item_clusters.csv"
+        cf_path = ANALYSIS / f"cache/{CATEGORY}_cf_item_clusters.csv"
         if not cf_path.exists():
-            raise FileNotFoundError("CF-cluster mapping is required; run `cf-clusters` first")
+            raise FileNotFoundError(f"CF-cluster mapping is required; run `cf-clusters --category {CATEGORY}` first")
         cf = pd.read_csv(cf_path).set_index("item_id").cf_cluster
         meta["cf_cluster"] = meta.target_item.map(cf).fillna(-1).astype(int)
     if len(vectors) != len(meta):
@@ -979,7 +1016,7 @@ def latent_distribution_report(seed: int = 42, pair_samples: int = 100_000,
                                  np.square(template_utility["mean"] - utility_values.mean())).sum())
 
     report = {
-        "dataset": "CDs_and_Vinyl", "split": "train", "n": n, "dimension": dim,
+        "dataset": CATEGORY, "split": "train", "n": n, "dimension": dim,
         "seed": seed, "pair_samples": pair_samples, "pca_samples": pca_n,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256(checkpoint / "model.safetensors"),
@@ -1135,18 +1172,20 @@ def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("manifest")
-    sub.add_parser("cf-clusters")
+    x = sub.add_parser("cf-clusters"); x.add_argument("--category", default="CDs_and_Vinyl")
     sub.add_parser("evidence-report")
     sub.add_parser("prototype-report")
-    x = sub.add_parser("latent-distribution"); x.add_argument("--seed", type=int, default=42); x.add_argument("--pair-samples", type=int, default=100_000); x.add_argument("--pca-samples", type=int, default=20_000); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
-    x = sub.add_parser("extract"); x.add_argument("--split", choices=SPLIT_FILES, required=True); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
+    x = sub.add_parser("latent-distribution"); x.add_argument("--seed", type=int, default=42); x.add_argument("--pair-samples", type=int, default=100_000); x.add_argument("--pca-samples", type=int, default=20_000); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
+    x = sub.add_parser("extract"); x.add_argument("--split", choices=("train", "valid", "test"), required=True); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
     x = sub.add_parser("intervention"); x.add_argument("--split", choices=("valid", "test"), default="valid"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     x = sub.add_parser("mine"); x.add_argument("--bank", choices=("all", "correct", "positive", "top", "harmful"), required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True)
     x = sub.add_parser("score"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "hard", "residual", "mean", "shuffled", "random"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
-    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
+    x = sub.add_parser("generate"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--mode", choices=("raw", "mask", "hard", "residual", "mean", "shuffled", "shuffle_user", "shuffle_target", "noise_0.25", "noise_0.5", "noise_1.0", "random", "z_alone", "noise_matched"), default="residual"); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1); x.add_argument("--tag", default=""); x.add_argument("--checkpoint", type=Path, default=CHECKPOINT); x.add_argument("--category", default="CDs_and_Vinyl")
     x = sub.add_parser("collaborative"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--topk", type=int, default=4); x.add_argument("--temperature", type=float, default=.1); x.add_argument("--alpha", type=float, default=.5); x.add_argument("--exclusion", choices=("none", "user", "target", "both"), required=True); x.add_argument("--min-users", type=int, default=1); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     x = sub.add_parser("oracle"); x.add_argument("--split", choices=("valid", "test"), required=True); x.add_argument("--bank", required=True); x.add_argument("--k", type=int, required=True); x.add_argument("--seed", type=int, required=True); x.add_argument("--candidate-k", type=int, default=8); x.add_argument("--batch-size", type=int, default=8); x.add_argument("--limit", type=int, default=-1)
     args = p.parse_args()
+    if getattr(args, "category", None):
+        configure_category(args.category)
     if args.command == "manifest": manifest()
     elif args.command == "cf-clusters": build_cf_clusters()
     elif args.command == "evidence-report": evidence_report()

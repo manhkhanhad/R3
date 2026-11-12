@@ -1,3 +1,4 @@
 *.csv
-output_dir/
-data/
+output_dir
+data
+analysis
