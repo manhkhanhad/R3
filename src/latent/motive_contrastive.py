@@ -127,7 +127,7 @@ class MotiveDataset(LatentRDataset):
         if not self.test:
             row = self.data.iloc[idx]
             example["row_id"] = int(self.data.index[idx])
-            example["is_copy"] = int(copy_row(row))   # logging only (never enters a loss)
+            example["is_copy"] = int(copy_row(row))   # logging; also gates the hinge in margin_mode=skipcopy
             if self.novel_hinge:
                 titles = row["history_item_title"]
                 titles = ast.literal_eval(titles) if isinstance(titles, str) else titles
@@ -188,7 +188,7 @@ class HingeLabelCollator:
 
 
 def copy_row(row):
-    """Same-day near-copy of a history item (same brand, title Jaccard >= 0.3); used for logging only."""
+    """Same-day near-copy of a history item (same brand, title Jaccard >= 0.3); logging, and the skipcopy hinge rule."""
     import re
     norm = lambda s: str(s).strip(' "\n')
     tok = lambda t: set(re.findall(r"\w+", norm(t).lower()))
@@ -367,6 +367,13 @@ class MotiveMarginLatentModel(LatentModel):
                 margin_loss = (weight * hinge).mean()
                 self.selfnorm_ema = self.selfnorm_momentum * self.selfnorm_ema + (1 - self.selfnorm_momentum) * batch_mean
                 hinge_stats["selfnorm_ema"] = torch.tensor(self.selfnorm_ema)
+            elif self.margin_mode == "skipcopy":
+                # Rule-based (user decision 2026-11-13): no history-swap hinge on copy rows (same-day near-copy of a
+                # history item, `copy_row`); averaged over the non-copy rows so their pressure equals MWC-M's.
+                if is_copy is None:
+                    raise ValueError("margin_mode=skipcopy needs is_copy from the dataset")
+                weight = 1.0 - is_copy.to(hinge.dtype)
+                margin_loss = (weight * hinge).sum() / weight.sum().clamp(min=1.0)
             else:
                 weight = torch.ones_like(hinge)
                 margin_loss = hinge.mean()

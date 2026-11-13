@@ -133,7 +133,7 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
-    modes = ("fixed", "self", "selfnorm", "novel", "adaptive")
+    modes = ("fixed", "self", "selfnorm", "novel", "adaptive", "skipcopy")
     if margin_mode not in modes or (late_margin_mode and late_margin_mode not in modes):
         raise ValueError(f"unknown margin_mode {margin_mode} / late_margin_mode {late_margin_mode}")
     if (late_margin_mode or late_margin_weight >= 0) and margin_epochs <= 0:
