@@ -226,6 +226,12 @@ class MotiveMarginLatentModel(LatentModel):
         self.selfnorm_ema = None     # M3a-n: running mean of u (re-initialised from the first batch after a resume)
         self.selfnorm_momentum = 0.99
         self.selfnorm_cap = 2.0
+        # MWC-M7 ("lagrange"): latent dependence as a constraint E[NLL(y|x,r_other) - NLL(y|x,r_own)] >= delta.
+        # Hinge = mu * mean_i(w_i * hinge_i), w_i = sg(1 - exp(-NLL(y|x,r_other))) (M3a allocation across rows),
+        # dual ascent mu <- clip(mu + lr * (delta - EMA(gap)), 0, mu_max) once per micro-batch.
+        # State [mu, gap_ema, initialised] is a persistent buffer so checkpoint resumes keep it.
+        self.register_buffer("lagrange_state", torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32))
+        self.lagrange_delta, self.lagrange_lr, self.lagrange_momentum, self.lagrange_mu_max = 0.1, 0.01, 0.99, 5.0
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
         self.contrastive_enabled = False
@@ -367,6 +373,30 @@ class MotiveMarginLatentModel(LatentModel):
                 margin_loss = (weight * hinge).mean()
                 self.selfnorm_ema = self.selfnorm_momentum * self.selfnorm_ema + (1 - self.selfnorm_momentum) * batch_mean
                 hinge_stats["selfnorm_ema"] = torch.tensor(self.selfnorm_ema)
+            elif self.margin_mode == "lagrange":
+                weight = (1.0 - torch.exp(-neg_nll.detach().float())).clamp(0.0, 1.0)
+                gap_i = (neg_nll - pos_nll).detach().float()
+                gap = gap_i.mean()
+                st = self.lagrange_state
+                with torch.no_grad():
+                    if st[2] < 0.5:
+                        st[1] = gap
+                        st[2] = 1.0
+                    else:
+                        st[1] = self.lagrange_momentum * st[1] + (1.0 - self.lagrange_momentum) * gap
+                    mu = st[0].clone()
+                margin_loss = mu.to(hinge.dtype) * (weight.to(hinge.dtype) * hinge).mean()
+                with torch.no_grad():
+                    st[0] = torch.clamp(st[0] + self.lagrange_lr * (self.lagrange_delta - st[1]), 0.0, self.lagrange_mu_max)
+                    hinge_stats["lagrange_mu"] = mu
+                    hinge_stats["swap_gap"] = gap
+                    hinge_stats["swap_gap_ema"] = st[1].clone()
+                    if is_copy is not None:
+                        c = is_copy.bool()
+                        if bool(c.any()):
+                            hinge_stats["swap_gap_copy"] = gap_i[c].mean()
+                        if bool((~c).any()):
+                            hinge_stats["swap_gap_noncopy"] = gap_i[~c].mean()
             elif self.margin_mode == "skipcopy":
                 # Rule-based (user decision 2026-11-13): no history-swap hinge on copy rows (same-day near-copy of a
                 # history item, `copy_row`); averaged over the non-copy rows so their pressure equals MWC-M's.

@@ -112,6 +112,11 @@ def train(
     late_margin_weight: float = -1.0,
     adaptive_alpha: float = 0.5,
     selfnorm_cap: float = 2.0,
+    lagrange_delta: float = 0.1,
+    lagrange_lr: float = 0.01,
+    lagrange_momentum: float = 0.99,
+    lagrange_mu_max: float = 5.0,
+    lagrange_mu_init: float = 1.0,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -133,7 +138,7 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
-    modes = ("fixed", "self", "selfnorm", "novel", "adaptive", "skipcopy")
+    modes = ("fixed", "self", "selfnorm", "novel", "adaptive", "skipcopy", "lagrange")
     if margin_mode not in modes or (late_margin_mode and late_margin_mode not in modes):
         raise ValueError(f"unknown margin_mode {margin_mode} / late_margin_mode {late_margin_mode}")
     if (late_margin_mode or late_margin_weight >= 0) and margin_epochs <= 0:
@@ -154,7 +159,8 @@ def train(
                             "max_positives": max_positives, "num_negatives": num_negatives,
                             "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
-                            "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap}
+                            "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap,
+                            "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init}}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -164,6 +170,10 @@ def train(
     model.margin_mode = margin_mode
     model.adaptive_alpha = adaptive_alpha
     model.selfnorm_cap = selfnorm_cap
+    model.lagrange_delta, model.lagrange_lr = lagrange_delta, lagrange_lr
+    model.lagrange_momentum, model.lagrange_mu_max = lagrange_momentum, lagrange_mu_max
+    # fp32 (from_pretrained casts buffers to bf16, where mu steps of lr would round away); resume reloads it.
+    model.lagrange_state = torch.tensor([lagrange_mu_init, 0.0, 0.0], dtype=torch.float32)
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
