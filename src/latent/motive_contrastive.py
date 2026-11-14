@@ -232,6 +232,7 @@ class MotiveMarginLatentModel(LatentModel):
         # State [mu, gap_ema, initialised] is a persistent buffer so checkpoint resumes keep it.
         self.register_buffer("lagrange_state", torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32))
         self.lagrange_delta, self.lagrange_lr, self.lagrange_momentum, self.lagrange_mu_max = 0.1, 0.01, 0.99, 5.0
+        self.ref_weight = None   # MW-R: per-train-row hinge weight (fp32 tensor indexed by row_id), set_ref_weights
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
         self.contrastive_enabled = False
@@ -240,6 +241,10 @@ class MotiveMarginLatentModel(LatentModel):
 
     _per_example_nll = staticmethod(MarginLatentModel._per_example_nll)
     _thought_positions = MarginLatentModel._thought_positions
+
+    def set_ref_weights(self, weights):
+        """MW-R: plain (non-buffer) fp32 attribute; moved to the model's device on first use."""
+        self.ref_weight = weights.float()
 
     def set_positive_index(self, index, items, users):
         for name, value in zip(("cross_ptr", "cross_idx", "within_ptr", "within_idx"), index):
@@ -397,6 +402,15 @@ class MotiveMarginLatentModel(LatentModel):
                             hinge_stats["swap_gap_copy"] = gap_i[c].mean()
                         if bool((~c).any()):
                             hinge_stats["swap_gap_noncopy"] = gap_i[~c].mean()
+            elif self.margin_mode == "refweight":
+                # MW-R: hinge weighted by how much the history lacks about the target, w_i = f(NLL_ref(y_i | x_i))
+                # from a frozen reference LM (precomputed per train row, set_ref_weights); averaged over sum(w).
+                if row_id is None or self.ref_weight is None:
+                    raise ValueError("margin_mode=refweight needs row_id and set_ref_weights()")
+                if self.ref_weight.device != row_id.device:
+                    self.ref_weight = self.ref_weight.to(row_id.device)
+                weight = self.ref_weight[row_id].to(hinge.dtype)
+                margin_loss = (weight * hinge).sum() / weight.sum().clamp(min=1e-6)
             elif self.margin_mode == "skipcopy":
                 # Rule-based (user decision 2026-11-13): no history-swap hinge on copy rows (same-day near-copy of a
                 # history item, `copy_row`); averaged over the non-copy rows so their pressure equals MWC-M's.

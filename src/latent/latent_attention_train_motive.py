@@ -78,6 +78,28 @@ class MotivePhaseCallback(transformers.TrainerCallback):
                 self.margin_announced = phase
 
 
+def reference_weights(path, fn, tau, n_rows):
+    """MW-R: per-train-row hinge weight from the frozen reference LM's NLL of the target (reference_score.py).
+    rank: percentile of NLL_ref in [0, 1]; sigmoid: sigmoid((NLL_ref - median) / tau).  Low NLL_ref (the history
+    already explains the target) -> small weight.  Indexed by row_id (CSV row position)."""
+    ref = torch.load(path, map_location="cpu", weights_only=False)
+    nll, rows = ref["nll_mean"].double(), ref["row_id"].long()
+    if fn == "rank":
+        w = nll.argsort().argsort().double() / max(1, len(nll) - 1)
+    elif fn == "sigmoid":
+        w = torch.sigmoid((nll - nll.median()) / tau)
+    else:
+        raise ValueError(f"unknown ref_weight_fn {fn}")
+    out = torch.full((n_rows,), float("nan"), dtype=torch.float64)
+    out[rows] = w
+    if torch.isnan(out).any():
+        raise ValueError(f"reference file {path} misses {int(torch.isnan(out).sum())} of {n_rows} train rows")
+    c = ref["is_copy"].bool()
+    print(f"MW-R weights ({fn}, tau {tau}): mean {w.mean():.3f}; copy {w[c].mean():.3f} vs non-copy {w[~c].mean():.3f}",
+          flush=True)
+    return out.float()
+
+
 def train(
     base_model: str = "Qwen/Qwen2.5-1.5B-Instruct",
     train_file: str = "",
@@ -117,6 +139,9 @@ def train(
     lagrange_momentum: float = 0.99,
     lagrange_mu_max: float = 5.0,
     lagrange_mu_init: float = 1.0,
+    ref_nll_file: str = "",
+    ref_weight_fn: str = "rank",
+    ref_tau: float = 0.5,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -138,7 +163,7 @@ def train(
                                                       sasrec_file=sasrec_file or None, sasrec_k=sasrec_k)
     print(f"motive positives (threshold {within_threshold}, within={within_mode}, k={sasrec_k}): {stats}", flush=True)
 
-    modes = ("fixed", "self", "selfnorm", "novel", "adaptive", "skipcopy", "lagrange")
+    modes = ("fixed", "self", "selfnorm", "novel", "adaptive", "skipcopy", "lagrange", "refweight")
     if margin_mode not in modes or (late_margin_mode and late_margin_mode not in modes):
         raise ValueError(f"unknown margin_mode {margin_mode} / late_margin_mode {late_margin_mode}")
     if (late_margin_mode or late_margin_weight >= 0) and margin_epochs <= 0:
@@ -160,7 +185,8 @@ def train(
                             "within_threshold": within_threshold, "warmup_epochs": warmup_epochs,
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
                             "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap,
-                            "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init}}
+                            "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
+                            "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau}}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -174,6 +200,8 @@ def train(
     model.lagrange_momentum, model.lagrange_mu_max = lagrange_momentum, lagrange_mu_max
     # fp32 (from_pretrained casts buffers to bf16, where mu steps of lr would round away); resume reloads it.
     model.lagrange_state = torch.tensor([lagrange_mu_init, 0.0, 0.0], dtype=torch.float32)
+    if margin_mode == "refweight":
+        model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, int(stats["rows"])))
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
