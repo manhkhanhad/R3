@@ -41,7 +41,10 @@ def auroc(score, label):
 
 @torch.no_grad()
 def score(base_model: str = "Qwen/Qwen2.5-1.5B", file: str = "", split: str = "train", out_dir: str = "",
-          category: str = "Toys_and_Games", batch_size: int = 16, cutoff_len: int = 512, sample: int = -1):
+          category: str = "Toys_and_Games", batch_size: int = 16, cutoff_len: int = 512, sample: int = -1,
+          latent_model: bool = False):
+    """latent_model=True: base_model is a trained R3-family latent checkpoint (e.g. MW-3b, whose predictions ignore
+    the latent content); the <|Thought|> slot is kept and filled by its own pooled latent (LatentModel eval forward)."""
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{split}.pt")
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -54,12 +57,16 @@ def score(base_model: str = "Qwen/Qwen2.5-1.5B", file: str = "", split: str = "t
 
     data = MotiveDataset(train_file=file, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=0,
                          category=CATEGORY_TEXT[category], K=0)
-    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16).cuda().eval()
+    if latent_model:
+        from motive_contrastive import MotiveMarginLatentModel
+        model = MotiveMarginLatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16).cuda().eval()
+    else:
+        model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16).cuda().eval()
 
     rows = []
     for i in range(len(data)):
         e = data[i]
-        keep = [t != thought_id for t in e["input_ids"]]
+        keep = [latent_model or t != thought_id for t in e["input_ids"]]
         ids = [t for t, k in zip(e["input_ids"], keep) if k]
         labels = [l for l, k in zip(e["labels"], keep) if k]
         rows.append((e["row_id"], e["is_copy"], ids, labels))
@@ -90,7 +97,8 @@ def score(base_model: str = "Qwen/Qwen2.5-1.5B", file: str = "", split: str = "t
             print(f"  {b + len(chunk)}/{len(rows)}", flush=True)
 
     res = {"row_id": torch.tensor(row_ids), "nll_mean": torch.tensor(nll_mean), "nll_sum": torch.tensor(nll_sum),
-           "n_tokens": torch.tensor(n_tok), "is_copy": torch.tensor(is_copy), "base_model": base_model}
+           "n_tokens": torch.tensor(n_tok), "is_copy": torch.tensor(is_copy), "base_model": base_model,
+           "latent_model": latent_model}
     torch.save(res, out_path)
     c = np.array(is_copy, bool)
     m, s_ = np.array(nll_mean), np.array(nll_sum)

@@ -28,6 +28,6 @@ for split in train valid test; do
   file=$(ls data/${category}/${split}/${category}_5_*.csv)
   echo "[$(date --iso-8601=seconds)] scoring $split <- $file"
   python "$code_root/src/latent/reference_score.py" --base_model "${BASE_MODEL:-Qwen/Qwen2.5-1.5B}" \
-    --file "$file" --split "$split" --out_dir "$out_dir" --category "$category" --sample "${SAMPLE:--1}"
+    --file "$file" --split "$split" --out_dir "$out_dir" --category "$category" --sample "${SAMPLE:--1}" ${LATENT_MODEL:+--latent_model True}
 done
 echo "[$(date --iso-8601=seconds)] reference scoring complete"
