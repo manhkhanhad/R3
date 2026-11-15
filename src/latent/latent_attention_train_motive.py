@@ -146,7 +146,12 @@ def train(
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
     wandb_run_name: str = None,
+    train_seed: int = None,
 ):
+    # train_seed: None keeps the old behaviour (no global seeding before model init; HF Trainer default seed 42).
+    # An int seeds module init, data order and dropout (transformers.set_seed + TrainingArguments seed/data_seed).
+    if train_seed is not None:
+        transformers.set_seed(train_seed)
     if batch_size % micro_batch_size:
         raise ValueError("batch_size must be divisible by micro_batch_size")
     init_training_run(dataset=category, config={"base_model": base_model, "output_dir": output_dir, "dataset": category})
@@ -186,7 +191,7 @@ def train(
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
                             "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap,
                             "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
-                            "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau}}
+                            "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau}, "train_seed": train_seed}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -218,6 +223,7 @@ def train(
             learning_rate=learning_rate, bf16=True, logging_steps=1, optim="adamw_torch",
             eval_strategy="epoch", save_strategy="epoch", save_total_limit=1, output_dir=output_dir,
             load_best_model_at_end=False, report_to=wandb_report_to(), remove_unused_columns=False,
+            **({"seed": train_seed, "data_seed": train_seed} if train_seed is not None else {}),
         ),
         data_collator=collator,
         callbacks=[GroundedLogCallback(), MotivePhaseCallback(warmup_epochs, margin_epochs, margin_mode, late_margin_mode,

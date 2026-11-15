@@ -26,7 +26,7 @@
 #              Eval: donor controls knn / off / shuffle_outcome and slot interventions (SLOT_MODE on r1)
 #              mask / mean / shuffle_user; paired bootstrap vs knn; slot-bank geometry.
 # Env: CODE_ROOT (required), METHOD (infonce|grounded), CATEGORY (Toys_and_Games), WEIGHT (0.1), MARGIN,
-#      MARGIN_WEIGHT, GATE, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE,
+#      MARGIN_WEIGHT, GATE, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE, TRAIN_SEED (unset = old default seeding),
 #      EXTRACT_LIMIT, INTERVENTION_LIMIT, MODES, CONTROLS, SLOT_MODES, TRACE_N, USER_W, TARGET_W, HARD_NEG, ITEM_W, ITEM_TAU.
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -80,7 +80,8 @@ if [[ ! -f "$out/config.json" ]]; then
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128
     --num_epochs "${NUM_EPOCHS:-3}" --learning_rate 3e-4 --cutoff_len 512
     --margin "$margin" --margin_weight "$margin_weight"
-    --wider_weight "$weight" --wider_momentum "${MOMENTUM:-0.99}")
+    --wider_weight "$weight" --wider_momentum "${MOMENTUM:-0.99}"
+    ${TRAIN_SEED:+--train_seed "$TRAIN_SEED"})
   if [[ "$method" == infonce ]]; then
     python "$code_root/src/latent/latent_attention_train_collaborative_margin.py" "${common[@]}" \
       --margin_only_epochs 1 --phase2_margin_weight "$margin_weight" \
