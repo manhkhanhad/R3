@@ -26,7 +26,7 @@
 #              Eval: donor controls knn / off / shuffle_outcome and slot interventions (SLOT_MODE on r1)
 #              mask / mean / shuffle_user; paired bootstrap vs knn; slot-bank geometry.
 # Env: CODE_ROOT (required), METHOD (infonce|grounded), CATEGORY (Toys_and_Games), WEIGHT (0.1), MARGIN,
-#      MARGIN_WEIGHT, GATE, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE, TRAIN_SEED (unset = old default seeding),
+#      MARGIN_WEIGHT, GATE, NUM_EPOCHS, OUTPUT_ROOT, OUTPUT_NAME, TRAIN_SAMPLE, VALID_SAMPLE, TEST_SAMPLE, TRAIN_SEED (unset = old default seeding), REF_POWER, BAND_UPPER, BAND_BETA,
 #      EXTRACT_LIMIT, INTERVENTION_LIMIT, MODES, CONTROLS, SLOT_MODES, TRACE_N, USER_W, TARGET_W, HARD_NEG, ITEM_W, ITEM_TAU.
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
@@ -96,7 +96,7 @@ if [[ ! -f "$out/config.json" ]]; then
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
       --warmup_epochs 1 --motive_weight "${MOTIVE_W:-0.1}" --temperature 0.1 \
       --within_threshold "${WITHIN_T:-0.8}" --within_mode "${WITHIN_MODE:-user}" --sasrec_k "${SASREC_K:-20}" \
-      --margin_mode "${MARGIN_MODE:-fixed}" --margin_epochs "${MARGIN_EPOCHS:--1}" --late_margin_mode "${LATE_MARGIN_MODE:-}" --late_margin_weight "${LATE_MARGIN_WEIGHT:--1}" --lagrange_delta "${LAGRANGE_DELTA:-0.1}" --lagrange_lr "${LAGRANGE_LR:-0.01}" --ref_nll_file "${REF_NLL_FILE:-}" --ref_weight_fn "${REF_WEIGHT_FN:-rank}" --ref_tau "${REF_TAU:-0.5}" --adaptive_alpha "${ADAPTIVE_ALPHA:-0.5}" \
+      --margin_mode "${MARGIN_MODE:-fixed}" --margin_epochs "${MARGIN_EPOCHS:--1}" --late_margin_mode "${LATE_MARGIN_MODE:-}" --late_margin_weight "${LATE_MARGIN_WEIGHT:--1}" --lagrange_delta "${LAGRANGE_DELTA:-0.1}" --lagrange_lr "${LAGRANGE_LR:-0.01}" --ref_nll_file "${REF_NLL_FILE:-}" --ref_weight_fn "${REF_WEIGHT_FN:-rank}" --ref_tau "${REF_TAU:-0.5}" --ref_power "${REF_POWER:-1.0}" --band_upper "${BAND_UPPER:--1}" --band_beta "${BAND_BETA:-1.0}" --adaptive_alpha "${ADAPTIVE_ALPHA:-0.5}" \
       --sasrec_file "${SASREC_FILE:-output_dir/sasrec_latent/prep/Toys_sasrec_sequence.pt}" --max_positives 16 --num_negatives 256 --projection_dim 256 "${resume[@]}"
   elif [[ "$method" == cfg3 ]]; then
     python "$code_root/src/latent/latent_attention_train_cf_grounded_margin.py" "${common[@]}" \

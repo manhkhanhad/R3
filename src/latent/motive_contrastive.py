@@ -232,6 +232,9 @@ class MotiveMarginLatentModel(LatentModel):
         # State [mu, gap_ema, initialised] is a persistent buffer so checkpoint resumes keep it.
         self.register_buffer("lagrange_state", torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32))
         self.lagrange_delta, self.lagrange_lr, self.lagrange_momentum, self.lagrange_mu_max = 0.1, 0.01, 0.99, 5.0
+        # MW-B (band hinge): margin_loss += beta * mean_i [gap_i - U]+, gap_i = NLL(y|x,r_other) - NLL(y|x,r_own),
+        # an upper bound on latent dependence (two-sided, same gradient path as the hinge); U <= 0 disables it.
+        self.band_upper, self.band_beta = -1.0, 1.0
         self.ref_weight = None   # MW-R: per-train-row hinge weight (fp32 tensor indexed by row_id), set_ref_weights
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
@@ -421,6 +424,22 @@ class MotiveMarginLatentModel(LatentModel):
             else:
                 weight = torch.ones_like(hinge)
                 margin_loss = hinge.mean()
+            if self.band_upper > 0:
+                gap_b = neg_nll - pos_nll
+                band = F.relu(gap_b - self.band_upper)
+                margin_loss = margin_loss + self.band_beta * band.mean()
+                with torch.no_grad():
+                    hinge_stats["band_loss"] = band.mean()
+                    hinge_stats["band_active"] = (band > 0).float().mean()
+                    hinge_stats["swap_gap"] = gap_b.mean()
+                    if is_copy is not None:
+                        c = is_copy.bool()
+                        if bool(c.any()):
+                            hinge_stats["swap_gap_copy"] = gap_b[c].mean()
+                            hinge_stats["band_active_copy"] = (band[c] > 0).float().mean()
+                        if bool((~c).any()):
+                            hinge_stats["swap_gap_noncopy"] = gap_b[~c].mean()
+                            hinge_stats["band_active_noncopy"] = (band[~c] > 0).float().mean()
             with torch.no_grad():
                 hinge_stats["hinge_weight"] = weight.mean()
                 if is_copy is not None:

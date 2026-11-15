@@ -78,7 +78,7 @@ class MotivePhaseCallback(transformers.TrainerCallback):
                 self.margin_announced = phase
 
 
-def reference_weights(path, fn, tau, n_rows):
+def reference_weights(path, fn, tau, n_rows, power=1.0):
     """MW-R: per-train-row hinge weight from the frozen reference LM's NLL of the target (reference_score.py).
     rank: percentile of NLL_ref in [0, 1]; sigmoid: sigmoid((NLL_ref - median) / tau).  Low NLL_ref (the history
     already explains the target) -> small weight.  Indexed by row_id (CSV row position)."""
@@ -90,12 +90,13 @@ def reference_weights(path, fn, tau, n_rows):
         w = torch.sigmoid((nll - nll.median()) / tau)
     else:
         raise ValueError(f"unknown ref_weight_fn {fn}")
+    w = w.clamp(min=0.0) ** power   # MW-R-H2: sharpen (power > 1) toward the zero-weight-on-copy-like-rows limit
     out = torch.full((n_rows,), float("nan"), dtype=torch.float64)
     out[rows] = w
     if torch.isnan(out).any():
         raise ValueError(f"reference file {path} misses {int(torch.isnan(out).sum())} of {n_rows} train rows")
     c = ref["is_copy"].bool()
-    print(f"MW-R weights ({fn}, tau {tau}): mean {w.mean():.3f}; copy {w[c].mean():.3f} vs non-copy {w[~c].mean():.3f}",
+    print(f"MW-R weights ({fn}, tau {tau}, power {power}): mean {w.mean():.3f}; copy {w[c].mean():.3f} vs non-copy {w[~c].mean():.3f}",
           flush=True)
     return out.float()
 
@@ -142,6 +143,9 @@ def train(
     ref_nll_file: str = "",
     ref_weight_fn: str = "rank",
     ref_tau: float = 0.5,
+    ref_power: float = 1.0,
+    band_upper: float = -1.0,
+    band_beta: float = 1.0,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -191,7 +195,8 @@ def train(
                             "within_mode": within_mode, "sasrec_k": sasrec_k,
                             "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap,
                             "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
-                            "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau}, "train_seed": train_seed}
+                            "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau, "power": ref_power},
+                            "band": {"upper": band_upper, "beta": band_beta}, "train_seed": train_seed}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -203,10 +208,11 @@ def train(
     model.selfnorm_cap = selfnorm_cap
     model.lagrange_delta, model.lagrange_lr = lagrange_delta, lagrange_lr
     model.lagrange_momentum, model.lagrange_mu_max = lagrange_momentum, lagrange_mu_max
+    model.band_upper, model.band_beta = band_upper, band_beta
     # fp32 (from_pretrained casts buffers to bf16, where mu steps of lr would round away); resume reloads it.
     model.lagrange_state = torch.tensor([lagrange_mu_init, 0.0, 0.0], dtype=torch.float32)
     if margin_mode == "refweight":
-        model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, int(stats["rows"])))
+        model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, int(stats["rows"]), ref_power))
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
