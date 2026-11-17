@@ -52,6 +52,10 @@ task_dir="${OUTPUT_ROOT}/${category}_R3${OUTPUT_SUFFIX:-}"
 out="${task_dir}/latent"
 mkdir -p "$out"
 
+if [[ -n "${SKIP_TRAIN:-}" ]]; then
+  test -f "$out/model.safetensors" || { echo "SKIP_TRAIN set but no model in $out" >&2; exit 1; }
+  echo "[$(date --iso-8601=seconds)] SKIP_TRAIN: evaluating existing model in $out"
+else
 echo "[$(date --iso-8601=seconds)] Starting ${category} R3 training"
 python src/latent/latent_attention_train.py \
   --base_model Qwen/Qwen2.5-1.5B-Instruct \
@@ -60,6 +64,7 @@ python src/latent/latent_attention_train.py \
   --sample -1 --micro_batch_size "$micro_batch_size" --batch_size 128 \
   --num_epochs 3 --cutoff_len 512 \
   --save_total_limit 1
+fi
 
 echo "[$(date --iso-8601=seconds)] Training finished; starting ranking evaluation"
 python src/utils/split.py --input_path "$test_file" --output_path "$task_dir" --nn 1
