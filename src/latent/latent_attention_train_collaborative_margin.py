@@ -29,6 +29,10 @@ class CollaborativeMarginLogCallback(CollaborativeLogCallback):
         for attr, key in (
             ("last_margin_loss", "margin_loss"),
             ("last_contrastive_enabled", "contrastive_enabled"),
+            ("last_wider_loss", "wider_loss"),
+            ("last_hard_negative_rate", "hard_negative_rate"),
+            ("last_item_loss", "item_loss"),
+            ("last_item_hit10", "item_hit10"),
         ):
             value = getattr(target, attr, None)
             logs[key] = value.item() if value is not None else None
@@ -67,6 +71,7 @@ def train(
     eval_file: str = "data/train/Toys_and_Games_5_2017-1-2018-11.csv",
     output_dir: str = "./output_test/",
     sample: int = 1024,
+    eval_sample: int = None,
     seed: int = 0,
     end_k: int = -1,
     batch_size: int = 128,
@@ -92,6 +97,17 @@ def train(
     num_negatives: int = 256,
     positive_min_token_accuracy: float = 1.0,
     positive_max_nll: float = float("inf"),
+    # same-user different-target hard negatives per anchor for the target InfoNCE; 0 = off
+    hard_negatives: int = 0,
+    # C1 item-prediction head on r: item_emb_file (Qwen3 title table, rows = sorted item ids), weight 0 = off
+    item_emb_file: str = "",
+    item_weight: float = 0.0,
+    item_tau: float = 0.07,
+    # WIDER regulariser on the pooled r (wider_reg.py); 0 = off
+    wider_weight: float = 0.0,
+    wider_momentum: float = 0.99,
+    # parity with latent_attention_train_margin.py (load best by eval loss, patience 1); off = L1 recipe
+    early_stopping: bool = False,
     wandb_run_name: str = None,
 ):
     if margin_weight > 0 and micro_batch_size < 2:
@@ -118,6 +134,16 @@ def train(
 
     config = AutoConfig.from_pretrained(base_model)
     config.collaborative_contrastive = {"projection_dim": projection_dim, "bank_size": bank_size}
+    item_table = item_ids = None
+    if item_weight > 0:
+        import glob
+        from item_title_embeddings import read_titles
+        item_table = torch.load(item_emb_file, map_location="cpu", weights_only=False)["embeddings"].float()
+        info_file = glob.glob(os.path.join(os.path.dirname(item_emb_file), category + "_5_*.txt"))[0]
+        item_ids = list(range(len(read_titles(info_file))))  # read_titles enforces ids 0..N-1 = table rows
+        assert len(item_ids) == item_table.size(0), (len(item_ids), item_table.size(0))
+        config.collaborative_item = {"item_dim": int(item_table.size(1)), "n_items": int(item_table.size(0)),
+                                     "max_item_id": int(max(item_ids)), "tau": item_tau, "weight": item_weight}
     model = CollaborativeMarginLatentModel.from_pretrained(
         base_model, config=config, torch_dtype=torch.bfloat16,
     )
@@ -135,7 +161,18 @@ def train(
     model.num_negatives = num_negatives
     model.positive_min_token_accuracy = positive_min_token_accuracy
     model.positive_max_nll = positive_max_nll
+    model.hard_negatives = hard_negatives
+    if item_table is not None:
+        model.item_head.float()  # new module in fp32 (bf16 froze LayerNorm scales in L4-L6)
+        model.item_emb.copy_(item_table.to(model.item_emb.dtype))
+        model.item_row[torch.tensor(item_ids)] = torch.arange(len(item_ids))
+        print(f"item head: table {tuple(item_table.shape)}, weight {item_weight}, tau {item_tau}, "
+              f"head dtype {model.item_head[1].weight.dtype}")
     model.grad_accum_steps = gradient_accumulation_steps
+    if wider_weight > 0:
+        # CollaborativeMarginLatentModel adds the penalty itself, before its own /grad_accum_steps
+        model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
+        print("WIDER regulariser:", model.config.latent_wider)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     additional_special_tokens = list(tokenizer.additional_special_tokens)
@@ -152,6 +189,7 @@ def train(
         f"phase2_margin_weight={phase2_margin_weight}, queue={bank_size}, "
         f"projection={projection_dim}, temperature={temperature}, "
         f"user_weight={user_contrastive_weight}, target_weight={target_contrastive_weight}, "
+        f"hard_negatives={hard_negatives}, item_weight={item_weight}, "
         f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}"
     )
     train_data = CollaborativeContrastiveDataset(
@@ -160,7 +198,7 @@ def train(
     )
     val_data = CollaborativeContrastiveDataset(
         train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,
-        sample=sample, category=category_text, K=K,
+        sample=sample if eval_sample is None else eval_sample, category=category_text, K=K,
     )
     hf_train_dataset = HFDataset.from_dict(
         {key: [value[key] for value in train_data] for key in train_data[0]}
@@ -191,7 +229,8 @@ def train(
             save_strategy="epoch",
             output_dir=output_dir,
             save_total_limit=1,
-            load_best_model_at_end=False,
+            load_best_model_at_end=early_stopping,
+            metric_for_best_model="eval_loss" if early_stopping else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
             remove_unused_columns=False,
@@ -200,7 +239,7 @@ def train(
         callbacks=[
             PhaseCallback(margin_only_epochs, phase2_margin_weight),
             CollaborativeMarginLogCallback(),
-        ],
+        ] + ([transformers.EarlyStoppingCallback(early_stopping_patience=1)] if early_stopping else []),
     )
     move_callback_to_end(trainer, transformers.integrations.WandbCallback)
     model.config.use_cache = False

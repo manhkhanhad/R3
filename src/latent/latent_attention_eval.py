@@ -62,7 +62,7 @@ def main(
             "dataset": dataset_name,
         },
     )
-    category_dict = {"Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movies": "movie",
+    category_dict = {"Goodreads": "books", "Office_Products": "office products", "Books": "books", "steam": "games", "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games", "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movies": "movie",
                      "yelp": "resturant" }
     category = category_dict[category]
 
@@ -98,6 +98,9 @@ def main(
         raise ValueError(f"unknown candidate_mode {candidate_mode}")
     model = model_class.from_pretrained(base_model, torch_dtype=torch.bfloat16, use_flash_attention_2=False)
     model.attention.end_k = end_k
+    if getattr(model.config, "latent_cf_grounded", None):
+        from cf_grounded_margin import restore_fp32
+        restore_fp32(model, base_model)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
@@ -275,12 +278,40 @@ def main(
     if thought_mode != "raw":
         replacement = thought_replacements(model, tokenizer, new_encodings, val_dataset.data, thought_mode,
                                            thought_seed, result_json_data)
-    grounded = getattr(model.config, "latent_grounded_reasoning", None)
+    cf_grounded = getattr(model.config, "latent_cf_grounded", None)
+    grounded = getattr(model.config, "latent_grounded_reasoning", None) or cf_grounded
     if grounded:
         from grounded_reasoning import row_metadata
-        if not bool(model.attention.bank_ready):
+        if cf_grounded:
+            from cf_grounded_margin import eval_donors
+            cf_idx, cf_feat = eval_donors(model, val_dataset.data, os.environ.get("GROUNDING_MODE", "knn"),
+                                          seed=thought_seed)
+        elif not bool(model.attention.bank_ready):
             raise RuntimeError("grounded reasoning checkpoint has no inference bank")
         meta = [row_metadata(val_dataset.data.iloc[i]) for i in range(len(val_dataset.data))]
+        slot_mode = os.environ.get("SLOT_MODE", "raw")
+        slot_rows = None
+        if slot_mode != "raw":
+            # Replace the grounded slot vector r1 (grounded_margin.py slot bank = train rows' r1).
+            bank = torch.load(os.path.join(base_model, "slot_bank.pt"), map_location="cpu").float()
+            bank_users = torch.load(os.path.join(base_model, "slot_bank_users.pt"), map_location="cpu")
+            n = len(meta)
+            if slot_mode == "mask":
+                slot_rows = torch.zeros(n, bank.size(1))
+            elif slot_mode == "mean":
+                slot_rows = bank.mean(0, keepdim=True).expand(n, -1)
+            elif slot_mode == "shuffle_user":
+                gen = torch.Generator().manual_seed(thought_seed)
+                users = torch.tensor([m["query_user"] for m in meta])
+                pick = torch.randint(len(bank), (n,), generator=gen)
+                clash = bank_users[pick] == users
+                while bool(clash.any()):
+                    pick[clash] = torch.randint(len(bank), (int(clash.sum()),), generator=gen)
+                    clash = bank_users[pick] == users
+                slot_rows = bank[pick]
+            else:
+                raise ValueError(f"unknown SLOT_MODE {slot_mode}")
+            print(f"SLOT_MODE={slot_mode}: bank {tuple(bank.shape)}", flush=True)
     intent = getattr(model.config, "latent_intent_reasoning", None)
     intent_mode = os.environ.get("INTENT_MODE", "map")
     intent_predictions = []
@@ -291,6 +322,13 @@ def main(
             rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)
             model.attention.query_user = torch.tensor([m["query_user"] for m in rows], device=device)
+            if cf_grounded:
+                start = idx * batch_size
+                model.attention.donor_idx = cf_idx[start:start + len(encodings)].to(device)
+                model.attention.donor_feat = cf_feat[start:start + len(encodings)].to(device)
+            if slot_rows is not None:
+                start = idx * batch_size
+                model.attention.slot_override = slot_rows[start:start + len(encodings)].to(device)
         if intent and intent_mode == "oracle":
             batch_targets = targets[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.target_item = torch.tensor(batch_targets, device=device)

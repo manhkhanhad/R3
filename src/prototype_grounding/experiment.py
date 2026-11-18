@@ -47,7 +47,7 @@ THOUGHT = "<|Thought|>"
 # Human-readable category noun used in the training-time prompt template
 # (matches the `category_dict` in src/grpo_attention_tuning/{train_noise_grpo,noise_eval}.py).
 CATEGORY_PROMPT_MAP = {
-    "Office_Products": "office products", "Books": "books", "steam": "games",
+    "Goodreads": "books", "Office_Products": "office products", "Books": "books", "steam": "games",
     "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games",
     "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors",
     "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie",

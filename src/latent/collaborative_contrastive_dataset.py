@@ -22,6 +22,7 @@ class CollaborativeContrastiveDataset(LatentRDataset):
             row = self.data.iloc[idx]
             item["user_hash"] = stable_hash(row["user_id"])
             item["target_hash"] = stable_hash(row["item_id"])
+            item["target_item"] = int(row["item_id"])  # raw id for the item-prediction head (C1)
             # Exclude this sample's stale queue entries on later epochs.
             item["sample_hash"] = int(idx)
             if self.title_vectors is not None:

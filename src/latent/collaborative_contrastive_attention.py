@@ -370,12 +370,27 @@ class CollaborativeContrastiveLatentModel(LatentModel):
         )
         if excluded_negatives is not None:
             negatives &= ~excluded_negatives
+        # Same-user hard negatives for the target head (MWC-I-B): this user's other rows with a
+        # different next item are negatives, so r must track what is new in the history rather
+        # than the user's identity (the user-InfoNCE term did the opposite).
+        hard_count = int(getattr(self, "hard_negatives", 0)) if relation == "target" else 0
+        hard = None
+        if hard_count:
+            hard = (
+                not_self
+                & (anchor_user[:, None] == candidate_user[None, :])
+                & (anchor_target[:, None] != candidate_target[None, :])
+            )
+            self.last_hard_negative_rate = hard.any(dim=1).float().mean().detach()
 
         losses = []
         has_positive = positives.any(dim=1)
         for row in range(anchor_r.size(0)):
             pos_idx = self._sample(torch.nonzero(positives[row], as_tuple=False).flatten(), max_positives)
             neg_idx = self._sample(torch.nonzero(negatives[row], as_tuple=False).flatten(), self.num_negatives)
+            if hard is not None:
+                hard_idx = self._sample(torch.nonzero(hard[row], as_tuple=False).flatten(), hard_count)
+                neg_idx = torch.cat([neg_idx, hard_idx])
             if pos_idx.numel() == 0 or neg_idx.numel() == 0:
                 continue
             pos_scores = anchors[row] @ candidates[pos_idx].T / self.temperature

@@ -182,6 +182,11 @@ class LatentModel(Qwen2ForCausalLM):
             from grounded_reasoning import GroundedReasoningLayer
             self.attention = GroundedReasoningLayer(self.attention, config.hidden_size, grounded)
 
+        cf_grounded = getattr(config, "latent_cf_grounded", None)
+        if cf_grounded:
+            from cf_grounded_margin import CFGroundedLayer
+            self.attention = CFGroundedLayer(self.attention, config.hidden_size, cf_grounded)
+
         intent = getattr(config, "latent_intent_reasoning", None)
         if intent:
             from intent_reasoning import IntentReasoningLayer

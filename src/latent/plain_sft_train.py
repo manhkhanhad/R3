@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(current_dir))
 import fire
 import torch
 import transformers
-from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, EarlyStoppingCallback
 
 from experiment_tracking import init_training_run, wandb_report_to
 from plain_sft_dataset import PlainSFTDataset
@@ -32,6 +32,7 @@ def train(
     category: str = "music instruments",
     dataset_name: str = "Musical_Instruments",
     instruction: str = None,
+    early_stopping: bool = False,  # as R3 (latent_attention_train.py): best epoch by eval loss, patience 1
 ):
     if batch_size < micro_batch_size or batch_size % micro_batch_size:
         raise ValueError("batch_size must be a multiple of micro_batch_size")
@@ -83,7 +84,9 @@ def train(
             optim="adamw_torch",
             eval_strategy="epoch",
             save_strategy="epoch",
-            save_total_limit=1,
+            save_total_limit=1,   # one checkpoint per run (best is kept by load_best_model_at_end)
+            load_best_model_at_end=early_stopping,
+            metric_for_best_model="eval_loss" if early_stopping else None,
             report_to=wandb_report_to(),
             remove_unused_columns=False,
             seed=seed,
@@ -91,6 +94,7 @@ def train(
         data_collator=DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True,
         ),
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=1)] if early_stopping else None,
     )
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     model.config.use_cache = True
