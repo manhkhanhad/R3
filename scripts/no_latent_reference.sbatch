@@ -28,7 +28,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}" R3_ROOT="$PWD"
 sft="${SFT_CODE_ROOT:-$SCORER_ROOT}"
 scorer="${SCORER_ROOT:?set SCORER_ROOT to a frozen copy with src/latent/reference_score.py}"
 category="${CATEGORY:-Toys_and_Games}"
-declare -A noun=([Toys_and_Games]="toys and games" [Musical_Instruments]="music instruments" [CDs_and_Vinyl]="musics")
+declare -A noun=([Goodreads]="books" [Toys_and_Games]="toys and games" [Musical_Instruments]="music instruments" [CDs_and_Vinyl]="musics")
 data="data/${category}"
 train_file=$(ls "$data"/train/*.csv); valid_file=$(ls "$data"/valid/*.csv)
 test_file=$(ls "$data"/test/*.csv); info_file=$(ls "$data"/info/*.txt)

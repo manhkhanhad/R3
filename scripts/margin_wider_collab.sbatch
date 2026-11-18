@@ -40,7 +40,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 method="${METHOD:?METHOD=infonce|grounded}"
 category="${CATEGORY:-Toys_and_Games}"
 weight="${WEIGHT:-0.1}"
-case "$category" in CDs_and_Vinyl) prompt_category=musics ;; Toys_and_Games) prompt_category="toys and games" ;; Musical_Instruments) prompt_category="music instruments" ;; *) echo "no prompt category for $category" >&2; exit 2 ;; esac
+case "$category" in Goodreads) prompt_category=books ;; CDs_and_Vinyl) prompt_category=musics ;; Toys_and_Games) prompt_category="toys and games" ;; Musical_Instruments) prompt_category="music instruments" ;; *) echo "no prompt category for $category" >&2; exit 2 ;; esac
 margin="${MARGIN:-0.2}"; margin_weight="${MARGIN_WEIGHT:-1.0}"
 name="${OUTPUT_NAME:-${category}_margin_${margin}_wider_${weight}_${method}}"
 # infonce variant B (MWC-I-B): USER_W=0 HARD_NEG=16 (same-user different-target hard negatives for the target head)
