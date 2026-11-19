@@ -81,7 +81,7 @@ def train(
         "Musical_Instruments": "music instruments",
         "Sports_and_Outdoors": "sports and outdoors",
         "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products",
-        "Movies": "movie", "yelp": "resturant",
+        "Movielens": "movie", "yelp": "resturant",
     }
     category_text = category_dict[category]
     gradient_accumulation_steps = batch_size // micro_batch_size

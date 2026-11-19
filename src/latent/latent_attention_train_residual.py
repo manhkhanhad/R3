@@ -145,7 +145,7 @@ def train(
         "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games",
         "Video_Games": "video games", "Musical_Instruments": "music instruments",
         "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies",
-        "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie", "yelp": "resturant",
+        "Arts_Crafts_and_Sewing": "arts products", "Movielens": "movie", "yelp": "resturant",
     }
     category_prompt = category_dict[category]
     gradient_accumulation_steps = batch_size // micro_batch_size

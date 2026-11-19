@@ -72,7 +72,7 @@ def train(
         "Musical_Instruments": "music instruments",
         "Sports_and_Outdoors": "sports and outdoors",
         "Pet_Supplies": "pet supplies",
-        "Arts_Crafts_and_Sewing": "arts products", "Movies": "movie",
+        "Arts_Crafts_and_Sewing": "arts products", "Movielens": "movie",
         "yelp": "resturant",
     }
     category_text = category_dict[category]
