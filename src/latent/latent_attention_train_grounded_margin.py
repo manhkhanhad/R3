@@ -29,7 +29,7 @@ class GroundedLogCallback(transformers.TrainerCallback):
 
 
 CATEGORY_TEXT = {
-    "Goodreads": "books", "Office_Products": "office products", "Books": "books", "steam": "games",
+    "Steam": "games", "Goodreads": "books", "Office_Products": "office products", "Books": "books", "steam": "games",
     "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games",
     "Video_Games": "video games", "Musical_Instruments": "music instruments",
     "Sports_and_Outdoors": "sports and outdoors", "Pet_Supplies": "pet supplies",
