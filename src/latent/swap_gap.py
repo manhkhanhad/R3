@@ -30,6 +30,9 @@ def summarize(gap, pos, neg, c, m=0.2):
     out = {}
     for name, sel in (("all", np.ones_like(c, bool)), ("copy", c), ("noncopy", ~c)):
         g = gap[sel]
+        if len(g) == 0:   # e.g. Goodreads has no copy rows
+            out[name] = {"n": 0}
+            continue
         out[name] = {"n": int(sel.sum()), "pos_nll": float(pos[sel].mean()), "neg_nll": float(neg[sel].mean()),
                      "gap_mean": float(g.mean()), "gap_median": float(np.median(g)),
                      "gap_q10_25_75_90": [float(np.quantile(g, q)) for q in (0.1, 0.25, 0.75, 0.9)],
@@ -90,6 +93,8 @@ def run(model_dir: str = "", tag: str = "", file: str = "", split: str = "test",
         f.write(json.dumps({"tag": tag, "split": split, "model_dir": model_dir, **s}) + "\n")
     for k in ("copy", "noncopy"):
         v = s[k]
+        if v["n"] == 0:
+            continue
         print(f"[{tag} {split} {k}] n {v['n']} pos {v['pos_nll']:.3f} neg {v['neg_nll']:.3f} gap mean {v['gap_mean']:+.3f} "
               f"median {v['gap_median']:+.3f} q10/25/75/90 {[round(x, 3) for x in v['gap_q10_25_75_90']]} "
               f"frac>=0.2 {v['frac_gap_ge_m']:.3f} frac<=0 {v['frac_gap_le_0']:.3f}", flush=True)
