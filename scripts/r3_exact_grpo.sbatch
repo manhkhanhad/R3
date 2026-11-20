@@ -24,6 +24,11 @@ eval "$(conda shell.bash hook)"
 conda activate rrec
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=8
+# smoke 370692 hung 30 min in the first NCCL all-gather (DDP param check) on album: GPU peer-to-peer
+# transport hang. Route NCCL through host memory instead; launch environment only, numerics unchanged.
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+export NCCL_DEBUG=INFO
 code="${CODE_ROOT:?frozen R3 code copy}"
 analysis_code="${ANALYSIS_CODE:?frozen analysis code copy (experiment.py)}"
 base_model="${BASE_MODEL:?stage-1 checkpoint}"
