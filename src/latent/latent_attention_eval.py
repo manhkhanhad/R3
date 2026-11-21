@@ -51,6 +51,9 @@ def main(
     category_mode: str = None,
     # transition latent (transition_latent.py): raw | none | shuffle | shuffle_r
     transition_mode: str = "raw",
+    # exclude each user's history titles from the constrained beam search (datasets without repeat
+    # consumption, e.g. MovieLens / Goodreads / Steam: the target is never a history item)
+    exclude_history: bool = False,
 ):
     dataset_name = category
     wandb_run = init_evaluation_run(
@@ -115,10 +118,16 @@ def main(
         raise ValueError("thought_mode needs a continuous-thought checkpoint")
     hash_dict = get_prefix_data(info_file, tokenizer, n_thoughts=n_thoughts)
     
+    batch_excluded = []   # exclude_history: per position in the current batch, the trie edges to remove
+
     def prefix_allowed_tokens_fn(batch_id, input_ids):
         hash_number = get_hash(input_ids)
         if hash_number in hash_dict:
-            return hash_dict[hash_number]
+            allowed = hash_dict[hash_number]
+            if batch_excluded and batch_excluded[batch_id]:
+                rem = batch_excluded[batch_id]
+                allowed = [t for t in allowed if (hash_number, t) not in rem]
+            return allowed
         return []
 
     tokenizer.pad_token = tokenizer.eos_token
@@ -317,7 +326,18 @@ def main(
     intent_predictions = []
     if intent:
         targets = [int(val_dataset.data.iloc[i]["item_id"]) for i in range(len(val_dataset.data))]
+    row_excluded = None
+    if exclude_history:
+        import ast
+        from LogitProcesser import excluded_edges, get_title_edges
+        title_edges, edge_count = get_title_edges(info_file, tokenizer, n_thoughts=n_thoughts)
+        hist_titles = [[str(t).strip(' ') for t in ast.literal_eval(h)] for h in val_dataset.data["history_item_title"]]
+        row_excluded = [excluded_edges(h, title_edges, edge_count) for h in hist_titles]
+        found = sum(t in title_edges for h in hist_titles for t in h) / max(1, sum(len(h) for h in hist_titles))
+        print(f"exclude_history: {len(row_excluded)} rows, {found:.4f} of history titles matched in the trie", flush=True)
     for idx, encodings in enumerate(tqdm(new_encodings)):
+        if row_excluded is not None:
+            batch_excluded[:] = row_excluded[idx * batch_size: idx * batch_size + len(encodings)]
         if grounded:
             rows = meta[idx * batch_size: idx * batch_size + len(encodings)]
             model.attention.query_time = torch.tensor([m["query_time"] for m in rows], device=device)

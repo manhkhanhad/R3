@@ -40,6 +40,41 @@ def get_prefix_data(info_file, tokenizer, n_thoughts=1):
         hash_dict[key] = list(hash_dict[key])
     return hash_dict
 
+
+def get_title_edges(info_file, tokenizer, n_thoughts=1):
+    """Trie edges of every title, for per-row exclusion of titles (e.g. the user's history).
+
+    Same tokenisation and hashing as get_prefix_data.  Returns (title -> list of (hash_key, token) edges,
+    edge -> number of titles using it).  Removing the edges whose every title is excluded prunes exactly the
+    excluded titles: no other title loses a path and no node is left without children."""
+    from collections import Counter
+    with open(info_file, 'r') as f:
+        titles = [line.split('\t')[0].strip(' ') for line in f.readlines()]
+    edges, count = {}, Counter()
+    thought_id = len(tokenizer) - 1
+    start = 4 + n_thoughts
+    for title in titles:
+        # byte-identical to get_prefix_data's string ("### Response: " + newline + quoted title + newline)
+        ID = tokenizer("### Response: \n" + "\"" + title + "\"\n").input_ids
+        ID[4:4] = [thought_id] * n_thoughts
+        ID.append(tokenizer.eos_token_id)
+        e = [(get_hash(ID[:i]) if i == start else get_hash(ID[start:i]), ID[i]) for i in range(start, len(ID))]
+        if title in edges:          # duplicate title string in the info file: same path, count once per title
+            continue
+        edges[title] = e
+        count.update(e)
+    return edges, count
+
+
+def excluded_edges(titles, edges, count):
+    """Edges to remove so that exactly `titles` (those present in the trie) become unreachable."""
+    from collections import Counter
+    c = Counter()
+    for t in set(titles):
+        if t in edges:
+            c.update(edges[t])
+    return {e for e, k in c.items() if k >= count[e]}
+
 LOGITS_PROCESSOR_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
