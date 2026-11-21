@@ -24,6 +24,7 @@ eval "$(conda shell.bash hook)"
 conda activate rrec
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=8
+export R3_ROOT="$PWD"  # experiment.py resolves data/ and output_dir/ from R3_ROOT (371452 interventions failed without it)
 # smoke 370692 hung 30 min in the first NCCL all-gather (DDP param check) on album: GPU peer-to-peer
 # transport hang. Route NCCL through host memory instead; launch environment only, numerics unchanged.
 export NCCL_P2P_DISABLE=1
@@ -57,6 +58,7 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28
 fi
 
+if [[ "${SKIP_EVAL:-0}" != 1 ]]; then
 echo "[$(date --iso-8601=seconds)] R3 noise_eval (2 shards)"
 python "$code/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 2
 for i in 0 1; do
@@ -72,6 +74,7 @@ results="output_dir/r3_exact_grpo/${tag}"
 mkdir -p "$results"
 cp "$out/final_result.json" "$results/"
 [[ "$smoke" == 1 ]] && { echo "[$(date --iso-8601=seconds)] smoke complete"; exit 0; }
+fi
 
 echo "[$(date --iso-8601=seconds)] r interventions (analysis only)"
 log_dir="analysis/logs/R3exact_${tag}"; mkdir -p "$log_dir"
