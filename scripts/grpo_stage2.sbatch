@@ -20,6 +20,8 @@
 #   REWARD=rank: ranking-reward GRPO (rank_grpo.py): group = the model's own top-8 constrained
 #   beam-search titles; reward +1 for the target, -RANK_PENALTY/log2(k+1) for a wrong title at rank k;
 #   RANK_SKIP_NOHIT (default True): groups whose beams all miss the target get advantage 0.
+#   INJECT_TARGET=True (A: ground truth replaces the last beam of no-hit groups), HIST_PENALTY / DUP_PENALTY (C: extra
+#   penalty for history-item / redundant beams); NUM_GEN / MICRO_BATCH (micro batch multiple of NUM_GEN).
 #   RESUME_FROM=<checkpoint dir>: resume training (model, optimizer, scheduler, step) from a saved checkpoint.
 #   ATTN_FP32=1: train the pooling attention in fp32 (in bf16 most lr-1e-5 updates round to zero).
 #   VARIANT=collab  (L9B): + collaborative InfoNCE with the L8b queue (NLL gate 25%,
@@ -55,7 +57,8 @@ beta="${BETA:-0.01}"
 kl_args=()
 [[ "${KL_ANCHOR:-0}" == 1 ]] && kl_args=(--kl_anchor True)
 reward="${REWARD:-noise}"
-kl_args+=(--reward_type "$reward" --rank_penalty "${RANK_PENALTY:-0.5}" --rank_skip_nohit "${RANK_SKIP_NOHIT:-True}")
+kl_args+=(--reward_type "$reward" --rank_penalty "${RANK_PENALTY:-0.5}" --rank_skip_nohit "${RANK_SKIP_NOHIT:-True}"
+  --rank_inject_target "${INJECT_TARGET:-False}" --rank_hist_penalty "${HIST_PENALTY:-0.0}" --rank_dup_penalty "${DUP_PENALTY:-0.0}")
 [[ "${ATTN_FP32:-0}" == 1 ]] && kl_args+=(--attention_fp32 True)
 [[ -n "${RESUME_FROM:-}" ]] && kl_args+=(--resume_from_checkpoint "$RESUME_FROM")
 
@@ -91,8 +94,8 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
   python "$code/src/grpo_attention_tuning/train_noise_grpo.py" \
     --category "$category" --base_model "$base_model" --output_dir "$out" \
     --train_file "$train_file" --eval_file "$eval_file" --info_file "$info_file" \
-    --num_generations 8 --sample "$sample" --num_epochs 1 \
-    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --beta "$beta" --seed 42 \
+    --num_generations "${NUM_GEN:-8}" --sample "$sample" --num_epochs 1 \
+    --batch_size "$batch" --micro_batch_size "${MICRO_BATCH:-8}" --lr "$lr" --beta "$beta" --seed 42 \
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28 \
     "${collab_args[@]}" "${kl_args[@]}"
 fi
