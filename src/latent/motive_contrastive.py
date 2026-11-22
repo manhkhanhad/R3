@@ -277,6 +277,10 @@ class MotiveMarginLatentModel(LatentModel):
         # MW-R-H-S / MW-R-H-D (refweight only): weights of the swapped-pass CE and of the reference distillation,
         # both applied with per-row weight 1 - w_i (rows the history-only reference already explains).
         self.copy_swap_weight, self.distill_weight, self.copy_power = 0.0, 0.0, 1.0
+        # MWC-M-HN: per anchor, up to this many history-matched rows (other user, same last history item, different
+        # next item; hard_ptr / hard_idx) are added to the InfoNCE negatives.  Only the anchor is fresh: positives
+        # and negatives are all bank latents, so latent age cannot separate them.  0 = off.
+        self.motive_hard_negatives = 0
         self.contrastive_enabled = False
         self.grad_accum_steps = 1
         self.last_losses = {}
@@ -316,9 +320,10 @@ class MotiveMarginLatentModel(LatentModel):
         row = rows[:, None].expand_as(s_mask)[s_mask]
         return torch.zeros(B, device=tok.device, dtype=tok.dtype).index_add_(0, row, tok) / s_mask.sum(1).clamp(min=1)
 
-    def set_hard_negative_index(self, ptr, idx):
+    def set_hard_negative_index(self, ptr, idx, for_hinge=True):
         self.hard_ptr, self.hard_idx = ptr.to(self.bank_r.device), idx.to(self.bank_r.device)
-        self.hinge_negative = "history"
+        if for_hinge:
+            self.hinge_negative = "history"
 
     def set_positive_index(self, index, items, users):
         for name, value in zip(("cross_ptr", "cross_idx", "within_ptr", "within_idx"), index):
@@ -355,6 +360,15 @@ class MotiveMarginLatentModel(LatentModel):
             neg = filled[torch.randint(filled.numel(), (self.num_negatives * 2,), device=device)]
             neg = neg[(self.bank_user[neg] != self.bank_user[i]) & (self.bank_item[neg] != self.bank_item[i])]
             neg = neg[: self.num_negatives]
+            n_hard = 0
+            if self.motive_hard_negatives > 0:
+                hard = self.hard_idx[self.hard_ptr[i]:self.hard_ptr[i + 1]]
+                hard = hard[self.bank_filled[hard]]
+                if hard.numel() > self.motive_hard_negatives:
+                    hard = hard[torch.randperm(hard.numel(), device=hard.device)[: self.motive_hard_negatives]]
+                n_hard = int(hard.numel())
+                neg = torch.cat([hard, neg])   # hard rows first (cos_hard below reads q[:n_hard])
+                stats["motive_hard_n"].append(float(n_hard))
             if neg.numel() == 0:
                 continue
             p, q = proj(self.bank_r[pos]), proj(self.bank_r[neg])
@@ -365,7 +379,10 @@ class MotiveMarginLatentModel(LatentModel):
                     stats["cos_cross"].append(float((anchors[b] @ p[: cross.numel()].T).mean()))
                 if within.numel():
                     stats["cos_within"].append(float((anchors[b] @ p[cross.numel():].T).mean()))
-                stats["cos_neg"].append(float((anchors[b] @ q.T).mean()))
+                if n_hard:
+                    stats["cos_hard"].append(float((anchors[b] @ q[:n_hard].T).mean()))
+                if q.size(0) > n_hard:
+                    stats["cos_neg"].append(float((anchors[b] @ q[n_hard:].T).mean()))
         loss = torch.stack(losses).mean() if losses else anchors.sum() * 0.0
         return loss, {k: torch.tensor(float(np.mean(v))) for k, v in stats.items() if v}
 

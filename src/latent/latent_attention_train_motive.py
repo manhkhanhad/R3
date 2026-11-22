@@ -163,6 +163,9 @@ def train(
     distill_model: str = "",
     copy_power: float = 1.0,
     hard_neg_cap: int = 32,
+    # MWC-M-HN: history-matched rows (same last item, other user, different next item) added to the InfoNCE
+    # negatives, up to this many per anchor; 0 = off
+    motive_hard_neg: int = 0,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -214,7 +217,7 @@ def train(
                             "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
                             "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau, "power": ref_power, "cut": ref_cut},
                             "band": {"upper": band_upper, "beta": band_beta}, "train_seed": train_seed,
-                            "hinge_negative": hinge_negative, "hard_neg_cap": hard_neg_cap,
+                            "hinge_negative": hinge_negative, "hard_neg_cap": hard_neg_cap, "motive_hard_neg": motive_hard_neg,
                             "copy_swap_weight": copy_swap_weight, "distill_weight": distill_weight, "distill_model": distill_model, "copy_power": copy_power}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
@@ -241,12 +244,14 @@ def train(
             from transformers import AutoModelForCausalLM
             model.set_teacher(AutoModelForCausalLM.from_pretrained(distill_model, torch_dtype=torch.bfloat16))
         print(f"MW-R-H-S/D: swapped-pass CE weight {copy_swap_weight}, distillation weight {distill_weight} from '{distill_model}' (row weight (1 - w_i)^{copy_power})", flush=True)
-    if hinge_negative == "history":
-        hard_ptr, hard_idx, hstats = build_hard_negative_index(train_file, cap=hard_neg_cap)
-        model.set_hard_negative_index(hard_ptr, hard_idx)
-        print(f"MW-HN history-matched hard negatives (same last item, other user, different next item; cap {hard_neg_cap}): {hstats}", flush=True)
-    elif hinge_negative != "batch":
+    if hinge_negative not in ("batch", "history"):
         raise ValueError(f"unknown hinge_negative {hinge_negative}")
+    if hinge_negative == "history" or motive_hard_neg > 0:
+        hard_ptr, hard_idx, hstats = build_hard_negative_index(train_file, cap=hard_neg_cap)
+        model.set_hard_negative_index(hard_ptr, hard_idx, for_hinge=hinge_negative == "history")
+        model.motive_hard_negatives = int(motive_hard_neg)
+        print(f"history-matched hard negatives (same last item, other user, different next item; cap {hard_neg_cap}); "
+              f"hinge: {hinge_negative == 'history'}, InfoNCE: {motive_hard_neg} per anchor: {hstats}", flush=True)
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))
