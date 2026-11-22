@@ -112,6 +112,38 @@ def build_positive_index(train_file, item_emb, threshold=0.8, cap=64, seed=0, wi
     return (*csr(cross), *csr(within)), items, np.array([user_key(u) for u in users], dtype=np.int64), stats
 
 
+def build_hard_negative_index(train_file, cap=32, pool=512, seed=0):
+    """CSR (ptr, idx) of history-matched hard negatives per train row (MW-HN): other users' rows whose LAST history
+    item is the same and whose next item is different, the ``cap`` with the largest history overlap (candidate lists
+    longer than ``pool`` are randomly subsampled first)."""
+    train = pd.read_csv(train_file)
+    items = train["item_id"].astype(np.int64).values
+    users = train["user_id"].astype(str).values
+    hist = [ast.literal_eval(h) for h in train["history_item_id"]]
+    sets = [set(h) for h in hist]
+    rng = np.random.default_rng(seed)
+    by_last = defaultdict(list)
+    for i, h in enumerate(hist):
+        if h:
+            by_last[h[-1]].append(i)
+    lists, overlap = [], []
+    for i, h in enumerate(hist):
+        c = [j for j in by_last[h[-1]] if users[j] != users[i] and items[j] != items[i]] if h else []
+        if len(c) > pool:
+            c = list(rng.choice(c, pool, replace=False))
+        ov = np.array([len(sets[i] & sets[j]) for j in c])
+        order = np.argsort(-ov, kind="stable")[:cap]
+        lists.append([int(c[k]) for k in order])
+        overlap.append(float(ov[order].mean() / max(1, len(sets[i]))) if len(order) else 0.0)
+    ptr = np.zeros(len(lists) + 1, dtype=np.int64)
+    ptr[1:] = np.cumsum([len(x) for x in lists])
+    idx = np.fromiter((j for x in lists for j in x), dtype=np.int64, count=int(ptr[-1]))
+    stats = {"rows": len(train), "rate": float(np.mean([len(x) > 0 for x in lists])),
+             "mean_candidates": float(np.mean([len(x) for x in lists])),
+             "mean_history_overlap": float(np.mean(overlap))}
+    return torch.from_numpy(ptr), torch.from_numpy(idx), stats
+
+
 class MotiveDataset(LatentRDataset):
     """Plain R3 rows plus the train-row id (CSV row position) for the bank.
 
@@ -238,6 +270,10 @@ class MotiveMarginLatentModel(LatentModel):
         self.ref_weight = None   # MW-R: per-train-row hinge weight (fp32 tensor indexed by row_id), set_ref_weights
         # MWC-M3b: the trainer turns the hinge off after `margin_epochs` epochs (margin_active = False).
         self.margin_active = True
+        # MW-HN: "batch" = in-batch swapped latent (default); "history" = history-matched hard negative from the bank.
+        self.hinge_negative = "batch"
+        for name in ("hard_ptr", "hard_idx"):
+            self.register_buffer(name, torch.zeros(1, dtype=torch.int64), persistent=False)
         self.contrastive_enabled = False
         self.grad_accum_steps = 1
         self.last_losses = {}
@@ -248,6 +284,10 @@ class MotiveMarginLatentModel(LatentModel):
     def set_ref_weights(self, weights):
         """MW-R: plain (non-buffer) fp32 attribute; moved to the model's device on first use."""
         self.ref_weight = weights.float()
+
+    def set_hard_negative_index(self, ptr, idx):
+        self.hard_ptr, self.hard_idx = ptr.to(self.bank_r.device), idx.to(self.bank_r.device)
+        self.hinge_negative = "history"
 
     def set_positive_index(self, index, items, users):
         for name, value in zip(("cross_ptr", "cross_idx", "within_ptr", "within_idx"), index):
@@ -317,7 +357,23 @@ class MotiveMarginLatentModel(LatentModel):
         if input_ids.size(0) > 1 and self.margin_weight > 0 and self.margin_active:
             perm = torch.roll(rows, 1)
             neg = embeds.clone()
-            neg[rows, thought_idx] = embeds[perm, thought_idx[perm]].detach()
+            neg_r = embeds[perm, thought_idx[perm]].detach()
+            if self.hinge_negative == "history" and row_id is not None:
+                # MW-HN: the swapped latent comes from another user's train row that shares the last history item
+                # (ranked by history overlap) but has a DIFFERENT next item, read from the latent bank (detached,
+                # as stale as the bank).  "Which items are in the history" then no longer separates own from
+                # swapped latent; rows without a filled candidate keep the in-batch negative.
+                used = torch.zeros(input_ids.size(0), device=embeds.device)
+                for b in range(input_ids.size(0)):
+                    i = int(row_id[b])
+                    cand = self.hard_idx[self.hard_ptr[i]:self.hard_ptr[i + 1]]
+                    cand = cand[self.bank_filled[cand]]
+                    if cand.numel():
+                        j = cand[torch.randint(cand.numel(), (1,), device=cand.device)]
+                        neg_r[b] = self.bank_r[j].squeeze(0).to(neg_r.dtype)
+                        used[b] = 1.0
+                hinge_stats["hard_neg_rate"] = used.mean()
+            neg[rows, thought_idx] = neg_r
             if self.margin_mode == "adaptive":
                 # MWC-M6: one-sided (the gap may only be created by improving the own latent) and an
                 # adaptive margin m_i = min(m, alpha * sg(NLL(y|x, r_other))): no gap is demanded where the

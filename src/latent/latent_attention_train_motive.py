@@ -17,7 +17,8 @@ from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
 
 from experiment_tracking import init_training_run, move_callback_to_end, wandb_report_to
 from latent_attention_train_grounded_margin import CATEGORY_TEXT, GroundedLogCallback
-from motive_contrastive import HingeLabelCollator, MotiveDataset, MotiveMarginLatentModel, build_positive_index
+from motive_contrastive import (HingeLabelCollator, MotiveDataset, MotiveMarginLatentModel, build_hard_negative_index,
+                                build_positive_index)
 
 
 class SingleCheckpointCallback(transformers.TrainerCallback):
@@ -156,6 +157,8 @@ def train(
     ref_cut: float = 0.25,
     band_upper: float = -1.0,
     band_beta: float = 1.0,
+    hinge_negative: str = "batch",
+    hard_neg_cap: int = 32,
     sasrec_file: str = "",
     sasrec_k: int = 20,
     resume_from_checkpoint: str = None,
@@ -206,7 +209,8 @@ def train(
                             "margin_mode": margin_mode, "margin_epochs": margin_epochs, "late_margin_mode": late_margin_mode, "late_margin_weight": late_margin_weight, "adaptive_alpha": adaptive_alpha, "selfnorm_cap": selfnorm_cap,
                             "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
                             "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau, "power": ref_power, "cut": ref_cut},
-                            "band": {"upper": band_upper, "beta": band_beta}, "train_seed": train_seed}
+                            "band": {"upper": band_upper, "beta": band_beta}, "train_seed": train_seed,
+                            "hinge_negative": hinge_negative, "hard_neg_cap": hard_neg_cap}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -223,6 +227,12 @@ def train(
     model.lagrange_state = torch.tensor([lagrange_mu_init, 0.0, 0.0], dtype=torch.float32)
     if margin_mode == "refweight":
         model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, int(stats["rows"]), ref_power, ref_cut))
+    if hinge_negative == "history":
+        hard_ptr, hard_idx, hstats = build_hard_negative_index(train_file, cap=hard_neg_cap)
+        model.set_hard_negative_index(hard_ptr, hard_idx)
+        print(f"MW-HN history-matched hard negatives (same last item, other user, different next item; cap {hard_neg_cap}): {hstats}", flush=True)
+    elif hinge_negative != "batch":
+        raise ValueError(f"unknown hinge_negative {hinge_negative}")
     if wider_weight > 0:
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
     model.resize_token_embeddings(len(tokenizer))

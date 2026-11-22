@@ -57,6 +57,10 @@ def main():
     u = torch.tensor([uid[x] for x in users])
     it = torch.tensor(items)
     rng = np.random.default_rng(0)
+    # history side: last history item of each row (same last item + different next item = "watched A" without "next is B")
+    import ast as _ast
+    last = torch.tensor([(_ast.literal_eval(h) or [-1])[-1] for h in frame["history_item_id"]])
+    hist_c, hist_rand, next_c, next_rand = [], [], [], []
 
     same_c, rand_c, prec, chance = [], [], [], []
     within_sim, within_dis = [], []
@@ -65,7 +69,16 @@ def main():
         C = z[a] @ z.T
         other = u[a][:, None] != u[None, :]
         same = other & (it[a][:, None] == it[None, :])
+        same_last = last[a][:, None] == last[None, :]
+        same_next = it[a][:, None] == it[None, :]
+        hist_only = other & same_last & ~same_next      # same last item, different next item
+        next_only = other & same_next & ~same_last      # same next item, different last item
         for r_ in range(len(a)):
+            if hist_only[r_].any() and next_only[r_].any():
+                o = torch.nonzero(other[r_]).flatten()
+                rnd = float(C[r_][o[torch.from_numpy(rng.choice(len(o), min(256, len(o)), replace=False))]].mean())
+                hist_c.append(float(C[r_][hist_only[r_]].mean())); next_c.append(float(C[r_][next_only[r_]].mean()))
+                hist_rand.append(rnd)
             if same[r_].any():
                 same_c.append(float(C[r_][same[r_]].mean()))
                 o = torch.nonzero(other[r_]).flatten()
@@ -92,6 +105,10 @@ def main():
         "within_user": {"anchors_similar": len(within_sim), "anchors_dissimilar": len(within_dis),
                         "cos_similar_items": m(within_sim), "cos_dissimilar_items": m(within_dis),
                         "gap": (m(within_sim) - m(within_dis)) if within_sim and within_dis else None},
+        "history_vs_next": {"anchors": len(hist_c), "cos_same_last_diff_next": m(hist_c),
+                            "cos_same_next_diff_last": m(next_c), "cos_random_other": m(hist_rand),
+                            "gap_history": m(np.array(hist_c) - np.array(hist_rand)) if hist_c else None,
+                            "gap_next": m(np.array(next_c) - np.array(hist_rand)) if hist_c else None},
         "global_mean_pairwise_cos": float((z[:2000] @ z[:2000].T).mean()),
     }
     print(json.dumps(out, indent=1), flush=True)
