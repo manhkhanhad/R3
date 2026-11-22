@@ -11,7 +11,8 @@ def stable_hash(value) -> int:
 
 
 class CollaborativeContrastiveDataset(LatentRDataset):
-    def __init__(self, *args, item_to_index=None, title_vectors=None, **kwargs):
+    def __init__(self, *args, item_to_index=None, title_vectors=None, with_row_id=False, **kwargs):
+        self.with_row_id = with_row_id   # CSV row position, for per-row reference hinge weights (refweight)
         self.item_to_index = item_to_index
         self.title_vectors = title_vectors
         super().__init__(*args, **kwargs)
@@ -25,6 +26,8 @@ class CollaborativeContrastiveDataset(LatentRDataset):
             item["target_item"] = int(row["item_id"])  # raw id for the item-prediction head (C1)
             # Exclude this sample's stale queue entries on later epochs.
             item["sample_hash"] = int(idx)
+            if self.with_row_id:
+                item["row_id"] = int(self.data.index[idx])
             if self.title_vectors is not None:
                 item_index = self.item_to_index.get(int(row["item_id"]), -1)
                 item["target_item_index"] = item_index

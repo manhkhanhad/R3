@@ -30,6 +30,7 @@ class CollaborativeMarginLogCallback(CollaborativeLogCallback):
             ("last_margin_loss", "margin_loss"),
             ("last_contrastive_enabled", "contrastive_enabled"),
             ("last_wider_loss", "wider_loss"),
+            ("last_hinge_weight", "hinge_weight"),
             ("last_hard_negative_rate", "hard_negative_rate"),
             ("last_item_loss", "item_loss"),
             ("last_item_hit10", "item_hit10"),
@@ -108,6 +109,12 @@ def train(
     wider_momentum: float = 0.99,
     # parity with latent_attention_train_margin.py (load best by eval loss, patience 1); off = L1 recipe
     early_stopping: bool = False,
+    # MW-R-H base: margin_mode="refweight" weights the hinge per train row by the history-only reference NLL
+    # (ref_nll_file from reference_score.py; same weights and loss as latent_attention_train_motive.py)
+    margin_mode: str = "fixed",
+    ref_nll_file: str = "",
+    ref_weight_fn: str = "rank",
+    ref_tau: float = 0.5,
     wandb_run_name: str = None,
 ):
     if margin_weight > 0 and micro_batch_size < 2:
@@ -169,6 +176,16 @@ def train(
         print(f"item head: table {tuple(item_table.shape)}, weight {item_weight}, tau {item_tau}, "
               f"head dtype {model.item_head[1].weight.dtype}")
     model.grad_accum_steps = gradient_accumulation_steps
+    model.margin_mode = margin_mode
+    if margin_mode == "refweight":
+        import pandas as pd
+        from latent_attention_train_motive import reference_weights
+        if sample > 0:
+            raise ValueError("margin_mode=refweight needs the full train file (sample=-1)")
+        model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, len(pd.read_csv(train_file))))
+        model.config.collaborative_margin_reference = {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau}
+    elif margin_mode != "fixed":
+        raise ValueError(f"unknown margin_mode {margin_mode}")
     if wider_weight > 0:
         # CollaborativeMarginLatentModel adds the penalty itself, before its own /grad_accum_steps
         model.config.latent_wider = {"weight": float(wider_weight), "momentum": float(wider_momentum)}
@@ -190,11 +207,12 @@ def train(
         f"projection={projection_dim}, temperature={temperature}, "
         f"user_weight={user_contrastive_weight}, target_weight={target_contrastive_weight}, "
         f"hard_negatives={hard_negatives}, item_weight={item_weight}, "
-        f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}"
+        f"min_token_accuracy={positive_min_token_accuracy}, max_nll={positive_max_nll}, "
+        f"margin_mode={margin_mode}, early_stopping={early_stopping}"
     )
     train_data = CollaborativeContrastiveDataset(
         train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,
-        sample=sample, seed=seed, category=category_text, K=K,
+        sample=sample, seed=seed, category=category_text, K=K, with_row_id=margin_mode == "refweight",
     )
     val_data = CollaborativeContrastiveDataset(
         train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,

@@ -44,6 +44,8 @@ case "$category" in Movielens) prompt_category=movie ;; Steam) prompt_category=g
 margin="${MARGIN:-0.2}"; margin_weight="${MARGIN_WEIGHT:-1.0}"
 name="${OUTPUT_NAME:-${category}_margin_${margin}_wider_${weight}_${method}}"
 # infonce variant B (MWC-I-B): USER_W=0 HARD_NEG=16 (same-user different-target hard negatives for the target head)
+# infonce on the MW-R-H base (MW-R-H-CR): MARGIN_MODE=refweight REF_NLL_FILE=... EARLY_STOP=False (hinge weighted by the
+#   history-only reference as in METHOD=motive; original user + target InfoNCE from epoch 2; no best-checkpoint reload)
 # infonce variant C (MWC-I-C): B + ITEM_W=0.2 (item-prediction head on r over the Qwen3 title table)
 export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
@@ -90,7 +92,8 @@ if [[ ! -f "$out/config.json" ]]; then
       --hard_negatives "${HARD_NEG:-0}" \
       --item_weight "${ITEM_W:-0}" --item_tau "${ITEM_TAU:-0.07}" --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" \
       --bank_size 10000 --max_user_positives 16 --max_target_positives 16 --num_negatives 256 \
-      --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping True --eval_sample -1 "${resume[@]}"
+      --positive_min_token_accuracy "${GATE:-0.5}" --early_stopping "${EARLY_STOP:-True}" --eval_sample -1 \
+      --margin_mode "${MARGIN_MODE:-fixed}" --ref_nll_file "${REF_NLL_FILE:-}" --ref_weight_fn "${REF_WEIGHT_FN:-rank}" --ref_tau "${REF_TAU:-0.5}" "${resume[@]}"
   elif [[ "$method" == motive ]]; then
     python "$code_root/src/latent/latent_attention_train_motive.py" "${common[@]}" \
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \

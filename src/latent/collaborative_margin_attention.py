@@ -32,6 +32,11 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
         self.last_margin_loss = None
         self.last_contrastive_enabled = None
         self.last_wider_loss = None
+        # MW-R-H base (margin_mode="refweight"): hinge weighted per train row by the history-only reference
+        # (same loss as motive_contrastive.py refweight: sum(w * hinge) / sum(w), CE = mean of per-row NLL).
+        self.margin_mode = "fixed"
+        self.ref_weight = None
+        self.last_hinge_weight = None
         # C1: item-prediction head on r. r -> item-embedding space (Qwen3 title embeddings),
         # CE over the whole catalogue: a dense target-structure objective (every row gets a
         # gradient; same-next-item users are pulled together through the shared item table).
@@ -60,8 +65,12 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             hit = (logits[valid].topk(10, dim=-1).indices == row[valid][:, None]).any(-1).float().mean()
         return loss, hit
 
+    def set_ref_weights(self, weights):
+        """Plain (non-buffer) fp32 attribute indexed by row_id; moved to the model's device on first use."""
+        self.ref_weight = weights.float()
+
     def _margin_loss(self, embeds, thought_idx, pos_nll, labels, attention_mask,
-                     position_ids, cache_position, num_logits_to_keep):
+                     position_ids, cache_position, num_logits_to_keep, row_id=None):
         batch_size = embeds.size(0)
         if batch_size < 2 or self.margin_weight == 0:
             return pos_nll.new_zeros(())
@@ -75,7 +84,18 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             neg_embeds, attention_mask, position_ids, cache_position, num_logits_to_keep
         )
         _, neg_nll, _ = self._loss_and_quality(neg_out.logits, labels)
-        return F.relu(self.margin + pos_nll - neg_nll).mean()
+        hinge = F.relu(self.margin + pos_nll - neg_nll)
+        if self.margin_mode == "refweight":
+            if row_id is None or self.ref_weight is None:
+                raise ValueError("margin_mode=refweight needs row_id and set_ref_weights()")
+            if self.ref_weight.device != row_id.device:
+                self.ref_weight = self.ref_weight.to(row_id.device)
+            weight = self.ref_weight[row_id].to(hinge.dtype)
+            self.last_hinge_weight = weight.detach().mean()
+            return (weight * hinge).sum() / weight.sum().clamp(min=1e-6)
+        if self.margin_mode != "fixed":
+            raise ValueError(f"unknown margin_mode {self.margin_mode}")
+        return hinge.mean()
 
     def forward(
         self,
@@ -97,6 +117,7 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
         target_title_features=None,
         target_item_index=None,
         target_item=None,
+        row_id=None,
         **kwargs,
     ):
         is_training_prefill = (
@@ -127,13 +148,15 @@ class CollaborativeMarginLatentModel(CollaborativeContrastiveLatentModel):
             embeds, attention_mask, position_ids, cache_position, num_logits_to_keep
         )
         ce_loss, example_nll, token_accuracy = self._loss_and_quality(out.logits, labels)
+        if self.margin_mode == "refweight":
+            ce_loss = example_nll.mean()   # MW-R-H's CE: mean of per-row mean token NLL
         quality = (
             (token_accuracy >= self.positive_min_token_accuracy)
             & (example_nll <= self.positive_max_nll)
         )
         margin_loss = self._margin_loss(
             embeds, thought_idx, example_nll, labels, attention_mask,
-            position_ids, cache_position, num_logits_to_keep,
+            position_ids, cache_position, num_logits_to_keep, row_id=row_id,
         )
 
         if self.contrastive_enabled:
