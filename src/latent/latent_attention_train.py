@@ -140,8 +140,13 @@ def train(
     # per-epoch phases, comma separated: r3 (neighbours off, all trainable) | reader (only the
     # reader trains, decoder and pooling frozen) | joint (all trainable).  e.g. "r3,reader,joint"
     transition_schedule: str = None,
+    train_seed: int = None,
 
 ):
+    # train_seed: None keeps the old behaviour (no global seeding before model init; HF Trainer default seed 42).
+    # An int seeds module init, data order and dropout (transformers.set_seed + TrainingArguments seed/data_seed).
+    if train_seed is not None:
+        transformers.set_seed(train_seed)
 
     init_training_run(
         dataset=category,
@@ -579,7 +584,8 @@ def train(
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to=wandb_report_to(),
-            remove_unused_columns=False
+            remove_unused_columns=False,
+            **({"seed": train_seed, "data_seed": train_seed} if train_seed is not None else {}),
         ),
         data_collator=collator,
         callbacks = [EarlyStoppingCallback(early_stopping_patience=1)]

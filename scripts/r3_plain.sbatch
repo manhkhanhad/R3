@@ -15,7 +15,7 @@
 # best epoch kept) for any CATEGORY, then the same evaluation as margin_wider_collab.sbatch: ranking (eval_raw.json)
 # and r interventions raw / mask / mean / shuffle_user + paired bootstrap.
 # Env: CODE_ROOT (required), CATEGORY (required), BASE_MODEL (Qwen/Qwen2.5-1.5B), OUTPUT_NAME (<CATEGORY>_R3_base),
-#      INTERVENTIONS (1), EXTRACT_LIMIT (10000).
+#      INTERVENTIONS (1), EXTRACT_LIMIT (10000), TRAIN_SEED (unset = old default seeding).
 set -Eeuo pipefail
 trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
 module purge
@@ -48,7 +48,7 @@ if [[ ! -f "$out/model.safetensors" ]]; then
     --base_model "${BASE_MODEL:-Qwen/Qwen2.5-1.5B}" \
     --train_file "$train_file" --eval_file "$eval_file" --output_dir "$out" --category "$category" \
     --sample -1 --micro_batch_size "$mbs" --batch_size 128 --num_epochs 3 --learning_rate 3e-4 --cutoff_len 512 \
-    --save_total_limit 1 "${resume[@]}"
+    --save_total_limit 1 ${TRAIN_SEED:+--train_seed "$TRAIN_SEED"} "${resume[@]}"
   rm -rf "$out"/checkpoint-*   # best model is saved at $out; keep one model only
 fi
 [[ -f "$out/trainer_state.json" ]] && cp "$out/trainer_state.json" "$results/" || true
