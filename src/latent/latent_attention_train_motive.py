@@ -158,6 +158,10 @@ def train(
     band_upper: float = -1.0,
     band_beta: float = 1.0,
     hinge_negative: str = "batch",
+    copy_swap_weight: float = 0.0,
+    distill_weight: float = 0.0,
+    distill_model: str = "",
+    copy_power: float = 1.0,
     hard_neg_cap: int = 32,
     sasrec_file: str = "",
     sasrec_k: int = 20,
@@ -210,7 +214,8 @@ def train(
                             "lagrange": {"delta": lagrange_delta, "lr": lagrange_lr, "momentum": lagrange_momentum, "mu_max": lagrange_mu_max, "mu_init": lagrange_mu_init},
                             "reference": {"file": ref_nll_file, "fn": ref_weight_fn, "tau": ref_tau, "power": ref_power, "cut": ref_cut},
                             "band": {"upper": band_upper, "beta": band_beta}, "train_seed": train_seed,
-                            "hinge_negative": hinge_negative, "hard_neg_cap": hard_neg_cap}
+                            "hinge_negative": hinge_negative, "hard_neg_cap": hard_neg_cap,
+                            "copy_swap_weight": copy_swap_weight, "distill_weight": distill_weight, "distill_model": distill_model, "copy_power": copy_power}
     model = MotiveMarginLatentModel.from_pretrained(base_model, config=config, torch_dtype=torch.bfloat16)
     model.projection.float()
     model.set_positive_index(index, items, users)
@@ -227,6 +232,15 @@ def train(
     model.lagrange_state = torch.tensor([lagrange_mu_init, 0.0, 0.0], dtype=torch.float32)
     if margin_mode == "refweight":
         model.set_ref_weights(reference_weights(ref_nll_file, ref_weight_fn, ref_tau, int(stats["rows"]), ref_power, ref_cut))
+    if copy_swap_weight > 0 or distill_weight > 0:
+        if margin_mode != "refweight":
+            raise ValueError("copy_swap_weight / distill_weight need margin_mode=refweight (they use 1 - w_i)")
+        model.copy_swap_weight, model.distill_weight = float(copy_swap_weight), float(distill_weight)
+        model.copy_power = float(copy_power)
+        if distill_weight > 0:
+            from transformers import AutoModelForCausalLM
+            model.set_teacher(AutoModelForCausalLM.from_pretrained(distill_model, torch_dtype=torch.bfloat16))
+        print(f"MW-R-H-S/D: swapped-pass CE weight {copy_swap_weight}, distillation weight {distill_weight} from '{distill_model}' (row weight (1 - w_i)^{copy_power})", flush=True)
     if hinge_negative == "history":
         hard_ptr, hard_idx, hstats = build_hard_negative_index(train_file, cap=hard_neg_cap)
         model.set_hard_negative_index(hard_ptr, hard_idx)

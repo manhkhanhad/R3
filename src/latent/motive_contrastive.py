@@ -274,6 +274,9 @@ class MotiveMarginLatentModel(LatentModel):
         self.hinge_negative = "batch"
         for name in ("hard_ptr", "hard_idx"):
             self.register_buffer(name, torch.zeros(1, dtype=torch.int64), persistent=False)
+        # MW-R-H-S / MW-R-H-D (refweight only): weights of the swapped-pass CE and of the reference distillation,
+        # both applied with per-row weight 1 - w_i (rows the history-only reference already explains).
+        self.copy_swap_weight, self.distill_weight, self.copy_power = 0.0, 0.0, 1.0
         self.contrastive_enabled = False
         self.grad_accum_steps = 1
         self.last_losses = {}
@@ -284,6 +287,34 @@ class MotiveMarginLatentModel(LatentModel):
     def set_ref_weights(self, weights):
         """MW-R: plain (non-buffer) fp32 attribute; moved to the model's device on first use."""
         self.ref_weight = weights.float()
+
+    def set_teacher(self, teacher):
+        """MW-R-H-D: frozen history-only reference LM; kept out of the module tree (never trained, never saved)."""
+        teacher.eval().requires_grad_(False)
+        object.__setattr__(self, "_teacher", teacher)
+
+    def _distill_kl(self, input_ids, attention_mask, labels, thought_idx, logits):
+        """Per-row mean over target tokens of KL(reference || model).  The reference reads the same prompt with the
+        <|Thought|> slot removed (as in reference_score.py); target positions are aligned token by token."""
+        teacher = self._teacher
+        if next(teacher.parameters()).device != input_ids.device:
+            teacher.to(input_ids.device)
+        B, L = input_ids.shape
+        rows = torch.arange(B, device=input_ids.device)
+        keep = torch.ones(B, L, dtype=torch.bool, device=input_ids.device)
+        keep[rows, thought_idx] = False
+        t_ids, t_att, t_lab = (x[keep].view(B, L - 1) for x in (input_ids, attention_mask, labels))
+        with torch.no_grad():
+            t_logits = teacher(input_ids=t_ids, attention_mask=t_att).logits
+        s_mask, t_mask = labels[:, 1:] != -100, t_lab[:, 1:] != -100
+        if not torch.equal(s_mask.sum(1), t_mask.sum(1)):
+            raise ValueError("distillation: target positions of model and reference do not align")
+        V = min(t_logits.size(-1), logits.size(-1))
+        s_lp = F.log_softmax(logits[:, :-1][s_mask][:, :V].float(), dim=-1)
+        t_lp = F.log_softmax(t_logits[:, :-1][t_mask][:, :V].float(), dim=-1)
+        tok = (t_lp.exp() * (t_lp - s_lp)).sum(-1)
+        row = rows[:, None].expand_as(s_mask)[s_mask]
+        return torch.zeros(B, device=tok.device, dtype=tok.dtype).index_add_(0, row, tok) / s_mask.sum(1).clamp(min=1)
 
     def set_hard_negative_index(self, ptr, idx):
         self.hard_ptr, self.hard_idx = ptr.to(self.bank_r.device), idx.to(self.bank_r.device)
@@ -354,6 +385,7 @@ class MotiveMarginLatentModel(LatentModel):
         ce = pos_nll.mean()
         margin_loss = ce.new_zeros(())
         hinge_stats = {}
+        copy_loss = ce.new_zeros(())
         if input_ids.size(0) > 1 and self.margin_weight > 0 and self.margin_active:
             perm = torch.roll(rows, 1)
             neg = embeds.clone()
@@ -470,6 +502,23 @@ class MotiveMarginLatentModel(LatentModel):
                     self.ref_weight = self.ref_weight.to(row_id.device)
                 weight = self.ref_weight[row_id].to(hinge.dtype)
                 margin_loss = (weight * hinge).sum() / weight.sum().clamp(min=1e-6)
+                # large where the history-only reference explains the target; copy_power > 1 concentrates it there
+                keep_w = (1.0 - weight).clamp(min=0.0) ** self.copy_power
+                if self.copy_swap_weight > 0:
+                    # MW-R-H-S: on rows the history explains, also fit the target with the SWAPPED latent in the slot
+                    # (plain CE on the swapped pass, weight 1 - w_i), so the decoder keeps predicting them from the
+                    # history alone; complementary to the hinge, which acts where w_i is large.
+                    swap_ce = (keep_w * neg_nll).mean()
+                    copy_loss = copy_loss + self.copy_swap_weight * swap_ce
+                    hinge_stats["copy_swap_ce"] = swap_ce.detach()
+                if self.distill_weight > 0:
+                    # MW-R-H-D: KL(reference || model) on the target tokens, weight 1 - w_i, against the frozen
+                    # history-only (no-latent) reference LM that also defines w_i.
+                    kl = self._distill_kl(input_ids, attention_mask, labels, thought_idx, pos_out.logits)
+                    distill = (keep_w * kl).mean()
+                    copy_loss = copy_loss + self.distill_weight * distill
+                    hinge_stats["distill_kl"] = distill.detach()
+                    hinge_stats["distill_kl_raw"] = kl.detach().mean()
             elif self.margin_mode == "skipcopy":
                 # Rule-based (user decision 2026-11-13): no history-swap hinge on copy rows (same-day near-copy of a
                 # history item, `copy_row`); averaged over the non-copy rows so their pressure equals MWC-M's.
@@ -505,7 +554,7 @@ class MotiveMarginLatentModel(LatentModel):
                         hinge_stats["hinge_weight_copy"] = weight[c].mean()
                     if bool((~c).any()):
                         hinge_stats["hinge_weight_noncopy"] = weight[~c].mean()
-        loss = ce + self.margin_weight * margin_loss
+        loss = ce + self.margin_weight * margin_loss + copy_loss
         wider = None
         if getattr(self.config, "latent_wider", None):
             from wider_reg import wider_state
