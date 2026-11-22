@@ -58,6 +58,8 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28
 fi
 
+results="output_dir/r3_exact_grpo/${tag}"
+mkdir -p "$results"
 if [[ "${SKIP_EVAL:-0}" != 1 ]]; then
 echo "[$(date --iso-8601=seconds)] R3 noise_eval (2 shards)"
 python "$code/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 2
@@ -70,8 +72,6 @@ done
 wait
 python "$code/src/utils/merge.py" --input_path "$task_dir/" --output_path "$out/final_result.json" --nn 2
 python "$code/src/utils/calc.py" --path "$out/final_result.json" --item_path "$info_file"
-results="output_dir/r3_exact_grpo/${tag}"
-mkdir -p "$results"
 cp "$out/final_result.json" "$results/"
 [[ "$smoke" == 1 ]] && { echo "[$(date --iso-8601=seconds)] smoke complete"; exit 0; }
 fi
