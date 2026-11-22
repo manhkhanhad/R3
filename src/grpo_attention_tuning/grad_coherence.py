@@ -145,8 +145,14 @@ def pairwise_cos(U):
 
 
 def boot(U, n_boot=2000, seed=42):
+    # resampling with replacement duplicates rows; a row paired with its own copy has cos 1 and
+    # biases the mean upward (374737 CIs sat above the point estimate), so drop same-row pairs
+    G, n = U @ U.T, len(U)
     rng = np.random.default_rng(seed)
-    vals = [pairwise_cos(U[rng.integers(0, len(U), len(U))]) for _ in range(n_boot)]
+    vals = []
+    for _ in range(n_boot):
+        c = np.bincount(rng.integers(0, n, n), minlength=n).astype(float)
+        vals.append((c @ G @ c - (c * c).sum()) / (n * n - (c * c).sum()))
     return np.percentile(vals, [2.5, 97.5])
 
 
