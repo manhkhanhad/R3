@@ -49,10 +49,10 @@ def main(
         },
     )
 
-    category_dict = {"Yelp": "restaurants", "Goodreads": "books", "Mobilerec": "mobile apps", "Office_Products": "office products", "Books": "books", "steam": "games",
+    category_dict = {"Steam": "video games", "Yelp": "restaurants", "Goodreads": "books", "Mobilerec": "mobile apps", "Office_Products": "office products", "Books": "books", "steam": "games",
                      "CDs_and_Vinyl": "musics", "Toys_and_Games": "toys and games", "Video_Games": "video games",
                      "Musical_Instruments": "music instruments", "Sports_and_Outdoors": "sports and outdoors",
-                     "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movies": "movie",
+                     "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movielens": "movie",
                      "yelp": "resturant"}
     category = category_dict[category]
     model = LatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16,
