@@ -114,7 +114,8 @@ def main():
         def target_logp(prompt, tgt, B):
             full = torch.cat([prompt, tgt]).unsqueeze(0).repeat(B, 1)
             T = tgt.numel()
-            lg = model(input_ids=full, attention_mask=torch.ones_like(full), logits_to_keep=T + 1).logits[:, :-1].float()
+            # transformers 4.48 ignores logits_to_keep (it is num_logits_to_keep there), so slice the full logits ourselves
+            lg = model(input_ids=full, attention_mask=torch.ones_like(full)).logits[:, -(T + 1):-1].float()
             lp = torch.log_softmax(lg, -1).gather(-1, tgt.view(1, -1, 1).expand(B, -1, 1)).squeeze(-1)
             return lp.mean(1).cpu().numpy()
 
