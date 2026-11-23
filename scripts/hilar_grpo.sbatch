@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=R3_hilar_grpo
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64GB
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a40
+#SBATCH --partition=hadylauwresearch
+#SBATCH --qos=hadylauwresearch-priority
+#SBATCH --time=72:00:00
+#SBATCH --requeue
+#SBATCH --chdir=/common/home/users/m/mk.ngohuu.2024/research/R3
+#SBATCH --output=run_logs/%x.%j.out
+
+# HiLaR-style GRPO on a single-latent model (hilar_grpo.py, env: BASE_MODEL SASREC_CKPT SIGMA_REL NUM_GEN BATCH_USERS LR BETA SMOKE);
+# training + eval/interventions tail identical to grpo_stage2.sbatch.
+# (original header:) R3 stage 2 (noise-GRPO, attention-only, LLM frozen) on a stage-1 checkpoint, any category
+# (CATEGORY, default Toys_and_Games); outputs on scratch, results copied to output_dir/grpo_stage2/<tag>.
+# Known issue (stock R3): reference log-probs use the policy's r, so the KL term is ~0.
+#   KL_ANCHOR=1: reference log-probs from the reference model's own (frozen stage-1) r, same
+#   noise -> a real KL trust region (beta = BETA, default 0.01).
+#   REWARD=rank: ranking-reward GRPO (rank_grpo.py): group = the model's own top-8 constrained
+#   beam-search titles; reward +1 for the target, -RANK_PENALTY/log2(k+1) for a wrong title at rank k;
+#   RANK_SKIP_NOHIT (default True): groups whose beams all miss the target get advantage 0.
+#   INJECT_TARGET=True (A: ground truth replaces the last beam of no-hit groups), HIST_PENALTY / DUP_PENALTY (C: extra
+#   penalty for history-item / redundant beams); NUM_GEN / MICRO_BATCH (micro batch multiple of NUM_GEN).
+#   RESUME_FROM=<checkpoint dir>: resume training (model, optimizer, scheduler, step) from a saved checkpoint.
+#   ATTN_FP32=1: train the pooling attention in fp32 (in bf16 most lr-1e-5 updates round to zero).
+#   VARIANT=collab  (L9B): + collaborative InfoNCE with the L8b queue (NLL gate 25%,
+#                    per-user cap 2, per-target cap 4, dedup cos 0.9), lambda auto-
+#                    calibrated over 20 steps to 30% of the GRPO gradient norm.
+#   VARIANT=stock   (L9C): stock stage 2 (control).
+# Settings: lr 1e-5, beta 0.01, 8 generations, epsilon 0.2/0.28, batch 256, 1 epoch,
+# one GPU.  Then: ranking (noise_eval), train-latent geometry, r interventions.
+# Env: VARIANT, BASE_MODEL, CODE_ROOT, TAG, SMOKE (1 = 256 prompts, batch 64, test 64 rows,
+#      ranking only), SKIP_TRAIN, LR (default 1e-5), EVAL (full | ranking: stop after
+#      standard ranking; geometry and interventions can be run later with SKIP_TRAIN=1).
+
+set -Eeuo pipefail
+trap 'status=$?; echo "[$(date --iso-8601=seconds)] FAILED at line ${BASH_LINENO[0]} (exit $status)" >&2' ERR
+
+module purge
+eval "$(conda shell.bash hook)"
+module load CUDA/12.4.0
+conda activate rrec
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export R3_ROOT="$PWD"
+code="${CODE_ROOT:?set CODE_ROOT to a frozen code copy}"
+variant="${VARIANT:?set VARIANT to collab or stock}"
+base_model="${BASE_MODEL:?set BASE_MODEL to the stage-1 checkpoint}"
+tag="${TAG:?set TAG, e.g. musical_l9b_collab}"
+smoke="${SMOKE:-0}"
+lr="${LR:-5e-6}"
+eval_mode="${EVAL:-full}"
+beta="${BETA:-0.05}"
+kl_args=()
+[[ "${KL_ANCHOR:-0}" == 1 ]] && kl_args=(--kl_anchor True)
+reward="${REWARD:-noise}"
+kl_args+=(--reward_type "$reward" --rank_penalty "${RANK_PENALTY:-0.5}" --rank_skip_nohit "${RANK_SKIP_NOHIT:-True}"
+  --rank_inject_target "${INJECT_TARGET:-False}" --rank_hist_penalty "${HIST_PENALTY:-0.0}" --rank_dup_penalty "${DUP_PENALTY:-0.0}")
+[[ "${ATTN_FP32:-0}" == 1 ]] && kl_args+=(--attention_fp32 True)
+[[ -n "${RESUME_FROM:-}" ]] && kl_args+=(--resume_from_checkpoint "$RESUME_FROM")
+
+case "$variant" in
+  collab) collab_args=(--collab True) ;;
+  stock) collab_args=() ;;
+  *) echo "unknown VARIANT=$variant" >&2; exit 1 ;;
+esac
+if [[ "$smoke" == 1 ]]; then
+  sample=64; batch=8; test_sample=64
+else
+  sample=-1; batch=256; test_sample=-1
+fi
+
+export WANDB_PROJECT="${WANDB_PROJECT:-R3}"
+export WANDB_RUN_ID="${WANDB_RUN_ID:-$(python -c 'import secrets; print(secrets.token_hex(4))')}"
+export WANDB_NAME="${WANDB_NAME:-R3_grpo_${tag}}"
+export WANDB_TAGS="${WANDB_TAGS:-grpo-stage2,${variant}}"
+
+category="${CATEGORY:-Toys_and_Games}"
+data="data/${category}"
+train_file=$(ls ${data}/train/${category}_5_*.csv)
+eval_file=$(ls ${data}/valid/${category}_5_*.csv)
+test_file=$(ls ${data}/test/${category}_5_*.csv)
+info_file=$(ls ${data}/info/${category}_5_*.txt)
+task_dir="${OUTPUT_ROOT:-/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir}/${category}_R3_grpo_${tag}"
+out="${task_dir}/model"
+mkdir -p "$out"
+echo "[$(date --iso-8601=seconds)] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); variant ${variant}; base ${base_model}; code ${code}; smoke ${smoke}; lr ${lr}; beta ${beta}; kl_anchor ${KL_ANCHOR:-0}; reward ${reward}; attn_fp32 ${ATTN_FP32:-0}; eval ${eval_mode}"
+
+if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
+  echo "[$(date --iso-8601=seconds)] HiLaR-style GRPO (single latent, Gaussian policy)"
+  python "$code/src/grpo_attention_tuning/hilar_grpo.py" \
+    --base_model "$base_model" --train_file "$train_file" --info_file "$info_file" --output_dir "$out" \
+    --sasrec_ckpt "${SASREC_CKPT:?SASRec pickle}" --category "$category" \
+    --sigma_rel "${SIGMA_REL:-1.0}" --G "${NUM_GEN:-12}" --batch_users "${BATCH_USERS:-8}" --lr "$lr" --beta "$beta" \
+    --w_cf "${W_CF:-0.1}" --sample "$sample" --seed 42
+fi
+
+echo "[$(date --iso-8601=seconds)] ranking"
+python "$code/src/utils/split.py" --input_path "$test_file" --output_path "$task_dir" --nn 1
+python "$code/src/grpo_attention_tuning/noise_eval.py" \
+  --batch_size 8 --base_model "$out" --sample "$test_sample" \
+  --info_file "$info_file" --category "$category" --end_k -1 \
+  --test_data_path "$task_dir/0.csv" --result_json_data "$task_dir/0.json"
+python "$code/src/utils/merge.py" --input_path "$task_dir/" --output_path "$out/final_result.json" --nn 1
+python "$code/src/utils/calc.py" --path "$out/final_result.json" --item_path "$info_file"
+[[ "$smoke" == 1 ]] && { mkdir -p "output_dir/grpo_stage2/${tag}"; cp "$out/final_result.json" "output_dir/grpo_stage2/${tag}/"; echo "[$(date --iso-8601=seconds)] smoke complete"; exit 0; }
+[[ "$eval_mode" == ranking ]] && { echo "[$(date --iso-8601=seconds)] ranking-only run complete"; exit 0; }
+
+log_dir="analysis/logs/R3_grpo_${tag}"
+result_dir="analysis/results/intervention/${tag}"
+mkdir -p "$log_dir" "$result_dir"
+echo "[$(date --iso-8601=seconds)] train-latent extraction and geometry"
+if [[ -f "analysis/evidence/${category}/${tag}/train/thoughts.pt" && "${REEXTRACT:-0}" != 1 ]]; then
+  echo "[$(date --iso-8601=seconds)] train latents already extracted; skipping (REEXTRACT=1 to redo)"
+else
+python "$code/src/prototype_grounding/experiment.py" extract \
+  --split train --batch-size 32 --checkpoint "$out" --tag "$tag" --category "$category" \
+  >"$log_dir/extract_train.log" 2>&1
+fi
+python "$code/src/prototype_grounding/experiment.py" latent-distribution \
+  --checkpoint "$out" --tag "$tag" --category "$category" --component r \
+  >"$log_dir/latent_distribution.log" 2>&1
+for mode in raw mask mean shuffle_user; do
+  echo "[$(date --iso-8601=seconds)] intervention ${mode}"
+  python "$code/src/prototype_grounding/experiment.py" generate \
+    --split test --bank all --k 32 --seed 42 --mode "$mode" \
+    --topk 1 --temperature 0.1 --alpha 1.0 --batch-size 16 \
+    --checkpoint "$out" --tag "$tag" --category "$category" \
+    >"$log_dir/ranking_${mode}.log" 2>&1
+done
+interv_dir="analysis/results/intervention/${tag}"
+python "$code/scripts/paired_bootstrap_eval.py" "$interv_dir" raw mask mean shuffle_user
+results="output_dir/grpo_stage2/${tag}"
+mkdir -p "$results"
+cp "$task_dir/0.json" "$out/final_result.json" "$results/" 2>/dev/null || true
+cp "$interv_dir"/*.json "$results/" 2>/dev/null || true
+date --iso-8601=seconds >"$result_dir/RANKING_COMPLETE"
+echo "[$(date --iso-8601=seconds)] ${tag} complete"
