@@ -33,8 +33,7 @@ from transformers import AutoTokenizer, GenerationConfig, LogitsProcessorList
 from model import LatentModel
 from latent_grpo_dataset import D3Dataset, get_hash, get_prefix_data
 from latent_grpo_processor import CFEnhancedLogitsProcessor
-from rank_grpo import _strip
-from hilar_probe import f1, prefix_score
+from hilar_probe import _strip, f1, prefix_score
 
 CATEGORY_TEXT = {"Toys_and_Games": "toys and games", "CDs_and_Vinyl": "musics"}
 

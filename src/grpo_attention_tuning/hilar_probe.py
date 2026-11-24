@@ -23,8 +23,37 @@ from transformers import AutoTokenizer, GenerationConfig, LogitsProcessorList
 from model import LatentModel
 from latent_grpo_dataset import D3Dataset, get_hash, get_prefix_data
 from latent_grpo_processor import CFEnhancedLogitsProcessor
-from rank_grpo import _strip
-from grad_coherence import sample_rows, CATEGORY_TEXT
+
+CATEGORY_TEXT = {"Toys_and_Games": "toys and games", "CDs_and_Vinyl": "musics"}
+_norm = lambda s: str(s).strip().strip('\n').strip('"').strip()
+_brand = lambda s: (re.findall(r"[a-z0-9']+", _norm(s).lower()) + [""])[0]
+
+
+def _strip(s):
+    return s.strip().strip("\n").strip('"').strip()
+
+
+def copy_flags(df):
+    """Same-day, same-brand, title-Jaccard >= 0.3 copy rows (rule of analysis/results/copy_rows_mw_vs_r3)."""
+    import ast
+    tokset = lambda s: set(re.findall(r"[a-z0-9]+", _norm(s).lower()))
+    jac = lambda a, b: len(tokset(a) & tokset(b)) / max(1, len(tokset(a) | tokset(b)))
+    out = []
+    for hs, hts, t, ts in zip(df.history_item_title, df.history_timestamp, df.item_title, df.timestamp):
+        hs, hts = ast.literal_eval(hs), ast.literal_eval(hts)
+        out.append(any(abs(ts - ht) < 86400 and _brand(t) == _brand(h) and jac(t, h) >= 0.3 for h, ht in zip(hs, hts)))
+    return np.array(out)
+
+
+def sample_rows(train_file, n_copy, n_other, seed, out_csv):
+    import pandas as pd
+    df = pd.read_csv(train_file)
+    c = copy_flags(df)
+    rng = np.random.default_rng(seed)
+    idx = np.concatenate([rng.choice(np.where(c)[0], n_copy, replace=False),
+                          rng.choice(np.where(~c)[0], n_other, replace=False)])
+    df.iloc[idx].reset_index(drop=True).to_csv(out_csv, index=False)
+    return np.array([True] * n_copy + [False] * n_other)
 
 
 def words(s):
