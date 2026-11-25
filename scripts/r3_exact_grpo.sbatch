@@ -4,10 +4,10 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96GB
 #SBATCH --gres=gpu:2
-#SBATCH --constraint=a40
-#SBATCH --partition=hadylauwresearch
-#SBATCH --qos=hadylauwresearch-priority
-#SBATCH --time=72:00:00
+#SBATCH --constraint="l40s|a100|l40|a40"
+#SBATCH --partition=researchshort
+#SBATCH --qos=research-1-qos
+#SBATCH --time=12:00:00
 #SBATCH --requeue
 #SBATCH --chdir=/common/home/users/m/mk.ngohuu.2024/research/R3
 #SBATCH --output=run_logs/%x.%j.out
@@ -35,6 +35,7 @@ analysis_code="${ANALYSIS_CODE:?frozen analysis code copy (experiment.py)}"
 base_model="${BASE_MODEL:?stage-1 checkpoint}"
 tag="${TAG:?tag}"
 lr="${LR:-1e-5}"
+seed="${SEED:-42}"
 smoke="${SMOKE:-0}"
 category="${CATEGORY:-Toys_and_Games}"
 data="data/${category}"
@@ -53,7 +54,7 @@ if [[ "${SKIP_TRAIN:-0}" != 1 ]]; then
     "$code/src/grpo_attention_tuning/train_noise_grpo.py" --category "$category" \
     --num_generations 8 --sample "$sample" --num_epochs 1 --info_file "$info_file" \
     --base_model "$base_model" --output_dir "$out" --beta 0.00 \
-    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --seed 42 \
+    --batch_size "$batch" --micro_batch_size 8 --lr "$lr" --seed "$seed" \
     --train_file "$train_file" --eval_file "$eval_file" \
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28
 fi
