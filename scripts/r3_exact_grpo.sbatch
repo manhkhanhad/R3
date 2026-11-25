@@ -77,6 +77,7 @@ cp "$out/final_result.json" "$results/"
 [[ "$smoke" == 1 ]] && { echo "[$(date --iso-8601=seconds)] smoke complete"; exit 0; }
 fi
 
+if [[ "${SKIP_INTERV:-0}" == 1 ]]; then echo "[$(date --iso-8601=seconds)] ${tag} complete (ranking only)"; exit 0; fi
 echo "[$(date --iso-8601=seconds)] r interventions (analysis only)"
 log_dir="analysis/logs/R3exact_${tag}"; mkdir -p "$log_dir"
 python "$analysis_code/src/prototype_grounding/experiment.py" extract \
