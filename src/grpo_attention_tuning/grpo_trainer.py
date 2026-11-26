@@ -34,14 +34,14 @@ def swap_adjacent_blocks(x, k):
 class NoiseGRPORecTrainer(GRPOTrainer):
 
     def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, reward_type="ppl", rank_beams=10,
-                 rank_max_new_tokens=128, **kwargs) -> None:
+                 rank_max_new_tokens=128, rank_chunk=2, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # reward_type "ppl" = stock R3 (-PPL of the target, teacher forced). "beam_ndcg" = NDCG@rank_beams of the
         # target in a constrained beam-search list generated from the noisy r (same decoding as noise_eval.py).
         # Everything else (noise on r, noise-free first copy, advantage, teacher-forced target log-prob in the loss) is stock.
         if reward_type not in ("ppl", "beam_ndcg"):
             raise ValueError(reward_type)
-        self.reward_type, self.rank_beams, self.rank_max_new_tokens = reward_type, rank_beams, rank_max_new_tokens
+        self.reward_type, self.rank_beams, self.rank_max_new_tokens, self.rank_chunk = reward_type, rank_beams, rank_max_new_tokens, rank_chunk
         print(f"GRPO reward: {reward_type}" + (f" (NDCG@{rank_beams}, constrained beam search from the noisy r)" if reward_type == "beam_ndcg" else ""), flush=True)
         # kl_anchor: the reference log-probs use the REFERENCE model's own latent r (its frozen
         # stage-1 attention, same noise), as in standard GRPO where pi_ref sees the same input.
@@ -127,14 +127,17 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         """NDCG@rank_beams of the target in the constrained beam-search list generated from each noisy r.
         The micro-batch holds num_generations copies of ONE row; copy i is decoded with noise[i] added to r
         (forward hook on the pooling attention; the first copy has zero noise)."""
-        model = self.accelerator.unwrap_model(self.model)
+        # keep_fp32_wrapper=False: accelerate's mixed-precision wrapper upcasts the full prefill logits
+        # (rows x prompt length x vocab) to fp32, which OOMed next to the full-model optimizer state (smoke 383459).
+        model = self.accelerator.unwrap_model(self.model, keep_fp32_wrapper=False)
         tok = self.processing_class
         nb = self.rank_beams
         B = prompt_ids.size(0)
-        hook_noise = noise.repeat_interleave(nb, dim=0)  # beams of copy i are consecutive rows after HF's expansion
+        chunk = self.rank_chunk
+        state = {"noise": None}
 
         def hook(module, inp, out):
-            return out + hook_noise.to(out.dtype)
+            return out + state["noise"].to(out.dtype)
 
         handle = model.attention.register_forward_hook(hook)
         was_training = model.training
@@ -148,17 +151,23 @@ class NoiseGRPORecTrainer(GRPOTrainer):
             cfg = GenerationConfig(num_beams=nb, num_return_sequences=nb, length_penalty=1.0, do_sample=False,
                                    pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id,
                                    max_new_tokens=self.rank_max_new_tokens, use_cache=True)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                out = model.generate(prompt_ids, attention_mask=prompt_mask, generation_config=cfg,
-                                     logits_processor=LogitsProcessorList([proc]))
+            outs = []
+            torch.cuda.empty_cache()
+            for c in range(0, B, chunk):  # a few copies at a time: prefill logits are (copies x beams) x prompt x vocab
+                # beams of copy i are consecutive rows after HF's beam expansion
+                state["noise"] = noise[c:c + chunk].repeat_interleave(nb, dim=0)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    o = model.generate(prompt_ids[c:c + chunk], attention_mask=prompt_mask[c:c + chunk],
+                                       generation_config=cfg, logits_processor=LogitsProcessorList([proc]))
+                outs.extend(tok.batch_decode(o[:, prompt_ids.size(1):], skip_special_tokens=True))
+                del o
         finally:
             handle.remove()
             model.config.use_cache = use_cache
             if was_training:
                 model.train()
         strip_ = lambda a: a.split("Response:")[-1].strip().strip("\n").strip('"').strip()
-        lists = tok.batch_decode(out[:, prompt_ids.size(1):], skip_special_tokens=True)
-        lists = [[strip_(x) for x in lists[i * nb:(i + 1) * nb]] for i in range(B)]
+        lists = [[strip_(x) for x in outs[i * nb:(i + 1) * nb]] for i in range(B)]
         target = strip_(tok.decode(completion_ids[0], skip_special_tokens=True))
         rew = []
         for beams in lists:
