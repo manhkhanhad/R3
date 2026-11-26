@@ -9,10 +9,11 @@ from trl.trainer.grpo_trainer import selective_log_softmax
 import transformers
 from accelerate.utils import gather
 from transformers import Qwen2ForCausalLM
-from transformers import DataCollatorForSeq2Seq, LogitsProcessorList
+from transformers import DataCollatorForSeq2Seq, LogitsProcessorList, GenerationConfig
 from transformers.utils import is_sagemaker_mp_enabled
 
 from latent_grpo_processor import CFEnhancedLogitsProcessor
+import math
 
 def swap_adjacent_blocks(x, k):
     # 保存原始形状
@@ -32,8 +33,16 @@ def swap_adjacent_blocks(x, k):
 
 class NoiseGRPORecTrainer(GRPOTrainer):
 
-    def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, **kwargs) -> None:
+    def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, reward_type="ppl", rank_beams=10,
+                 rank_max_new_tokens=128, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # reward_type "ppl" = stock R3 (-PPL of the target, teacher forced). "beam_ndcg" = NDCG@rank_beams of the
+        # target in a constrained beam-search list generated from the noisy r (same decoding as noise_eval.py).
+        # Everything else (noise on r, noise-free first copy, advantage, teacher-forced target log-prob in the loss) is stock.
+        if reward_type not in ("ppl", "beam_ndcg"):
+            raise ValueError(reward_type)
+        self.reward_type, self.rank_beams, self.rank_max_new_tokens = reward_type, rank_beams, rank_max_new_tokens
+        print(f"GRPO reward: {reward_type}" + (f" (NDCG@{rank_beams}, constrained beam search from the noisy r)" if reward_type == "beam_ndcg" else ""), flush=True)
         # kl_anchor: the reference log-probs use the REFERENCE model's own latent r (its frozen
         # stage-1 attention, same noise), as in standard GRPO where pi_ref sees the same input.
         # Stock R3 fed the reference the policy's embeddings (already holding the policy's r);
@@ -112,6 +121,50 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         )
         return (-per_token_logps.detach().clone().sum(dim=-1)/logits_to_keep).exp()
 
+
+    @torch.no_grad()
+    def _beam_ndcg(self, prompt_ids, prompt_mask, completion_ids, noise):
+        """NDCG@rank_beams of the target in the constrained beam-search list generated from each noisy r.
+        The micro-batch holds num_generations copies of ONE row; copy i is decoded with noise[i] added to r
+        (forward hook on the pooling attention; the first copy has zero noise)."""
+        model = self.accelerator.unwrap_model(self.model)
+        tok = self.processing_class
+        nb = self.rank_beams
+        B = prompt_ids.size(0)
+        hook_noise = noise.repeat_interleave(nb, dim=0)  # beams of copy i are consecutive rows after HF's expansion
+
+        def hook(module, inp, out):
+            return out + hook_noise.to(out.dtype)
+
+        handle = model.attention.register_forward_hook(hook)
+        was_training = model.training
+        use_cache = model.config.use_cache
+        try:
+            model.eval()
+            model.config.use_cache = True
+            proc = CFEnhancedLogitsProcessor(guidance_scale=1.0, cf_logits=None,
+                                             prefix_allowed_tokens_fn=self.prefix_allowed_tokens_fn, cf_dict=None,
+                                             unconditional_ids=None, model=model, tokenizer=tok, num_beams=nb)
+            cfg = GenerationConfig(num_beams=nb, num_return_sequences=nb, length_penalty=1.0, do_sample=False,
+                                   pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id,
+                                   max_new_tokens=self.rank_max_new_tokens, use_cache=True)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = model.generate(prompt_ids, attention_mask=prompt_mask, generation_config=cfg,
+                                     logits_processor=LogitsProcessorList([proc]))
+        finally:
+            handle.remove()
+            model.config.use_cache = use_cache
+            if was_training:
+                model.train()
+        strip_ = lambda a: a.split("Response:")[-1].strip().strip("\n").strip('"').strip()
+        lists = tok.batch_decode(out[:, prompt_ids.size(1):], skip_special_tokens=True)
+        lists = [[strip_(x) for x in lists[i * nb:(i + 1) * nb]] for i in range(B)]
+        target = strip_(tok.decode(completion_ids[0], skip_special_tokens=True))
+        rew = []
+        for beams in lists:
+            rew.append(1.0 / math.log2(beams.index(target) + 2) if target in beams else 0.0)
+        return torch.tensor(rew, dtype=torch.float32, device=prompt_ids.device)
+
     def _generate_and_score_completions(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
 
@@ -173,7 +226,14 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
-            output_reward_func_test = -(-old_per_token_logps.clone().sum(dim=-1)/labels_length).exp().to(torch.float32)
+            if self.reward_type == "beam_ndcg":
+                output_reward_func_test = self._beam_ndcg(prompt_ids, prompt_mask, completion_ids, noise)
+                mode_ = "train"
+                self._metrics[mode_]["rank_reward"].append(output_reward_func_test.mean().item())
+                self._metrics[mode_]["rank_reward_clean"].append(output_reward_func_test[0].item())
+                self._metrics[mode_]["rank_group_has_hit"].append(float((output_reward_func_test > 0).any().item()))
+            else:
+                output_reward_func_test = -(-old_per_token_logps.clone().sum(dim=-1)/labels_length).exp().to(torch.float32)
             rewards_per_func[:, i] = output_reward_func_test
 
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the

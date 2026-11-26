@@ -36,6 +36,7 @@ def main(
         guidance_scale: float = 1.0,
         length_penalty: float = 1.0,
         wandb_run_name: str = None,
+        dtype: str = "bf16",  # "fp32" for models trained in fp32 (bf16 rounding would erase small full-model updates)
 ):
 
     dataset_name = category
@@ -55,7 +56,7 @@ def main(
                      "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products", "STEAM": "games", "Movies": "movie",
                      "yelp": "resturant"}
     category = category_dict[category]
-    model = LatentModel.from_pretrained(base_model, torch_dtype=torch.bfloat16,
+    model = LatentModel.from_pretrained(base_model, torch_dtype=torch.float32 if dtype == "fp32" else torch.bfloat16,
                                         use_flash_attention_2=True if base_model.lower().find("llama") > -1 else False)
     model.attention.end_k = end_k
     tokenizer = AutoTokenizer.from_pretrained(base_model)

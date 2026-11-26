@@ -38,6 +38,13 @@ def train(
     num_generations: int = 8, # grpo args
     beta: float = 0.01, # KL coefficient
     kl_anchor: bool = False, # reference log-probs from the reference model's own r (grpo_trainer.py)
+    reward_type: str = "ppl", # "ppl" (stock -PPL) or "beam_ndcg" (NDCG@rank_beams of the target in a constrained beam-search list from the noisy r)
+    rank_beams: int = 10,
+    train_full: bool = False, # unfreeze the whole model (decoder, embeddings, lm_head, attention), not only the pooling attention
+    model_fp32: bool = False, # load the model in fp32 (bf16 autocast): bf16 master weights round away lr<=1e-5 full-model updates
+    gradient_checkpointing: bool = False,
+    warmup_steps: int = 200,
+    save_steps: int = 200,
     attention_fp32: bool = False, # keep the trained pooling attention in fp32 (bf16 rounds away most lr-1e-5 updates)
     num_iterations: int = 2, # number of iterations
     epsilon: float = 0.2, # clipping value
@@ -95,16 +102,23 @@ def train(
     assert batch_size==micro_batch_size*gradient_accumulation_steps*world_size
 
     model = LatentModel.from_pretrained(base_model,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float32 if model_fp32 else torch.bfloat16,
     )
     model.attention.end_k = end_k
     if attention_fp32:
         model.attention.float()
         print("pooling attention kept in fp32", flush=True)
-    for param in model.model.parameters():
-        param.requires_grad = False
-    for param in model.lm_head.parameters():
-        param.requires_grad = False
+    if not train_full:
+        for param in model.model.parameters():
+            param.requires_grad = False
+        for param in model.lm_head.parameters():
+            param.requires_grad = False
+    else:
+        for param in model.parameters():
+            param.requires_grad = True
+        if gradient_checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print(f"FULL-MODEL training (fp32 weights: {model_fp32}, gradient checkpointing: {gradient_checkpointing})", flush=True)
     def count_trainable_params(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
     trainable_params = count_trainable_params(model)
@@ -178,6 +192,7 @@ def train(
     trainer = trainer_class(
         **trainer_kwargs,
         kl_anchor=kl_anchor,
+        reward_type=reward_type, rank_beams=rank_beams,
     # from grpo_trainer import HalfGRPORecTrainer
     # trainer = HalfGRPORecTrainer(
         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
@@ -185,7 +200,7 @@ def train(
         reward_funcs=reward_funcs,
         args= trl.GRPOConfig(
             # deepspeed='scripts/zero2.json',
-            warmup_steps=200,
+            warmup_steps=warmup_steps,
             # warmup_ratio=0.05,
             num_generations=num_generations,
             max_prompt_length=512,
@@ -208,7 +223,7 @@ def train(
             eval_strategy="no",
             # eval_steps=1000,
             # save_strategy="epoch",
-            save_steps=200,
+            save_steps=save_steps,
             save_total_limit=1,
             load_best_model_at_end=False,
             ddp_find_unused_parameters=True,
