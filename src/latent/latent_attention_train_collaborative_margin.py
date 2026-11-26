@@ -135,6 +135,7 @@ def train(
         "Sports_and_Outdoors": "sports and outdoors",
         "Pet_Supplies": "pet supplies", "Arts_Crafts_and_Sewing": "arts products",
         "Movielens": "movie", "yelp": "resturant",
+        "Steam": "games", "Goodreads": "books",  # = CATEGORY_TEXT used by the motive trainer (MW-R-H runs)
     }
     category_text = category_dict[category]
     gradient_accumulation_steps = batch_size // micro_batch_size
