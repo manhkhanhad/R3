@@ -80,7 +80,7 @@ if [[ ! -f "$out/config.json" ]]; then
   common=(--base_model "${BASE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
     --train_file "$train_file" --eval_file "$eval_file" --output_dir "$out" --category "$category"
     --sample "${TRAIN_SAMPLE:--1}" --micro_batch_size "$micro_batch_size" --batch_size 128
-    --num_epochs "${NUM_EPOCHS:-3}" --learning_rate 3e-4 --cutoff_len 512
+    --num_epochs "${NUM_EPOCHS:-3}" --learning_rate "${LR:-3e-4}" --cutoff_len 512
     --margin "$margin" --margin_weight "$margin_weight"
     --wider_weight "$weight" --wider_momentum "${MOMENTUM:-0.99}"
     ${TRAIN_SEED:+--train_seed "$TRAIN_SEED"})
@@ -97,7 +97,7 @@ if [[ ! -f "$out/config.json" ]]; then
   elif [[ "$method" == motive ]]; then
     python "$code_root/src/latent/latent_attention_train_motive.py" "${common[@]}" \
       --item_emb_file "${data_dir}/info/${category}_qwen3emb_1536.pt" --eval_sample -1 \
-      --warmup_epochs 1 --motive_weight "${MOTIVE_W:-0.1}" --temperature 0.1 \
+      --warmup_epochs 1 --max_grad_norm "${MAX_GRAD_NORM:-1.0}" --motive_weight "${MOTIVE_W:-0.1}" --temperature 0.1 \
       --within_threshold "${WITHIN_T:-0.8}" --within_mode "${WITHIN_MODE:-user}" --sasrec_k "${SASREC_K:-20}" \
       --margin_mode "${MARGIN_MODE:-fixed}" --margin_epochs "${MARGIN_EPOCHS:--1}" --late_margin_mode "${LATE_MARGIN_MODE:-}" --late_margin_weight "${LATE_MARGIN_WEIGHT:--1}" --lagrange_delta "${LAGRANGE_DELTA:-0.1}" --lagrange_lr "${LAGRANGE_LR:-0.01}" --ref_nll_file "${REF_NLL_FILE:-}" --ref_weight_fn "${REF_WEIGHT_FN:-rank}" --ref_tau "${REF_TAU:-0.5}" --ref_power "${REF_POWER:-1.0}" --ref_cut "${REF_CUT:-0.25}" --hinge_negative "${HINGE_NEG:-batch}" --motive_hard_neg "${MOTIVE_HARD_NEG:-0}" --copy_swap_weight "${COPY_SWAP_W:-0}" --distill_weight "${DISTILL_W:-0}" --distill_model "${DISTILL_MODEL:-}" --copy_power "${COPY_POWER:-1.0}" --band_upper "${BAND_UPPER:--1}" --band_beta "${BAND_BETA:-1.0}" --adaptive_alpha "${ADAPTIVE_ALPHA:-0.5}" \
       --sasrec_file "${SASREC_FILE:-output_dir/sasrec_latent/prep/Toys_sasrec_sequence.pt}" --max_positives 16 --num_negatives 256 --projection_dim 256 "${resume[@]}"

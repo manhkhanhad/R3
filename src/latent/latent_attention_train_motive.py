@@ -125,6 +125,7 @@ def train(
     micro_batch_size: int = 4,
     num_epochs: int = 3,
     learning_rate: float = 3e-4,
+    max_grad_norm: float = 1.0,  # = the HF Trainer default, passed explicitly so runs state it
     cutoff_len: int = 512,
     K: int = 0,
     margin: float = 0.2,
@@ -265,7 +266,7 @@ def train(
         args=transformers.TrainingArguments(
             per_device_train_batch_size=micro_batch_size, per_device_eval_batch_size=micro_batch_size,
             gradient_accumulation_steps=grad_accum, warmup_steps=20, num_train_epochs=num_epochs,
-            learning_rate=learning_rate, bf16=True, logging_steps=1, optim="adamw_torch",
+            learning_rate=learning_rate, max_grad_norm=max_grad_norm, bf16=True, logging_steps=1, optim="adamw_torch",
             eval_strategy="epoch", save_strategy="epoch", save_total_limit=1, output_dir=output_dir,
             load_best_model_at_end=False, report_to=wandb_report_to(), remove_unused_columns=False,
             **({"seed": train_seed, "data_seed": train_seed} if train_seed is not None else {}),
