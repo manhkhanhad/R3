@@ -19,6 +19,13 @@ Started 2026-10-25 (worktree `R3LatentUtilization`; brief in its `CLAUDE.md`). P
 | V0 | Variational line smoke: history dropout C (item p=0.5) and C+A (CVAE d=64, aux 0.5, prior 0.2, free 2 nats), 256 rows, 1 epoch | 358504 (C), 358505 (C+A), researchshort, code_a4178cd2 (earlier 358373/358374 cancelled: a40 saturated; 358488/358489 valid-sample bug → 84ed02a0; 358490 same-file cp → a4178cd2) | **done 2026-11-08: both pipelines complete end to end** (train, probe, rankings raw/drop0.5/sample, extract, interventions, bootstrap); mu heads zero-initialised afterwards (9b68adc6, KL started at 131 nats) → full runs on code_9b68adc6 |
 | V1 | C: history dropout full runs, Toys, item-level p = 0.3 / 0.5 / 0.7, ranked at eval_p = 0 and = p, interventions raw/mask/mean/shuffle_user (user decision 2026-11-08: C first, researchshort) | 358573 (0.3), 358574 (0.5), 358575 (0.7); code_9b68adc6, researchshort 48h l40s|a100|l40|a40, mbs 4 | **done 2026-11-09, negative**: HR@10 0.1042 / 0.0988 / 0.1011 (plain 0.1061), mean & shuffle n.s. at every p, mask −0.028/−0.043/−0.037; at eval_p = p HR@10 0.086 / 0.064 / 0.056; `r` eff. rank 1.7 / 1.3 / 3.8 — decoder reads the visible history, not `r` |
 | V2 | A: variational latent full runs (Toys): d=64, beta 1 linear warm-up 30%, free 2 nats, aux 0.5 (Qwen3 item table), prior_prob 0.2; without / with dropout 0.5; ranked raw + CVAE_MODE=sample (+ eval_p 0.5), interventions, cvae_diagnostics.json | 359244 (no dropout, `Toys_and_Games_cvae64_b1_f2_aux0.5_pp0.2`), 359245 (dropout 0.5, `Toys_and_Games_dropitem0.5_cvae64_b1_f2_aux0.5_pp0.2`); code_9b68adc6, researchshort 48h | submitted 2026-11-09 after the V1 negative |
+| ML-S | MovieLens MW-R-H + swapped-pass CE (COPY_SWAP_W=1, row weight 1 − w_i), code 1186ca19 | 375420 | **done 2026-11-24: MEETS CRITERION** — HR@10 .1380 / NDCG@10 .0737 ≥ R3 (.1335 / .0698; seed 1 .1372 / .0720) at all cutoffs, sig at @5 vs both R3 seeds; shuffle −.0381 sig; copy_row .4026 = R3; single seed (section 2026-11-24) |
+| ML-D | MovieLens MW-R-H + distillation to the no-latent reference (DISTILL_W=1), code 1186ca19 | 375422 | **done 2026-11-24: meets criterion** — HR@10 .1350 / NDCG@10 .0718 = R3 (n.s. vs seed 1; HR@5, NDCG@5 sig vs seed 0); shuffle −.0729 sig (copy −.21, non-copy −.026); = ML-S overall (n.s.), below ML-S on non-copy HR@10 |
+| ML-CR | MovieLens MW-R-H + original collaborative reasoning InfoNCE (user + target heads, 0.1 / 0.1), code c3b42206 | 376544 | **done 2026-11-24: fails at @10** — HR@10 .1265 (−.0070 sig vs R3), NDCG@10 .0677 n.s., = R3 at @1–@5; shuffle −.0507; copy .3617 (not recovered); > same-motive at HR@5/@10; sig below ML-S |
+| ML-M-HN | MovieLens MW-R-H + same-motive + history-matched InfoNCE negatives (MOTIVE_HARD_NEG=16), code bd018410 | 376838 (376835 failed at start: sbatch missing space) | **done 2026-11-24: negative** — HR@10 .1155 / NDCG@10 .0623 sig below R3, n.s. vs same-motive 374774; InfoNCE could not separate the history-matched negatives (cos_hard ≥ cos_cross) |
+| ML-M-W3 | MovieLens MW-R-H + same-motive, InfoNCE weight 0.3, code bd018410 | 376839 (376836 failed at start) | **done 2026-11-24: negative** — HR@10 .1127 / NDCG@10 .0603 sig below R3 and below 374774; latent weakly used (shuffle −.0096); hinge never satisfied, already before the InfoNCE starts (confounded) |
+| ML-P3 | Motive probe on ML-M-HN and ML-M-W3 | 376840 (376837 cancelled) | done 2026-11-24: next/history ratio .45 (HN-neg) and .39 (w0.3) vs .48 for 374774 — neither moved the latent toward the next item |
+| ML-prev | MovieLens earlier MW variants: MW-R-H 369532, MW-nc 374722, same-motive 374774, MW-3b 374225, MW-HN 374776, probes 374778 / 376414 | — | done: none meets the criterion (latent-using runs .119–.125 HR@10 < R3; MW-3b / MW-HN ≈ R3 but latent unused) |
 
 ## U1: how similar are latents of the same user / same target item?
 
@@ -2499,3 +2506,1154 @@ Reading: the epoch-1 history-swap hinge works as a training-time regulariser of 
 Ranking HR@1/3/5/10 0.0353/0.0614/0.0803/0.1031, NDCG@3/5/10 0.0504/0.0582/0.0655; copy 0.498, non-copy 0.0418. vs A all n.s. (HR@10 −0.0021); vs MWC-M non-copy −0.0048 sig. Interventions raw − mask / mean / shuffle HR@10 +0.085 / +0.078 / +0.080 (sig) — latent strongly used (≈ MWC-M).
 Margin sweep (with motive): m 0.2 (MWC-M) — dependence ≈ 0.09, copy 0.486, non-copy 0.0466; m 0.1 — 0.08, copy 0.498, non-copy 0.0418; m 0.05 — 0.01–0.06, copy 0.504, non-copy 0.0442. No margin value gives both strong dependence and recovered copy rows; m 0.2 remains the best of the sweep. Single-checkpoint code left no checkpoint behind (storage fix works). Note: trainer_state.json written by the new end-of-run save lacks eval_loss entries — to check.
 - 2026-11-12 report written: MW_to_MWC_report_2026-11-12.md (+ report_tables.py).
+
+**363709 done (control interventions).** The ranking reproduces (HR@10 0.1098). R3_ori + rank GRPO, raw − mode (HR@10):
+
+| mode | HR@10 | NDCG@10 |
+|---|---|---|
+| mask | +0.0166 [+0.0126, +0.0208] sig | +0.0171 |
+| mean | +0.0006 n.s. | |
+| shuffle_user | +0.0001 n.s. | |
+
+So the control's r is a shared soft prompt: needed as a vector, no per-user content (12 distinct vectors). Toys summary of rank GRPO v2:
+
+| arm | HR@10 | gain vs start | shuffle effect |
+|---|---|---|---|
+| margin + WIDER | 0.1072 | +0.0042 sig | −0.071 (content used) |
+| R3_ori | 0.1098 | +0.0076 sig | 0.000 (content unused) |
+
+The best Toys ranking comes from the arm whose r is not used. The ranking reward's gain is generic and does not require per-user content. Results in `output_dir/grpo_stage2/toys_r3ori_rankgrpo2/`. CDs both arms pending (363710 / 363711).
+
+## MW-3b-L: MW-3b + copy-safe late hinge (2026-11-12, code 2cb3645b)
+
+Motivation: MW-3b (363603) is significantly above plain R3 at @5/@10 but r is unused (epochs 2-3 are CE + WIDER only, so the decoder drifts back to ignoring r). MWC-M keeps r used but loses copy rows (hinge forces r to override a sufficient history).
+Design (user approved): epoch 1 = fixed history-swap hinge (m 0.2) + WIDER, no motive (MOTIVE_W=0); epochs 2-3 = hinge kept but switched to a copy-safe form via --late_margin_mode (no copy flag):
+- MW-3b-L4: novel-token hinge (M4 form; copy targets have almost no novel tokens).
+- MW-3b-L6: adaptive one-sided margin min(0.2, 0.5*NLL(y|x,r_other)), negative under no_grad (M6 form).
+Gate: shuffle/mean drop >= ~0.02 HR@10 sig; HR/NDCG@5,@10 sig above plain R3 (like MW-3b); copy HR@10 >= 0.50.
+Submit helper: $CLAUDE_JOB_DIR/tmp/submit_mw3bl.sh <l4|l6> <smoke|full>; smokes requested via JobManager.
+- MW-3b-L smokes 364057 (l4) / 364058 (l6) PASSED (switch verified). L4 full = 364065 (Toys_and_Games_margin_0.2_wider_0.1_marginwarm_latenovel). L6 full ON HOLD: one-sided hinge == CE (M6 log: margin_loss 0.181->0.156, hinge_active 1.0, no gap); proposed L6b (two-sided adaptive) pending user.
+- 2026-11-12: one-sided (stop-gradient negative) hinge DROPPED by user: grad of [m + NLL_pos - sg(NLL_neg)]+ = CE grad, so no contrast (M6 gap never formed). M6 363594 cancel requested; MW-3b-L L6 full never submitted; L6b not pursued.
+
+## MW-3b-lambda: late hinge at reduced weight (2026-11-12, code 000b81fe)
+Dial between MW-3b (lambda 0: sig gain, latent unused) and MW (lambda 1: latent used, copy rows hurt). Epoch 1: fixed two-sided hinge m 0.2 x1 + WIDER; epochs 2-3: same hinge x lambda (--late_margin_weight); no motive. lambda 0.1 and 0.3 (user approved), full runs requested via JobManager (no smoke: same path as the L4 smoke, switch unit-tested). Gate: shuffle/mean sig drop; @5/@10 >= plain R3; copy HR@10 >= 0.50. Helper tmp/submit_mw3blam.sh.
+
+**CDs rank GRPO mid-run.** 363710 (margin + WIDER) steps 1–500, 100-step windows: hit rate 0.229 → 0.245 → 0.260 → 0.271 → 0.275, reward −0.209 → −0.201, kl 9e-5 → 1.2e-3. Rising steadily, like on Toys.
+- M3a-n 363638 DONE (interventions): raw HR@10 .0956; mask +.0635, mean +.0414, shuffle +.0469 HR@10 (all sig) -> latent USED, but ranking HR@10 .0960 / NDCG@10 .0609 sig below plain R3 -> fails criterion; closed.
+363711 (R3_ori control) steps 1–500: hit rate 0.250 → 0.262 → 0.261 → 0.298 → 0.304, kl 8e-5 → 7.2e-3 (moves faster than the margin + WIDER arm, as on Toys).
+- M4 363511 DONE (old code 5ee286e8): HR@5 .0736 / NDCG@5 .0521 / HR@10 .1005 / NDCG@10 .0608; vs plain R3 HR@5 -0.0059*, NDCG@5 -0.0063*, HR@10 -0.0047 (n.s.), NDCG@10 -0.0059*. copy HR@10 .482 (NOT recovered), non-copy .0413 (gain lost). Latent used: mask/mean/shuffle -0.033/-0.033/-0.032 (sig, ~1/3 of MWC-M). Why copy not spared: copy rows still have 16.5% novel target tokens (vs 60% non-copy) — these are the variant tokens (size/colour/model no.) that separate siblings, so the hinge still sharpens r exactly where sibling slots are decided. Leftover checkpoint-1263 (8.9G) deleted.
+- MW-3b-L4 364065 DONE: HR@5 .0785 / NDCG@5 .0568 / HR@10 .1034 / NDCG@10 .0648; vs plain R3 all n.s. (-0.0010/-0.0016/-0.0018/-0.0019). copy HR@10 .499 (partly recovered vs MWC-M .486), non-copy .0420 (= R3; MW-3b's .0501 gain LOST). Latent used: mask/mean/shuffle -0.028/-0.032/-0.036 (sig). Reading: the late novel hinge restores dependence but erases MW-3b's non-copy gain; ~R3 with latent used (meets the weak criterion, not 'beat R3').
+
+## 2026-11-13 — CDs rank GRPO v2 from margin + WIDER (363710)
+
+14h20m, 1,539 steps, full pipeline OK. Group hit rate (first / mid / last 10%) 0.233 / 0.307 / 0.343; kl 1.2e-4 → 5.6e-3. checkpoint-1539 deleted (final model kept). Results `output_dir/grpo_stage2/cds_mw_rankgrpo2/`.
+
+| run (CDs) | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| rank GRPO on margin + WIDER | .0536 | .0724 | .0854 | **.1069** | .0644 | .0698 | **.0766** |
+| margin + WIDER (start) | .0525 | .0726 | .0851 | .1049 | .0640 | .0691 | .0754 |
+| R3_ori | .0495 | .0707 | .0819 | .0996 | | | .0719 |
+
+Bootstrap:
+
+| comparison | HR@10 | NDCG@10 |
+|---|---|---|
+| − start | +0.0019 [−0.0005, +0.0044] n.s. | +0.0012 n.s. |
+| − R3_ori | **+0.0080 [+0.0028, +0.0133] sig** | **+0.0049 sig** |
+
+Interventions raw − mode HR@10, all sig: mask +0.0135, mean +0.0050, shuffle_user +0.0081 (stage 1: +0.0125 / +0.0068 / +0.0039). Content use is kept, with shuffle slightly larger. On CDs the GRPO gain over its start is small and n.s. (Toys +0.0042 sig). The R3_ori control (363711) is in post-processing.
+
+## 2026-11-13 — CDs rank GRPO v2 R3_ori control (363711) + two-dataset summary
+
+16h19m. Group hit rate 0.248 / 0.328 / 0.394; kl up to 2.1e-2. checkpoint-1539 deleted.
+
+| run (CDs) | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| rank GRPO on R3_ori | .0546 | .0758 | .0880 | **.1095** | .0666 | .0717 | **.0786** |
+| rank GRPO on margin + WIDER | .0536 | .0724 | .0854 | .1069 | .0644 | .0698 | .0766 |
+| margin + WIDER | .0525 | .0726 | .0851 | .1049 | .0640 | .0691 | .0754 |
+| R3_ori | .0495 | .0707 | .0819 | .0996 | | | .0719 |
+
+Bootstrap HR@10:
+
+| comparison | HR@10 | NDCG@10 |
+|---|---|---|
+| control − R3_ori | **+0.0106 [+0.0070, +0.0140] sig** | +0.0068 sig |
+| control − rank-GRPO margin + WIDER | +0.0026 n.s. | |
+| control − margin + WIDER | +0.0045 n.s. | |
+
+Control interventions: mask +0.0365 sig, mean +0.0011 n.s., shuffle +0.0008 n.s. (no content use).
+
+**Two-dataset summary of rank GRPO v2:**
+
+| | Toys margin + WIDER arm | Toys R3_ori arm | CDs margin + WIDER arm | CDs R3_ori arm |
+|---|---|---|---|---|
+| HR@10 | 0.1072 | 0.1098 | 0.1069 | 0.1095 |
+| gain vs own start | +0.0042 sig | +0.0076 sig | +0.0019 n.s. | +0.0106 sig |
+| r content used (shuffle) | −0.071 | 0 | −0.008 | 0 |
+
+On both datasets the ranking reward gains more on R3_ori, whose r is a shared soft prompt, and ends numerically (n.s.) above the margin + WIDER arm. The ranking-reward gain is a generic ranking-objective gain through one shared vector. It does not use, and is not helped by, per-user r content. For the latent-utilization goal: margin + WIDER (+ rank GRPO) gives a used r at ≥ R3-level ranking on both datasets, but the best ranking does not need r's content.
+
+## Rule-based no-hinge-on-copy-rows (2026-11-13, code d0b10de8, user decision)
+--margin_mode skipcopy: hinge weight 0 on copy rows (copy_row: same-day, same brand, title Jaccard >= 0.3 vs a history item; 17.8% of train), averaged over non-copy rows. Runs: MWC-M-nc (MWC-M settings) and MW-nc (MOTIVE_W=0, hinge all epochs). Helper tmp/submit_nc.sh <mwcm|mw> <smoke|full>; smoke requested via JobManager.
+
+## MWC-M7: Lagrangian latent-dependence constraint (2026-11-13, code a89b8680, user approved)
+Motivation: no principled fix balanced copy rows and latent use; skipcopy (d0b10de8, smoke 364852) is only the ceiling. Diagnostics: (1) on the 83 copy rows R3 hits but MWC-M misses, MWC-M fills top-10 with latent-pushed items (target-brand share 0.73 -> 0.59; e.g. LEGO Deep Sea siblings replaced by Star Wars / Nerf / Exploding Kittens): over-trust of r. (2) M3a row weight does discriminate copy rows (copy 0.22/0.14 vs non-copy 0.46/0.37 in epochs 1-2); M3a failed on scale (decay), M3a-n on forced scale.
+Design: --margin_mode lagrange: hinge = mu * mean(w_i * hinge_i), w_i = sg(1-exp(-NLL(y|x,r_other))); constraint E[NLL(y|x,r_other) - NLL(y|x,r_own)] >= delta via dual ascent mu <- clip(mu + 0.01*(delta - EMA_0.99(gap)), 0, 5) per micro-batch; mu fp32 persistent buffer. MWC-M settings otherwise. delta 0.05 / 0.10. Logs lagrange_mu, swap_gap(_copy/_noncopy). Helper tmp/submit_m7.sh; smoke (0.10) requested.
+- skipcopy smoke 364852 PASSED (hinge_weight_copy 0, noncopy 1). Full: 364875 MWC-M-nc (..._motive_skipcopy), 364876 MW-nc (..._skipcopy). M7 smoke 364860 pending.
+- M7 smoke 364860 PASSED (mu 1.0->1.13 while gap < delta; eval loads). Full: 364879 (delta 0.05, ..._motive_lagrange0.05), 364880 (delta 0.10, ..._motive_lagrange0.10).
+
+## 2026-11-13 — MW-3b vs margin + WIDER / R3_ori (user question; run by the margin_wider_collab session)
+
+MW-3b (363603; hinge only in epoch 1, then CE + WIDER) eval_raw.json bootstrapped directly (HR@10 / NDCG@10):
+
+| comparison | HR@10 | NDCG@10 |
+|---|---|---|
+| − margin + WIDER 356322 | +0.0095 [+0.0042, +0.0150] sig | +0.0050 sig |
+| − R3_ori | +0.0102 sig | +0.0059 sig |
+| − plain A | +0.0073 sig | +0.0051 sig |
+| − rank GRPO margin + WIDER (0.1072) | +0.0053 n.s. | +0.0032 sig |
+| − rank GRPO R3_ori (0.1098) | +0.0027 n.s. | +0.0024 n.s. |
+
+Copy split (my 836-row definition):
+
+| rows | MW-3b | margin + WIDER | R3_ori | MW-3b − margin + WIDER | MW-3b − R3_ori |
+|---|---:|---:|---:|---|---|
+| copy | 0.538 | 0.507 | 0.534 | +0.031 [+0.005, +0.055] sig | +0.005 n.s. |
+| non-copy | 0.0522 | 0.0457 | 0.0412 | +0.0064 [+0.0017, +0.0110] sig | +0.0110 [+0.0058, +0.0164] sig |
+
+But its interventions are null (mask / mean / shuffle −0.001 / −0.002 / −0.001 n.s.): r is unused at test time.
+
+**Reading:** a large ranking improvement on margin + WIDER (both copy and non-copy rows, the latter sig vs R3_ori), but it gives up the content dependence, which is the other half of the criterion. Best Toys ranking in the line (single seed, no GRPO). The epoch-1 hinge acts as a training regulariser. The follow-ups that restore a late hinge (MW-3b-L4, M4, λ variants) bring dependence back but lose the gain so far.
+- M7 d0.05 364879: training+ranking DONE before 1st preemption (interventions to rerun). HR@5 .0807 / NDCG@5 .0599 / HR@10 .1077 / NDCG@10 .0686; vs R3 +0.0012/+0.0014/+0.0025/+0.0019 (all n.s., all positive; > MWC-M). copy .496, non-copy .0475. Dual: mu 1.68->1.84 (ep0-0.5) then decays to ~0 by ep1.75; train swap gap stays ~0.05-0.06 (= delta) with mu~0 -> dependence self-sustaining after epoch 1 (motive loss?); copy gap < non-copy gap mostly; weights w_copy 0.16-0.57 vs w_non 0.39-0.83. Latent use pending interventions.
+- MWC-M-nc 364875 DONE (skip-copy ceiling): HR@5 .0787 / NDCG@5 .0585 / HR@10 .1043 / NDCG@10 .0669; vs R3 all n.s. (-0.0009/+0.0001/-0.0009/+0.0002). copy .497 (only +0.011 vs MWC-M .486; R3 .513), non-copy .0434 (gain mostly lost vs MWC-M .0466). Latent used: mask/mean/shuffle -0.034/-0.054/-0.063 sig. => removing the hinge on copy rows does NOT restore copy rows: the shared decoder still over-trusts r at test time (DRM condition met). M7 d0.05 (copy .496, non-copy .0475) matches/beats this rule ceiling adaptively.
+- M7 d0.10 364880 DONE: HR@5 .0815 / NDCG@5 .0604 / HR@10 .1070 / NDCG@10 .0686; vs R3 +0.0019/+0.0020/+0.0018/+0.0019 (all n.s., all positive). copy .502, non-copy .0458. Latent WEAKLY used: mask/mean/shuffle -0.005/-0.008/-0.009 HR@10 (sig but ~1/10 of MWC-M). Dual: mu spiked 2.5->3.8 in ep0-0.25 (gap jumped to .23), then ~0.07-0.13 till ep1.5 and ~0 after; TRAIN swap gap held .10-.12 (>= delta) with mu~0, but TEST dependence small -> train-set gap overstates test-time dependence (gap_copy > gap_noncopy on train). M7 effectively = early hinge burst then off (MW-3b-like).
+- M7 d0.05 364879 interventions DONE: mask/mean/shuffle -0.017/-0.010/-0.015 HR@10 (sig, weak; ~1/6 of MWC-M). Same failure as d0.10: train-set gap constraint met with mu~0, test dependence weak.
+- MW-nc 364876 DONE (skip-copy rule, no motive): HR@5 .0813 / NDCG@5 .0602 / HR@10 .1109 / NDCG@10 .0697; vs R3 +0.0018/+0.0017/+0.0056* (CI [+0.0001,+0.0111])/+0.0030 (CI [-0.0003,+0.0062]). copy .515 (FULLY recovered = R3 .513), non-copy .0482. Latent USED: mask/mean/shuffle -0.029/-0.016/-0.037 sig. => FIRST model sig above R3 (HR@10) with latent used -- but rule-based (ceiling). Contrast MWC-M-nc (with motive) copy .497: the motive InfoNCE, not the hinge on copy rows, makes the decoder over-trust r on copy rows when the rule is used. Adaptive target: approximate this ceiling on the MW (no motive) base.
+
+## MW-R: reference-model-weighted hinge (2026-11-14, user approved; step 1 code d15f6b02)
+Motivation: -nc references (dev only) show per-row allocation on the MW base (no motive) is what's needed: MW-nc copy .515, HR@10 .1109 sig, latent used. Adaptive replacement for the rule: weight each row's hinge by how much the history LACKS about the target, measured by a frozen reference LM never trained on these rows (no memorisation confound; cf. RHO-LOSS, Rho-1).
+Step 1 (diagnostic, no training): src/latent/reference_score.py scores NLL_ref(y|x) with Qwen/Qwen2.5-1.5B on the R3 prompt minus <|Thought|>, train/valid/test -> output_dir/margin_wider_collab/reference_nll/Toys_and_Games/*.pt. Go: AUROC(-NLL_ref -> copy rule) >= 0.80 (rule used only for this check).
+Step 2 (if go): MW base, hinge sum(w_i hinge_i)/sum(w_i), w = rank percentile of NLL_ref (soft) and sigmoid((NLL_ref - median)/tau) (sharp). Target: approach MW-nc without the rule.
+- MW-R step 1 365378 DONE: AUROC(-NLL_ref -> copy) train .914 / valid .900 / test .892 (gate .80 PASSED); copy NLL_mean 2.97 vs non-copy 5.22 (train); lowest 20% NLL captures 73% of copy rows. Weights: rank (copy .159 vs non .574, ratio .28) and sigmoid((NLL-median)/0.5) (copy .101 vs non .586, ratio .17). Step 2 code efc11712 (--margin_mode refweight, MW base MOTIVE_W=0); smoke (rank) requested; helper tmp/submit_mwr.sh.
+- MW-R smoke 365384 PASSED (copy hinge weight 0.04 vs non-copy 0.56 per batch). Full: 365389 rank (..._refweight_rank), 365390 sigmoid (..._refweight_sigmoid).
+- 2026-11-14 scratch cleanup (user OK: remove failed-result ckpts): deleted final models of G3 cfg3, MWC-I/I-B/I-C, M3a-n, M4, M2, M3a, M3b, MWC-M m0.1, m0.05, plus smokes smoke_m7_0.10/mw3a/mw3b/mwr_rank/nc_mwcm and empty MW-3a dir (~50 GB). Result JSONs kept in output_dir/margin_wider_collab. Kept models: MW, MWC-G, MWC-M, MW-3b, L4, M7 0.05/0.10, MWC-M-nc, MW-nc, running MW-R.
+
+## MW-R-T: MW-R with a TRAINED reference (2026-11-14, user request; code 4e9c30f0)
+Reference = MW-3b (363603) final model: in-domain, fine-tuned on these Toys rows, best ranker, latent content unused (= prediction without latent). Score NLL_ref(y|x, r_MW3b) per row (reference_score --latent_model), out reference_nll/Toys_and_Games_mw3b/. Diagnostic first: compare AUROC vs base-model reference (.914/.900/.892); expected risk = memorisation compresses train-row NLL (train AUROC < valid/test). If separation holds (train AUROC >= .80), run MW-R-T rank (MW base, same as MW-R).
+- MW-R-H (user clarification 11-14): trained reference must be HISTORY-ONLY (no latent). No surviving Toys no-latent checkpoint (344012 weights purged; only eval json). Code 8a62b675: scripts/no_latent_reference.sbatch retrains R3-without-latent (344012 recipe, plain_sft_train synced to 24c71a5 + save_total_limit=1; prompt verified identical to R3 prompt minus <|Thought|> on 5 rows) -> scratch Toys_and_Games_R3_no_latent_ref, eval -> margin_wider_collab/no_latent_ref/, scores -> reference_nll/Toys_and_Games_nolatent/. Then gate (train AUROC >= .80) -> MW-R-H rank run. 365403 (MW-3b latent reference) kept as extra comparison.
+- 365403 MW-3b (trained, latent-unused) reference scores: AUROC train .878 / valid .831 / test .795 (base-model ref .914/.900/.892); train NLL compressed (copy .11 vs non .33, valid .30 vs .73) = memorisation; lowest-20% captures 66% of copy rows (base 73%). Not used for training (user wants history-only reference) -- comparison only. 365404 (history-only ref) running on sodag.
+- 365404 DONE: history-only reference (no-latent SFT retrain) HR@1 .0377 / HR@5 .0785 / HR@10 .1039 / NDCG@5 .0585 / NDCG@10 .0667 (= 344012's .1045). Copy AUROC train .888 / valid .829 / test .785 (base ref .914/.900/.892; MW-3b ref .878/.831/.795): trained references separate less and generalise worse (memorisation). Gate passed on train. Weights: rank copy .181 vs non .569 (ratio .32); sigmoid tau .5 useless here (NLL scale .1-.5; ratio .72) -> only MW-R-H rank submitted (helper tmp/submit_mwrh.sh).
+- MW-R-H rank full = 365504 (..._refweight_nolatent_rank), pending on QOS cap.
+- Swap-gap analysis (user request 11-14, code 9b1ebf33): per-row gap NLL(y|x,r_other)-NLL(y|x,r_own) (training-identical per-token NLL; partner = fixed random derangement), copy vs non-copy, test (all) + train sample 5000, for WIDER-only, MW, MWC-M, MW-3b, MW-nc, MWC-M-nc, M7 .05/.10, MW-3b-L4 -> output_dir/margin_wider_collab/swap_gap/Toys_and_Games/ (npz per row + summary.jsonl). Helper tmp/submit_swapgap.sh.
+
+### 2026-11-14 — MW-R results (refweight hinge, base-LM reference, code efc11712)
+
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | copy HR@10 | non-copy HR@10 |
+|---|---|---|---|---|---|---|---|---|---|
+| plain R3 | .0367 | .0625 | .0795 | .1052 | .0514 | .0584 | .0667 | .513 | .0420 |
+| MW-R sigmoid 365390 | .0371 | .0629 | .0791 | .1036 | .0522 | .0588 | .0666 | .493 | .0432 |
+| MW-R rank 365389 (ranking only; interventions running) | .0402 | .0660 | .0804 | .1046 | .0552 | .0611 | .0689 | .501 | .0432 |
+
+- Bootstrap vs R3: all n.s. (sigmoid ΔHR@10 −.0016, ΔNDCG@10 −.0001; rank ΔHR@10 −.0006, ΔNDCG@10 +.0022 [−.0011,+.0054]).
+- Copy Δ vs R3: sigmoid −.020 [−.044,+.004], rank −.012 [−.039,+.013] (MW −.034 sig) → partial copy recovery; the non-copy gain is lost (+.0012 n.s. vs MW-nc +.0062 sig).
+- Sigmoid interventions (raw − x, HR@10): mask +.024*, mean +.035*, shuffle +.031* → latent used.
+- Read: down-weighting the hinge on copy-like rows moves the copy rows halfway back but does not reach the MW-nc ceiling; consistent with the swap-gap diagnosis (MW copy gap +2.11 ≫ m: CE keeps the over-reliance). Band-hinge proposal pending.
+
+### 2026-11-14 — Swap-gap analysis 365511 DONE (code 9b1ebf33; gap = NLL(y|x,r_other) − NLL(y|x,r_own), per-token mean, test all + train 5k)
+
+Test gap mean (median) [q90], copy vs non-copy; copy HR@10 in brackets:
+- wider_only +0.003 vs −0.000 (control, OK); mw3b +0.001 vs −0.000 (latent unused) [.515]
+- mw +2.11 (1.24) [5.61] vs +1.40 (0.89) [3.31] [.478]
+- mw_nc +1.13 (1.08) [2.15] vs +1.08 (0.95) [2.11] [.515]
+- mwcm +2.27 vs +2.13; mwcm_nc +2.31 vs +2.59 [.497]; mw3b_l4 +2.75 vs +3.00 [.499]
+- m7_005 +0.061 (0.005) vs +0.063; m7_010 +0.210 (0.019) vs +0.108 (median ≈ 0: few rows carry all the dependence)
+- Train ≈ test for every model (mw train copy +1.93 vs non-copy +1.50).
+Read: among non-motive models, copy-row loss tracks the size of the copy-row gap (mw 2.11 → .478; mw_nc 1.13 → .515). MW-nc never applies the hinge on copy rows yet still has copy gap 1.13 (CE spreads latent use), and full copy recovery is compatible with that; the copy hinge in MW adds the excess (mean 2.11, q90 5.6). MW-nc's distribution is balanced across groups and its upper tail is cut (q90 2.15 vs 5.61). → An upper bound on the gap (band hinge, U ≈ 1–2) is the supported adaptive replacement for the skip-copy rule.
+- 2026-11-14 MW-R rank 365389 DONE: interventions (raw − x, HR@10) mask +.042*, mean +.046*, shuffle +.045* → latent clearly used; ranking .1046/.0689 n.s. vs R3, copy .501. Best MW-R so far; still below the MW-nc ceiling (copy .515, non-copy .0482).
+- 2026-11-14 MW-R-H rank 365504 ranking DONE (interventions running): HR@1 .0383 HR@3 .0681 HR@5 .0828 HR@10 .1086 NDCG@3 .0554 NDCG@5 .0615 NDCG@10 .0698; vs R3 all four @5/@10 positive n.s. (ΔHR@10 +.0034, ΔNDCG@10 +.0031 [−.0002,+.0062], ΔNDCG@5 +.0030 [−.0003,+.0065]); copy .504 (−.009 n.s.), non-copy .0473 (+.0053 SIG). Best adaptive variant so far — history-only reference beats base-LM reference.
+- 2026-11-15 MW-R-H rank 365504 DONE: interventions (raw − x, HR@10) mask +.030*, mean +.030*, shuffle +.035* (NDCG@10 +.026/+.026/+.029) → latent USED. First adaptive variant: all @5/@10 above R3 (n.s., NDCG borderline), non-copy +.0053 sig, copy −.009 n.s., latent used — nearly matches the MW-nc ceiling (.1109/.0697, shuffle −.037).
+
+### 2026-11-15 — MW-R-H rank replication (code f3292730: new TRAIN_SEED / --train_seed; unset = old default seeding)
+User choice: CDs only for the new dataset; extra seeds for MW-R-H only (vs the single plain R3 run).
+- CDs: history-only reference retrain + scoring (no_latent_reference.sbatch, CATEGORY=CDs_and_Vinyl) → MW-R-H rank (afterok); compare with CDs R3_ori (attention_share/CDs_and_Vinyl_R3_ori_utilization) and CDs MW 362561.
+- Toys: MW-R-H rank seeds 1 and 2 (365504 = default seeding, third seed).
+- Submitted via JobManager (submit_mwrh_cds_seeds.sh): CDs ref 365885 → CDs MW-R-H rank 365886 (afterok); Toys seed1 365887, seed2 365888.
+
+### 2026-11-15 — MW-R-H variants #1 band hinge, #2 sharper weights (code 6b7c02b6; user chose 1 and 2)
+- MW-R-H-B: MW-R-H rank + band term β·mean[gap − U]+ (U = 1.5, β = 1, all rows, two-sided, no stop-gradient). Motivation: swap gap shows MW copy over-reliance (copy gap 2.11, q90 5.6) while MW-nc recovers copy rows at a bounded gap (~1.1, q90 2.15).
+- MW-R-H2: w = rank^2 (copy .067 vs non-copy .391; rank^1 .181 vs .569), toward the MW-nc zero-weight limit without a rule.
+- CPU checks: weights as above; band term active only for gap > U, gradient lowers neg NLL / raises pos NLL. Smoke (both options, 256 rows) → both fulls afterok. Single seed each; judge against the seed spread from 365887/365888.
+- Submitted via JobManager (submit_mwrh_variants.sh): smoke 365896 → band 365897, pow2 365898 (afterok).
+- 2026-11-15 CDs history-only reference 365885 DONE (resumed after 1 preemption): no-latent model HR@1/3/5/10 .0417/.0637/.0734/.0945, NDCG@3/5/10 .0545/.0585/.0653 (vs CDs R3_ori HR@10 .0989 / NDCG@10 .0717; MW .1049/.0754). Copy-detection AUROC train/valid/test .875/.858/.866 (copy rate 7.6% train, 6.8% test; Toys .888/.829/.785). CDs MW-R-H rank 365886 released.
+- 2026-11-15 MW-R-H rank seed 2 (365888) DONE — FAILED SEED: HR@1/3/5/10 .0374/.0635/.0763/.0980, NDCG@3/5/10 .0525/.0577/.0648; ΔHR@10 vs R3 −.0073 SIG, ΔHR@5 −.0033, ΔNDCG@10 −.0020 (n.s.); copy .474 (−.039 sig), non-copy .0396; latent used (mask +.061*, mean +.037*, shuffle +.043*).
+  Training curves (job logs, per-epoch means) seed 0 vs seed 2: margin loss ep2 .134 vs .192, ep3 .024 vs .125 (hinge satisfied late / not at all in seed 2); WIDER ep3 .076 vs .443 and grad norm 1.4 vs 5.0 → late-epoch instability (WIDER jump, as in M3a-n). Seed 0 formed the gap in epoch 2; seed 2 was still forming it in epoch 3. MW-R-H is NOT seed-robust so far; wait for seed 1.
+- 2026-11-15 GPU confound: 365504 (good), 365389, 356322 ran on A40; seed 1 365887 and seed 2 365888 on L40S; pow2 365898 on L40S, band 365897 on A40. User: rerun seed 2 on hady-lab A40 (submit_mwrh_s2_a40.sh, output _seed2_a40): 366001 on album (A40, hady-priority).
+- 2026-11-15 CDs MW-R-H: 365886 cancelled 38 s into an L40S run (no checkpoint) → resubmitted on hady A40 as 366023 (same output name; CDs MW 362561 was A40). Band 365897 now on hady A40 (alarm) after its preemption.
+- 2026-11-15 MW-R-H rank seed 1 (365887, trained on L40S, 2 preemptions) DONE: HR@1/3/5/10 .0404/.0663/.0837/.1101, NDCG@3/5/10 .0553/.0625/.0710; vs R3 ΔHR@5 +.0042, ΔNDCG@5 +.0040 SIG, ΔHR@10 +.0049 [−.0006,+.0104], ΔNDCG@10 +.0043 SIG; copy .514 (+.001, fully recovered), non-copy +.0055 SIG; latent strongly used (mask +.054*, mean +.080*, shuffle +.080*). Training curve lost (log overwritten by the eval-only requeue).
+  3 seeds (default/A40, s1/L40S, s2/L40S): HR@10 .1086/.1101/.0980 (mean .1056), NDCG@10 .0698/.0710/.0648 (mean .0685). Seed 1 on L40S is good → GPU is not sufficient to explain seed 2; A40 rerun 366001 decides.
+- 2026-11-15 MW-R-H2 rank^2 (365898, L40S) ranking DONE (interventions running): HR@10 .1027, NDCG@10 .0660 (n.s. vs R3, below MW-R-H), copy .482 (−.031 SIG), non-copy +.0019. Margin loss still .140 in epoch 3 (hinge not satisfied late, like failed seed 2) → sharper weights hurt; not promoted.
+- 2026-11-15 MW-R-H2 rank^2 365898 DONE: interventions mask +.040*, mean +.008*, shuffle +.022* (weaker latent use than MW-R-H: .030/.030/.035 and seed 1 .054/.080/.080). rank^2 CLOSED: worse ranking, copy −.031 sig, weaker latent use.
+- 2026-11-16 MW-R-H rank seed 2 on A40 (366001) DONE: HR@1/3/5/10 .0334/.0574/.0717/.0944, NDCG@3/5/10 .0471/.0530/.0603 — SIG BELOW R3 at HR@5, NDCG@5, HR@10, NDCG@10; copy .463 (−.050 sig); latent used (mask +.050*, mean +.051*, shuffle +.047*). → GPU is NOT the cause: seed 2 fails on both L40S and A40 (the A40 run is not bit-identical to the L40S one; it had a grad-norm spike ~78 and CE 2.46 in late epoch 1).
+  Failure signature (bad: seed 2 L40S/A40, rank^2; good: 365504): epoch-3 margin loss .118-.140 vs .024 (hinge never satisfied), WIDER rises in epoch 3 (.28-.44 vs .076), grad norm 4-5 vs 1.4, copy rows collapse. 4 MW-R-H rank runs: HR@10 .1086/.1101/.0980/.0944 (mean .1028), NDCG@10 .0698/.0710/.0648/.0603 (mean .0665) → MW-R-H is NOT robust (2/4 seeds good). Need a stabiliser, tested on seed 2.
+- 2026-11-16 MW-R-H-B band U=1.5 (365897, A40, default seed) DONE: HR@1/3/5/10 .0389/.0643/.0791/.1079, NDCG@3/5/10 .0534/.0595/.0689; n.s. vs R3 (ΔHR@10 +.0027, ΔNDCG@10 +.0021); copy .526 (+.013 n.s.), non-copy .0430; latent used (mask +.011*, mean +.021*, shuffle +.038*).
+  BAND NEVER ACTIVE (band_active 0.000 in every epoch): the in-training swap gap (per-token mean, in-batch partner) is only −.002 / .060 / .36 / .44 (ep1 / ep2 / ep2.5 / end) — U = 1.5 was calibrated on MW's post-hoc test gap (1.4-2.1) and is far above MW-R-H's training gap. MY MISCALIBRATION. So this run = a replicate of 365504 (same default seed, A40, band term zero): .1079 vs .1086 HR@10 — default seed reproduces (not bit-identical: copy .526 vs .504).
+  Tally MW-R-H rank (5 runs): default .1086 / .1079, seed1 .1101, seed2 .0980 (L40S) / .0944 (A40) → the seed decides; seed 2 fails reproducibly.
+- 2026-11-16 CDs MW-R-H rank (366023, A40, default seed) DONE: HR@1/3/5/10 .0555/.0801/.0906/.1121, NDCG@3/5/10 .0696/.0739/.0808 (R3_ori .0494/.0710/.0819/.0989, .0617/.0662/.0717; MW 362561 .1049/.0754).
+  vs R3_ori ALL FOUR SIG: ΔHR@5 +.0088, ΔNDCG@5 +.0078, ΔHR@10 +.0132 [+.0070,+.0188], ΔNDCG@10 +.0091 [+.0053,+.0128]. vs MW ALL FOUR SIG: ΔHR@5 +.0055, ΔNDCG@5 +.0049, ΔHR@10 +.0071, ΔNDCG@10 +.0054.
+  Copy (418 rows) +.048 sig, non-copy +.0106 sig (MW: +.043 sig / +.0033 n.s.). Latent used: mask +.024*, mean +.015*, shuffle +.017* (MW .013/.007/.004). Single seed (default; the seed that worked on Toys).
+
+### 2026-11-16 — MW-R-H-L: fix for the seed-dependent failure (user: "let try to fix it")
+Diagnosis: failing runs (seed 2 L40S/A40, rank^2) still have hinge loss ~.12-.14 in epoch 3 (good runs .02-.03) → the gap forms in the last epoch; the two-sided hinge then teaches the decoder not to copy without the right latent, and with the decaying lr nothing repairs the copy rows (seed 2 copy −.039/−.050 sig, non-copy ≈ 0).
+Fix: hinge weight 1.0 for epochs 1-2, 0.3 in epoch 3 (MARGIN_EPOCHS=2, LATE_MARGIN_WEIGHT=0.3; refweight kept; code f3292730, no code change). Good runs barely change (their epoch-3 hinge is ~.02).
+Runs (hady A40): seed 2 (must rescue) + default seed (control, must stay ≈ .108). Submitted via JobManager (submit_mwrh_late.sh): seed 2 367253, default seed 367254 (hady A40).
+- 2026-11-17 MW-R-H-L seed 2 (367253, A40) DONE: HR@1/3/5/10 .0381/.0669/.0806/.1070, NDCG@3/5/10 .0550/.0606/.0692; vs R3 all four @5/@10 positive n.s. (ΔHR@10 +.0018, ΔNDCG@10 +.0024 [−.0007,+.0058]); copy .498 (−.014 n.s.), non-copy .0463 (+.0043 borderline); latent used (mask +.023*, mean +.022*, shuffle +.039*). RESCUED vs MW-R-H seed 2 (.0980 / .0944, sig below R3).
+  Curve: margin loss ep1 .170 / ep2 .110 / ep3 .052 (×0.3 from epoch 2.000 confirmed), WIDER ep3 .039, grad 1.4 → stable.
+  CAVEAT: epochs 1-2 use the identical recipe as failed seed-2 A40 (366001), yet the margin loss already differs (ep2 .110 vs .195) → training is NOT deterministic on the same seed/GPU; part of the rescue may be run-to-run luck. Need more seeds to measure the failure rate.
+- MW-R-H-L default seed (367254) ranking DONE (interventions running): .0386/.0652/.0809/.1072, NDCG .0538/.0602/.0686, copy .510; n.s. vs R3 (all positive); slightly below MW-R-H default (.1086/.1079), n.s.
+- 2026-11-17 MW-R-H-L default seed (367254) DONE: interventions mask +.042*, mean +.037*, shuffle +.042* (latent used). Curve: margin ep2 .073 / ep3 .026, WIDER ep3 .034, grad 1.0 (stable; early grad spike 62 in first quarter of epoch 1, CE 3.25 — again differs from 365504's start → nondeterminism). Both MW-R-H-L runs: n.s. above R3 at all @5/@10, latent used, stable epoch 3.
+- 2026-11-18 Statistics (user): every comparison now reports paired t-test p (p_t) and paired-bootstrap 95% CI + two-sided p (p_b) over ALL test rows (Toys 6,738, CDs 6,157). Recomputed tables: conclusions unchanged (p_t and p_b agree within ~0.01 everywhere).
+
+## 2026-11-18 — Rank GRPO v2 on MW-R-H (Toys 365504) (user request)
+
+Start model: MW-R-H rank, default seed 365504 (margin_wider_collab session): HR@10 .1086 / NDCG@10 .0698, r used (shuffle −.035). Path `scratchDirectory/R3/output_dir/Toys_and_Games_margin_0.2_wider_0.1_refweight_nolatent_rank/latent` (read-only).
+
+Per user: merged worktree-R3MarginWiderCollab (up to 1fa432de) into this worktree, merge commit **1a2053ff**. The only real conflict was plain_sft_train.py (took theirs: early stopping + save_total_limit=1); tracked pyc kept ours. Compile check passed, and my GRPO fixes and the one-checkpoint rule are intact.
+
+Loading check (grpo LatentModel, CPU): missing [], unexpected = 8 training-only keys (bank_*, lagrange_state, projection.*); attention weights equal the file. MW-R-H inference = plain R3 path (confirmed by the collab session).
+
+Frozen `output_dir/grpo_stage2_code/code_1a2053ff`; same GRPO settings as 362509. Smoke `toys_mwrh_rankgrpo_smoke` → full `toys_mwrh_rankgrpo` via JobManager. Comparisons: start 365504; rank GRPO on margin + WIDER (.1072) and on R3_ori (.1098). Submitted 2026-11-18 on hady A40: smoke 368197 → full 368198 (afterok, 72 h limit). Smoke 368197 DONE 2026-11-18 (6 min, exit 0; header correct; group hit rate mean 0.29 over 32 steps) → full 368198 waiting for an A40. Full 368198 RUNNING 2026-11-18 (hady A40, ~16 h train + ~4 h eval). Trend at step 907/1684 (2026-11-19): group hit rate 0.285 (1–100) → 0.318 (801–900), hit rank 2.60 → 2.52, KL ≈ 0.003 — healthy.
+
+## 2026-11-18 — MW-R-H rank: 3 seeds Toys/CDs + Goodreads (submitted)
+
+All hady A40, MW-R-H rank recipe (refweight, history-only ref, rank, tau 0.5, base Qwen2.5-1.5B), via JobManager:
+- CDs seed 1 **368187**, seed 2 **368188** (code_f3292730; default seed = 366023) → CDs 3 seeds.
+- Toys seed 1 rerun on A40 **368189** (`..._rank_seed1_a40`, code_f3292730; 365887 was L40S). Toys 3 seeds on A40 = 365504 (default) + 368189 (s1) + 366001 (s2, failed: HR@10 .0944).
+- Goodreads (new; code **1fa432de** = Goodreads "books" category entry only): Qwen3 item-title table 368190 + history-only reference (R3-without-latent, Qwen2.5-1.5B) 368191 → MW-R-H default seed **368192** (afterok).
+  Caveat: the only Goodreads R3 baseline (367929, HR@10 .0567) was trained from Qwen2.5-1.5B-**Instruct**; MW-R-H uses base Qwen2.5-1.5B (as the Toys baseline guidance_A did) → a base-model plain R3 on Goodreads is needed for a clean comparison. The no-latent reference eval (368191) gives a base-model no-latent number.
+
+- 2026-11-18: deleted (user-approved) scratch model dirs of failed runs 365888 (rank_seed2), 366001 (rank_seed2_a40), 365898 (rank_pow2); per-row results kept in output_dir/margin_wider_collab/.
+
+- 2026-11-18: Goodreads prep DONE: item table 368190 (7,949×1536; CDs recipe check cos .9999); no-latent reference 368191 (base Qwen2.5-1.5B, no latent) test HR@3/5/10 .0340/.0405/.0525, NDCG@3/5/10 .0289/.0316/.0354 (vs R3-Instruct 367929 HR@10 .0567 / NDCG@10 .0385); reference NLL train/valid/test written. MW-R-H 368192 released (pending A40).
+
+- 2026-11-18: CDs MW-R-H seed 1 368187 DONE: HR@1/3/5/10 .0554/.0768/.0903/.1116, NDCG@3/5/10 .0677/.0733/.0801; all @5/@10 sig > R3_ori (HR@10 +.0127 p_t 5e-5) and > MW (HR@10 +.0067 p_t .026, NDCG@10 p_t .012; HR@5 p_t .052 / p_b .05 borderline); copy .653, non-copy .0721; latent used: mask −.031, mean −.009, shuffle −.022 (all sig). Replicates default seed 366023.
+
+- 2026-11-18: CDs MW-R-H seed 2 368188 DONE: HR@1/3/5/10 .0499/.0775/.0911/.1121, NDCG@3/5/10 .0660/.0716/.0784; all @5/@10 sig > R3_ori; vs MW: HR@5 +.0060 (p_t .028) and HR@10 +.0071 (p_t .019) sig, NDCG@5/@10 n.s. (p_t .21/.13); copy .636, non-copy .0739; latent used (mask −.022, mean −.029, shuffle −.032, all sig).
+  **CDs 3 seeds (366023/368187/368188), mean ± sd:** HR@1/3/5/10 .0536±.0032 / .0781±.0017 / .0907±.0004 / .1119±.0003; NDCG@3/5/10 .0678±.0018 / .0729±.0012 / .0797±.0012; copy .638±.014, non-copy .0736±.0013. vs R3_ori .0989/.0717: every seed sig at all @5/@10; vs MW .1049/.0754: HR@10 sig in 3/3 seeds, NDCG@10 sig in 2/3. Latent used in 3/3 (shuffle −.017/−.022/−.032). MW-R-H is seed-robust on CDs (unlike Toys).
+
+- 2026-11-19: Toys MW-R-H seed 1 on A40 368189 DONE: HR@1/3/5/10 .0404/.0647/.0804/.1088, NDCG@3/5/10 .0544/.0608/.0700; vs R3: NDCG@10 +.0032 sig (p_t .04 / p_b .03), HR@1 sig, others n.s.; copy .510, non-copy .0465 (p_t .06); latent strongly used (mask −.052, mean −.027, shuffle −.051, all sig). Reproduces 365887 (L40S, .1101/.0710).
+  **Toys 3 A40 seeds (365504 / 368189 / 366001):** HR@1/3/5/10 .0374±.0036 / .0634±.0055 / .0783±.0059 / .1039±.0083; NDCG@3/5/10 .0523±.0045 / .0584±.0047 / .0667±.0055; copy .492±.026. 2/3 seeds ≥ R3 (.1086/.1088), seed 2 fails (.0944 sig below) → mean ≈ R3 (.1052 / .0667) with large spread. All 5 runs: HR@10 .1040±.0073, NDCG@10 .0672±.0045. Seed-2 failure is seed-specific (fails on both GPU types); MW-R-H-L (late hinge 0.3) rescues it (367253 .1070).
+
+- 2026-11-19: **Goodreads MW-R-H 368192 DONE (default seed, base Qwen2.5-1.5B, code 1fa432de): FAILS.** HR@1/3/5/10 .0188/.0290/.0353/.0454, NDCG@3/5/10 .0247/.0273/.0306. Sig below plain R3-Instruct 367929 (.0567/.0385, all cutoffs p_t ≤ 4e-5) AND below the base-model no-latent reference 368191 (.0525/.0354; HR@10 p_t 2.5e-4, NDCG@10 p_t 5.5e-5). Latent used (mask −.0125, mean −.0094, shuffle −.0061 HR@10, all sig). Training stable (margin .198→.046, WIDER .43→.16, grad 3.0 in ep 3; no Toys-seed-2 signature). Likely confound: MW-R-H trains a fixed 3 epochs and keeps the last (load_best_model_at_end=False, no eval loss), while Goodreads R3 overfits in epoch 3 (eval loss 1.152/1.019/1.165, best = epoch 2) and both baselines used early stopping. Proposed next (not submitted): MW-R-H NUM_EPOCHS=2 on Goodreads + base-model plain R3 baseline.
+
+- 2026-11-19 **Goodreads MW-R-H failure analysis** (scripts job tmp goodreads_diag{,2,3}.py): the whole gap is on SERIES-CONTINUATION rows (target '(Series, #k)' with the same series in history; 778/9,670 test rows = 8%, but ~64% of baseline hits). Continuation HR@10: R3-Instruct .450, no-latent .429, MW-R-H .308 (−.121 vs no-latent, p_t 1.5e-18). Other 8,892 rows: MW-R-H .0224 = R3 (+.0001, p .95), +.0028 vs no-latent (p_t .10). MW-R-H puts fewer same-series titles in its top-10 (1.05 vs 1.34) and fewer next volumes at top-1 (.212 vs .262); history copying is NOT the cause (already-read volume at top-1 .041 vs .039; removing history items changes no HR). Hinge weighting worked as designed: continuation train rows rank weight .106 vs .534 (1.7% of hinge mass; Toys copy 6.4%, CDs 2.3%). Latent is used and helps even on continuation rows (raw − mask +.050, − mean +.053, − shuffle +.023, sig) → the decoder routes prediction through r learned on the hinge rows and lost history-title reading for series continuation (= MWC-M-nc 'shared decoder over-trusts r'); unlike Amazon copy rows (identical title), continuation needs composing series + next number from history. Overfit hypothesis (no epoch selection) not excluded, but the loss is confined to one row type, so it is not a general overfit signature.
+
+- 2026-11-19: Goodreads follow-ups submitted (code_1fa432de, via JobManager, tmp/submit_goodreads_fix.sh): (1) swap-gap calibration on MW-R-H 368192 (test + 5k train; split by tmp/goodreads_gap_split.py) → sets U for (2) band hinge run (after 1); in parallel MW-R-H-L (MARGIN_EPOCHS=2, LATE 0.3, `Goodreads_..._rank_late0.3`) and MW-3b (fixed hinge epoch 1 only, `Goodreads_..._marginwarm`), hady A40.
+
+- 2026-11-19 Goodreads swap gap (369385 crashed on empty copy group → fix f0eb6879 → 369389 DONE 3.6 min): MW-R-H 368192 history-swap gap test all +.745 / continuation +.528 / other +.764; train (5k) +.751 / +.497 / +.774 → r is used LESS on continuation rows, not more. Teacher-forced per-token NLL with own r is worse than the no-latent reference on continuation rows: test .562 vs .454 (79% of rows worse; other rows 1.467 vs 1.389, 59%), train .346 vs ref .235 → continuation rows are under-fitted already in training (not only a generalisation failure); band cap cannot target this (gap smaller there). Band run still submitted per user: U=0.5 (train median; active 51% continuation / 59% other), beta 1, `Goodreads_..._rank_band0.5`, code_1fa432de.
+
+- 2026-11-19: **Steam** [jobs: R3 369521, emb 369522, ref 369523, MW-R-H 369524] (data/Steam, Steam_5_2016-1-2017-12: 83,064 train / 10,383 valid / 10,383 test rows, 4,683 games, 10.5k users; target never in history). Code 513bae11 (Steam category 'games' + new scripts/r3_plain.sbatch = plain R3 for any category, early stopping/best epoch, same eval incl. interventions). Planned via JobManager (tmp/submit_steam.sh; queued behind QOS 20-job limit): plain R3 base Qwen2.5-1.5B (Steam_R3_base) ‖ item emb + no-latent reference → MW-R-H rank default seed (afterok). Note recipe difference: R3 keeps best epoch, MW-R-H keeps epoch 3.
+
+- 2026-11-19: **MovieLens** [jobs: R3 369529, emb 369530, ref 369531, MW-R-H 369532] (data/Movielens, Movielens_5_2014-1-2015-3: 81,308 train / 10,163 valid / 10,164 test rows, 2,915 movies). Code 7e603e45: user asked to replace the 'Movies' category key by 'Movielens' (noun 'movie') in all 22 maps + sbatch maps. Same 4-job chain as Steam via JobManager (tmp/submit_movielens.sh; waits for QOS slots after Steam): plain R3 base (Movielens_R3_base) ‖ item emb + no-latent ref → MW-R-H rank default seed.
+
+- 2026-11-19: Steam STOPPED by user (dataset being updated): plain R3 369521 and MW-R-H 369524 cancelled before start. Stale artifacts from the old Steam data (not deleted; need removal/regeneration after the update): data/Steam/info/Steam_qwen3emb_1536.pt (369522), scratch Steam_R3_no_latent_ref + output_dir/margin_wider_collab/{no_latent_ref,reference_nll}/Steam* (369523: no-latent HR@10 .0212, top-1 collapse 30% on one title; co-occurrence .0308, popularity .0077; 20.7% test targets unseen in train).
+
+- 2026-11-19 15:xx: **Steam rerun on re-preprocessed data** (82,419 / 10,302 / 10,303 rows, 4,419 games; unseen test targets 1.6% (was 20.7%); popularity HR@10 .0094, last-3 co-occurrence .0401). Old-data artifacts renamed *_old20261119 (not deleted). Chain via JobManager, code_513bae11, all hady A40: plain R3 369659, item emb 369660, no-latent ref 369661 → MW-R-H 369662.
+
+- 2026-11-19: MovieLens no-latent reference 369531 DONE (1 preemption): HR@1/3/5/10 .0253/.0541/.0797/.1332, NDCG@3/5/10 .0419/.0524/.0695; no collapse (418 distinct top-1, max share 5.2%); baselines: popularity .0495, last-3 co-occurrence .1282 (reference slightly above); unseen test targets 0.2%. MW-R-H 369532 released.
+
+### Result: rank GRPO on MW-R-H Toys (368198, DONE 2026-11-19)
+Script/output: `analysis/results/mwrh_rankgrpo/compare.py`, `output.txt` (bootstrap 2,000 seed 42 + paired t-test, n = 6,738).
+
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| MW-R-H + rank GRPO 368198 | .0381 | .0681 | .0827 | .1089 | .0555 | .0615 | .0700 |
+| MW-R-H 365504 (start) | .0383 | .0681 | .0828 | .1086 | .0554 | .0615 | .0698 |
+| R3_ori | .0377 | .0607 | .0778 | .1023 | .0510 | .0580 | .0659 |
+| MW + rank GRPO 362509 | .0381 | .0637 | .0809 | .1072 | .0530 | .0601 | .0686 |
+| R3_ori + rank GRPO 362510 | .0389 | .0634 | .0793 | .1098 | .0530 | .0595 | .0694 |
+
+- vs start 365504: no change at any cutoff (HR@10 +.0003 [−.0018, +.0022], p .80). GRPO did reorder lists (only 9.5% of top-10 lists identical, top-1 same 87%, overlap 8.7/10) but net zero. Train group hit rate rose .285 → .32; KL ~.003.
+- vs R3_ori: sig at HR@3, HR@10, NDCG@3/5/10 (HR@10 +.0067 [+.0012, +.0122]); HR@5 p .05. Gain is on non-copy rows (+.0080 sig); copy rows = R3_ori.
+- vs R3_ori+GRPO 362510: n.s. at @5/@10 (HR@10 −.0009), HR@3 +.0047 sig.
+- Interventions unchanged from start: mask −.031, mean −.030, shuffle −.033 HR@10 (all sig) → r still used.
+- Reading: rank GRPO adds nothing on top of MW-R-H (unlike MW +.0042); MW-R-H alone already reaches the GRPO'd R3_ori level while using r. checkpoint-1684 deleted (final model kept).
+
+### Audit 2026-11-19: our GRPO vs original R3 stage 2 (R3_ori git HEAD c558b44)
+- grpo_trainer.py: identical noise group (G=8, N(0,1.5²) on r, first row noise-free), reward −PPL of the target, advantage = (reward − mean of noise-free rewards) / ‖·‖ over the gathered batch; ours adds only the optional KL anchor + a no-op swap guard. Training script: extra options default off; dataset, epsilon 0.2/0.28, num_iterations 1, batch 256, micro 8, 1 epoch, bf16 attention all match. noise_eval: only wandb logging added.
+- **Deviation: GPU count.** R3 runs 2 GPUs (README: "strongly recommend two GPUs … related to the calculation of the advantage function"); all our stock runs (L9, 358299, 360237) used 1 GPU. With 2 GPUs the gathered batch holds 2 groups, so the baseline is the mean of TWO users' noise-free rewards and the norm runs over 16 values; on 1 GPU the baseline is the group's own noise-free reward and the norm runs over 8 (advantages √2 larger). So no run here is an exact R3 stage-2 replica. Exact 1-GPU emulation: micro-batch 16 (2 groups) + zero noise on the first row of every group.
+- beta 0.01 (ours) vs 0.0 (R3): irrelevant in stock mode (KL ≡ 0). Rank-GRPO runs (362509/362510/CDs pair/368198) are a different method: beam group, no noise, fp32 attention.
+
+### Exact R3 stage-2 replica (user request 2026-11-19: "every setting match exactly what R3 do")
+Base R3_ori Toys stage 1 (read-only), lr 1e-5, 2 GPUs (torchrun), code = R3_ori git HEAD c558b44 frozen at `output_dir/r3_exact_grpo_code/code_c558b44`, unmodified except the dead `noisy_layer` import (file never committed). attention_grpo.sh settings: G 8, sample -1, 1 epoch, beta 0.00, batch 256, micro 8, seed 42, num_iterations 1, eps 0.2/0.28; code defaults warmup 200, cosine, save_steps 200 (limit 2). Eval = R3 noise_eval on 2 shards; interventions afterwards (analysis only, code_1a2053ff). Script `scripts/r3_exact_grpo.sbatch` (b63bb4be). Smoke 370692 (toys_r3ori_exact_smoke) → full 370693 (toys_r3ori_exact, afterok), hady 2×A40, submitted 2026-11-19.
+
+- 2026-11-20: scratch quota full (500/500 G, mostly other lines): Goodreads MW-3b 369387 and band0.5 369396 FAILED at checkpoint save (Disk quota exceeded); partial dirs left. Asked JobManager to hold not-started 369532/369661/369662. Deletion of ~25 G of closed-run model dirs proposed to user (pending OK).
+
+- 2026-11-20: more scratch-quota failures: Goodreads MW-R-H-L 369386 (finished ep 3, final save failed; intact checkpoint-1208 = end ep 2, broken checkpoint-1812 → resume possible), MovieLens plain R3 369529 (failed at first checkpoint save, broken checkpoint-636, nothing usable). Steam emb 369660 DONE (4419x1536). Steam R3 369659 still running (will fail at its first save if scratch stays full). Held: 369532, 369661, 369662. Waiting for user OK to delete ~25 G + broken partial checkpoints.
+
+- 2026-11-20: Steam plain R3 369659 FAILED (quota, first checkpoint save). Nothing of this line is running; all blocked on scratch space + user OK to delete.
+
+- 2026-11-20: scratch freed by user (433/500 G). Broken partial checkpoints moved aside (*_broken20261120, broken-checkpoint-1812; not deleted). Resubmitted staggered via JobManager (tmp/resubmit_after_quota.sh): wave 1 Goodreads MW-R-H-L 371445 (resume ckpt-1208), MovieLens R3 371446, Steam R3 371447, Steam ref 369661 released; wave 2 Goodreads MW-3b 371448 (afterany 371445), band0.5 371449 (afterany 369661), MovieLens MW-R-H 369532 (afterany 371446), Steam MW-R-H 369662 (afterok 369660:369661).
+- 2026-11-20: smoke 370692 FAILED (album, 30 min): both ranks loaded model + data, then the first NCCL all-gather (DDP param check) hung until the 30-min watchdog — NCCL P2P transport hang, not a code bug. Fix in launch env only (commit 2c33ae98): NCCL_P2P_DISABLE=1, NCCL_IB_DISABLE=1, NCCL_DEBUG=INFO. Asked JobManager to cancel 370693 and resubmit smoke → full.
+- Resubmitted 2026-11-20 with NCCL fix: smoke 371451 → full 371452 (afterok); 370693 cancelled.
+
+- 2026-11-20: Steam no-latent reference rerun 369661 DONE on new data: HR@1/3/5/10 .0065/.0139/.0208/.0357, NDCG@3/5/10 .0108/.0136/.0184 (old data .0212/.0117); co-occurrence .0401, popularity .0094. MW-R-H Steam 369662 + Goodreads band0.5 371449 released.
+
+- 2026-11-20 **Goodreads MW-R-H-L 371445 DONE (resumed from ep-2 ckpt): WORSE.** HR@1/3/5/10 .0143/.0231/.0297/.0397, NDCG@3/5/10 .0194/.0221/.0254; vs no-latent base all cutoffs sig worse (HR@10 p_t 1.1e-10); continuation HR@10 .271 (MW-R-H .308, base .429, p_t 7e-27), other .0195 = base (p .95); latent UNUSED (mask/mean/shuffle HR@10 n.s.); 1,078 distinct top-1. → Weaker late hinge drops latent use AND worsens continuation rows: continuation loss is NOT caused by r over-reliance; points to epoch-3 overfitting (both keep last epoch; Goodreads R3 best = epoch 2; weaker hinge = epoch 3 closer to plain CE fit). Epoch-2 checkpoint-1208 was removed by the single-checkpoint cleanup at the end of the resume, so the epoch-2 test needs a NUM_EPOCHS=2 run (proposed). Table script tmp/goodreads_variants.py.
+
+- 2026-11-20: user STOPPED the Goodreads line (focus on Steam + MovieLens): band0.5 371449 (ran 2 min) and MW-3b 371448 (pending) cancelled; NUM_EPOCHS=2 test not run. Running: Steam R3 371447, Steam MW-R-H 369662, MovieLens R3 371446; MovieLens MW-R-H 369532 after 371446.
+
+- 2026-11-20 19:35: plain R3 ranking done (interventions running): Steam_R3_base 371447 HR@1/3/5/10 .0077/.0151/.0226/.0358, NDCG@3/5/10 .0119/.0150/.0192 (no-latent ref .0357/.0184); Movielens_R3_base 371446 HR@1/3/5/10 .0249/.0556/.0806/.1335, NDCG@3/5/10 .0425/.0527/.0698 (no-latent ref .1332/.0695).
+
+- 2026-11-20 20:45 plain R3 (stage 1) vs no-latent base (paired, all rows): Steam 371447 HR@10 .0358 vs .0357 (p .95), NDCG@10 .0192 vs .0184 (p .34), all cutoffs n.s.; MovieLens 371446 .1335 vs .1332 (p .91), .0698 vs .0695, all n.s. Interventions (shuffle pending): Steam mask −.0141 sig, mean +.0003 n.s.; MovieLens mask −.0923 sig (activation dependence), mean −.0022 (p .03). Collapse: Steam R3 447 distinct top-1, max 13.2% (base 25.2%); MovieLens 415 / 6.6%. Script tmp/newds_tables.py.
+
+- 2026-11-20: Steam plain R3 371447 DONE: shuffle_user −.0007 (p_t .14, n.s.) → content unused (mask −.0141 sig = activation dependence only), as plain R3 elsewhere.
+- Smoke 371451 DONE 2026-11-20 (NCCL over sockets, 32 steps clean); full 371452 waiting for 2×A40.
+
+- 2026-11-20: MovieLens plain R3 371446 DONE: interventions mask −.0923 (sig), mean −.0022 (p_t .03), shuffle −.0027 (p_t .02, p_b .01) → small but significant content use (first plain-R3 run with sig shuffle; effect ~2% of HR@10). MovieLens MW-R-H 369532 started.
+
+- 2026-11-21 **Steam MW-R-H rank 369662 DONE**: HR@1/3/5/10 .0100/.0193/.0262/.0388, NDCG@3/5/10 .0154/.0182/.0223. vs plain R3 371447: sig better at HR@1/3/5 and NDCG@3/5/10 (NDCG@10 +.0031, +16%, p_t .0016 / p_b .001; HR@5 p_t .01), HR@10 +.0030 n.s. (p_t .09); vs no-latent same pattern (HR@10 p_t .08). Collapse removed: 1,226 distinct top-1, max share 3.2% (R3 447 / 13.2%, base 385 / 25.2%). BUT latent content UNUSED: mask −.0117 sig, mean −.0009 (p .15), shuffle −.0007 (p .35) → gain = hinge/WIDER as training regulariser (de-collapse), like MW-3b on Toys; content-dependence criterion NOT met on Steam.
+
+- 2026-11-21: deleted (user-approved) model.safetensors only (~26 GB) of: Steam_R3_no_latent_ref_old20261119, Toys band1.5, lagrange0.05, lagrange0.10, grounded, marginwarm_latenovel (MW-3b-L4), refweight_sigmoid (MW-R sigmoid), refweight_nolatent_rank_seed1 (L40S); configs/tokenizers and all results kept. Scratch 425 G after.
+
+- 2026-11-21 **MovieLens MW-R-H rank 369532 DONE**: HR@1/3/5/10 .0193/.0492/.0701/.1188, NDCG@3/5/10 .0363/.0449/.0605 — SIG BELOW plain R3 at every cutoff (HR@10 −.0147, p_t 2.9e-7; NDCG@10 −.0093, p_t 4e-9). Latent strongly USED: mask −.0464, mean −.0159, shuffle −.0267 (10x plain R3's −.0027; all p_t ≤ 3e-13). No collapse (397 distinct top-1, max 4.7%). Training: hinge mostly satisfied (margin .131→.068) but grad norm jumps 2.7→10.7 in epoch 3 (Toys-seed-2-like). Confound on BOTH new datasets: plain R3 eval loss rises in epoch 3 (MovieLens .584/.548/.599, Steam 1.293/1.226/1.379) and R3 keeps the best epoch (2), MW-R-H keeps epoch 3. Steam MW-R-H curve: margin stays ≈.20 all 3 epochs (hinge never satisfied) and WIDER saturates at 1.0 → explains unused latent on Steam. Next proposal: MW-R-H NUM_EPOCHS=2 on MovieLens (+ Steam).
+
+- 2026-11-21 **MovieLens MW-R-H analysis** (tmp/ml_diag.py, ml_diag2.py): (1) whole net loss on history-explained rows: ref-NLL Q1 HR@10 R3 .406 → MW-R-H .332 (−.074, p_t 6e-19, −189 hits); MW-R-H GAINS on Q2–Q4 (Q3 +.0094 p_t .009; +39 hits) — same pattern as Goodreads continuation rows; also co-occurrence-hit rows −.044, franchise/sequel rows (311) .714 → .608. Note R3 already trades Q1 (.471 no-latent → .406) for Q2/Q3; MW-R-H amplifies it. (2) Mechanism: MW-R-H re-recommends ALREADY-WATCHED movies (targets are never in history): 1.09 history items per top-10 vs R3 0.48 (64% of rows vs 35%), top-1 = a history item 14.5% vs 3.6% (Q1 rows 16.6%); the lost rows are mostly R3 rank 4–10 (67%) pushed out of the list. (3) Latent is used most exactly where history explains the target (shuffle −.133 on co-occurrence-hit rows, −.076 Q1, ~0 on Q4) → r encodes the user's history-item identity (makes the hinge easy: own r ≈ 'items this user has'), and the decoder regenerates history titles. On Amazon this helps copy rows (same-day variants); on dedup datasets (MovieLens/Goodreads) it wastes slots. 63% of MovieLens rows have tied/same-minute history timestamps (batch rating, order noisy). Epoch-3 confound still open.
+
+- 2026-11-21: **exclude-history decoding** (commit 3ae4990f, frozen code_3ae4990f): latent_attention_eval --exclude_history prunes, per test row, the trie edges used only by that user's history titles (get_title_edges/excluded_edges in LogitProcesser.py) so already-watched titles cannot be generated; verified exact on 300 MovieLens + 300 Steam rows (reachable = all − history, 0 mismatches; 100% history titles matched). scripts/eval_exclude_history.sbatch. Submitted via JobManager: MovieLens R3 + MW-R-H eval-only → output_dir/exclude_history/Movielens/{r3,mwrh}.json.
+- 2026-11-21: full 371452 pending (hady A40s full, est. 11-23); twin 373416 submitted on researchshort (a40, 2 GPUs, 48 h); JobManager guard cancels whichever starts second.
+
+### 2026-11-21 MovieLens exclude-history decoding (code 3ae4990f) — R3 part
+R3 excl 373414 DONE (history match 100%): HR@1/3/5/10 .0254/.0569/.0832/.1362, NDCG .0254/.0433/.0541/.0712.
+vs R3 normal (paired, all 10,164 rows): HR@5 +.0027 (p_t 3.8e-5, p_b <5e-4), HR@10 +.0027 (p_t 1.2e-6), NDCG@5 +.0014, NDCG@10 +.0015 (both p <5e-4); @1 n.s.
+MW-R-H excl 373415 running (album, A40).
+MW-R-H excl 373415 DONE: HR@1/3/5/10 .0241/.0579/.0823/.1277, NDCG .0241/.0433/.0533/.0680.
+vs MW-R-H normal: all cutoffs sig up (HR@5 +.0121, HR@10 +.0090, NDCG@10 +.0075; p <5e-4).
+MW-R-H excl − R3 excl: @1–@5 n.s. (HR@5 −.0010 p .68, NDCG@5 −.0008 p .60); HR@10 −.0085 (p_t .004) and NDCG@10 −.0033 (p_t .04) still sig.
+→ watched-movie re-recommendation explains the whole @1–@5 gap and ~40% of the HR@10 gap (−.0147 → −.0085); the remaining @10 gap is in ranks 6–10.
+- 2026-11-21: full 371452 RUNNING on album since 21:05 (hady won); step 896/1684 at 1h41m, loss ~0, grad norm ~0.012, cosine lr 5.5e-6; asked JobManager to cancel twin 373416.
+
+### 2026-11-21 MovieLens: where MW-R-H loses to R3 (history-excluded results; tmp ml_diag3/4/5.py)
+- Net −86 hits @10 (484 R3-only, 398 MW-only). Gap is entirely on "easy" rows: ref-NLL Q1 HR@10 .4116 → .3534 (−.0582, p<5e-4; −148 hits), no-latent-hit rows −.0805.
+  MW better on Q2 (HR@5 +.0201 sig, NDCG@10 +.0082 sig) and Q3 (HR@10 +.0126 sig); Q4 ≈ 0.
+- Other cuts: same-session rows (gap to last rating <1 min, 62% of test) −.0155 sig; gap ≥1 min ≥ R3. Old targets (<2000) −.0194 sig; rare/mid-pop targets (pop Q1/Q2) sig worse.
+- Q1 rows: 75% rated <1 min after the previous movie (rating bursts); 31% target in last item's top-10 train successors (4% elsewhere) → co-rating pattern.
+- MW lists differ (top-10 overlap with R3 .38): fewer last-item train successors (.197 vs .220; Q1-lost .270 vs .329), more franchise/sequel titles of the history (.226 vs .202). Lost hits are spread over all R3 ranks (rank 1: 62, 2–3: 89, 4–5: 96, 6–10: 237).
+- Reading: the latent carries history-item identity → decoder shifts toward content-similar items of the history and away from the collaborative burst pattern, losing Q1 and gaining on Q2–Q3.
+
+### 2026-11-21 MW-nc on MovieLens with copy_row = reference-NLL Q1 (user naming)
+- Rationale: MovieLens has no rule-based copy rows; the ref-NLL Q1 rows ("easy", 75% rating bursts) are where MW-R-H loses (−.0582 HR@10). On Toys, hard skip (MW-nc .1109, copy .515) beat soft rank weights (MW-R-H .1086 / .504) and rank^2 (.1027 / .482).
+- Code c420d800: REF_WEIGHT_FN=cut, REF_CUT=0.25 → hinge weight 0 on train rows with ref-NLL percentile < 0.25 (copy rows), 1 elsewhere; loss = skipcopy's. Test: 20,327 / 81,308 train rows (25.00%), loss == skipcopy.
+- Run Movielens_margin_0.2_wider_0.1_nc_refq1 (MW-R-H recipe otherwise, 3 epochs, hady A40) submitted via JobManager: job 374203.
+- 2026-11-21 (user request) MovieLens MW-3b: MARGIN_MODE=fixed, MARGIN_EPOCHS=1 (hinge epoch 1 only), MOTIVE_W=0, code c420d800, run Movielens_margin_0.2_wider_0.1_marginwarm, hady A40, submitted via JobManager: job 374225.
+
+### Result: exact R3 stage-2 GRPO on R3_ori Toys (371452, DONE 2026-11-22)
+Training 1684/1684 in 3h09 (2×A40, NCCL over sockets); R3 noise_eval on 2 shards, 6,738 rows merged. Script/output `analysis/results/r3_exact_grpo/compare.py`, `output.txt`.
+
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R3 exact GRPO 371452 | .0375 | .0619 | .0779 | .1012 | .0515 | .0581 | .0656 |
+| R3_ori stage 1 | .0377 | .0607 | .0778 | .1023 | .0510 | .0580 | .0659 |
+| R3_ori + rank GRPO 362510 | .0389 | .0634 | .0793 | .1098 | .0530 | .0595 | .0694 |
+
+- vs stage 1: no change at any cutoff (HR@10 −.0010 [−.0027, +.0006], p .25; all CIs span 0) → R3's own stage 2, run exactly as released (2 GPUs, lr 1e-5), is a no-op on Toys.
+- vs rank GRPO 362510: sig worse at HR@10 (−.0086), NDCG@3/5/10.
+- Interventions failed (experiment.py needs R3_ROOT; fixed bbe55f7e) → interventions-only rerun requested.
+- Interventions-only rerun: 374331 (hady a40) / 374332 (researchshort a40), JobManager guard cancels the later one.
+- 2026-11-22 MW-nc refQ1 374203 FAILED after 5h55m at the epoch-2 checkpoint save (scratch 501/500 GB). checkpoint-1272 (epoch 2, eval ce .6936): model.safetensors verified intact; optimizer.pt truncated, no trainer_state → not resumable. MW-3b 374225 held by JobManager for quota. Plan pending user: eval-only the epoch-2 model in a separate dir + fresh 3-epoch rerun.
+- Interventions 374331 DONE 2026-11-22 (job exit 1 only from final cp: $results unbound under SKIP_EVAL; fixed in sbatch, JSONs copied by hand). raw HR@10 .1020. mask HR@10 −.0086 / NDCG@10 −.0136 sig; mean +.0001 n.s.; shuffle −.0007 n.s. → content of r unused (only presence matters), same as R3_ori.
+- 2026-11-22 scratch freed (~424 GB, not by this session). MW-nc ep2 (checkpoint-1272 moved to Movielens_margin_0.2_wider_0.1_nc_refq1_ep2) eval-only 374720 + exclude-history 374721 RUNNING; fresh 3-epoch MW-nc rerun 374722 + exclude-history 374723 (afterok); MW-3b 374225 released.
+
+### Correction 2026-11-22: where rank-GRPO gains come from (copy vs non-copy, Toys HR@10)
+Earlier claim "GRPO signal mostly from copy rows, MW-R-H ties R3 there" was WRONG (user spotted the contradiction).
+- R3_ori+GRPO: copy .534→.551 (+.018 sig), non-copy .041→.047 (+.006 sig); non-copy gives +.0053 of the +.0076 total. Gains at ranks 6–10 (HR@5 n.s. in every run).
+- MW+GRPO: copy +.014 sig, non-copy +.003 sig. MW-R-H+GRPO: copy +.005 n.s., non-copy −.000.
+- Supported reading: on non-copy rows GRPO brings models to ~.047–.049 and MW-R-H already starts at .050 → no headroom. Copy rows: MW-R-H ties R3_ori before (.526 vs .534) but gains only +.005 vs +.018 — unexplained; hypothesis (untested): R3_ori r is a shared constant (cos 1.0) so GRPO tunes one soft prompt coherently, per-user r in MW-R-H spreads/cancels the sparse reward.
+
+### Test A: gradient alignment of rank GRPO (user OK 2026-11-22)
+Hypothesis: R3_ori gains on copy rows because its r is shared (one soft prompt, per-row updates add up); MW-R-H's per-user r spreads/cancels updates. Diagnostic, no training: 300 copy + 300 other Toys TRAIN rows (same for all models), rank-GRPO step exactly as rank_grpo.py (G 8 beams, +1 / −0.5/log2(k+1), skip no-hit), per-row gradient on the pooling attention (count sketch 16,384) and dL/dr. Metrics: mean pairwise cosine (bootstrap CI), |Σg|/Σ|g|. Models R3_ori, MW 356322 (per-user r, still gained +.014 on copy rows — key check), MW-R-H 365504. Prediction if hypothesis holds: R3_ori ≫ MW-R-H in alignment, with MW in between/near R3_ori. Code 1e7ab332 (`src/grpo_attention_tuning/grad_coherence.py`, `scripts/grad_coherence.sbatch`), smoke toys_smoke → full toys via JobManager.
+- Test A submitted 2026-11-22: smoke 374736 → full 374737 (hady a40). MW 356322 model.safetensors had been removed by the 11-22 scratch cleanup (Drive backup); JobManager restored it (rclone check identical).
+- 2026-11-22 MW-nc ep2 exclude-history 374721 DONE: HR@1/3/5/10 .0238/.0520/.0751/.1143, NDCG .0238/.0399/.0493/.0620 — sig below R3 excl (HR@10 −.0218, NDCG@10 −.0092) and MW-R-H excl (HR@10 −.0134) at @3–@10.
+  copy_row (Q1) HR@10 .3156 < MW-R-H .3534 < R3 .4116 although Q1 rows get NO hinge → Q1 loss is not caused by the hinge on Q1 rows; shared-decoder over-trust (as MWC-M-nc on Toys). Non-copy: HR@5 +.0081 sig vs R3, HR@10 +.0029 n.s.
+  Caveat: epoch 2 of a 3-epoch LR schedule (not a converged model); final rerun 374722 pending.
+- **Test A DONE 2026-11-22 (374737, 27 min).** Hit rows R3_ori 292 / MW 304 / MW-R-H 316 (copy hit rates .83/.81/.84, other .14/.20/.21). Mean pairwise cosine of per-row gradients, attention (sketch) | dL/dr with corrected bootstrap CI (`corrected_ci.txt`; script CI had a duplicate-pair bias, fixed in grad_coherence.py):
+  - R3_ori: all +.111 | +.110 [+.083,+.143]; copy +.121 | +.120 [+.090,+.157]; other +.076 | +.075 [−.002,+.193]
+  - MW: all +.0065 | +.019 [+.011,+.031]; copy +.007 | +.020 [+.012,+.032]
+  - MW-R-H: all +.004 | +.020 [+.013,+.030]; copy +.006 | +.027 [+.018,+.039]
+  - per-row |g|: R3_ori .035, MW .16, MW-R-H .12.
+  - Reading: R3_ori's updates are ~5–20× more aligned than either per-user model (shared r confirmed as a difference), BUT MW and MW-R-H are equally unaligned while MW still gained +.014 on copy rows → alignment does not explain why MW-R-H didn't gain. MW vs MW-R-H copy gains (+.014 [+.005,+.025] vs +.005 [−.004,+.013]) overlap → the "shortfall" may be noise. Remaining supported reason: no headroom on non-copy rows. Test B (shared δ) weakly motivated.
+
+### 2026-11-22 Cross-dataset diagnosis: why MW-R-H loses on MovieLens (tmp/xds.py; R3 vs MW-R-H default seed, normal decoding)
+
+- Per ref-NLL quartile, MW−R3 HR@10: Toys Q1 −.0178* / Q2 +.0190* / Q3 +.0107*; CDs Q1 +.0071 n.s. / Q2 +.0266* / Q3 +.0149*; Steam Q1 −.0101 (p .09) / Q2 +.0151* / Q3 +.0050*; MovieLens Q1 −.0744* / Q2 +.0039 n.s. / Q3 +.0094*. Same pattern everywhere (gain Q2–Q3, cost Q1); MovieLens differs in SIZE: Q1 cost 4–7x larger, Q2 gain missing.
+- Row types (lexical = target title Jaccard ≥ .5 with a history title; transition-only = target in last item's top-10 train successors): share of R3 hits lexical / transition-only / neither: Toys .56/.22/.22, CDs .44/.38/.17, Steam .45/.10/.45, MovieLens .04/.48/.48. MW−R3 HR@10 on transition-only rows: Toys +.034 n.s., CDs +.095*, Steam +.074*, MovieLens −.059*; on "neither": Toys +.0051*, CDs +.0025, Steam +.0017, MovieLens −.0089*.
+- Lists: history items per top-10 R3→MW: Toys 1.01→1.02, CDs .65→.83, Steam .58→.67, MovieLens .48→1.09; last-item successors per top-10: Toys .85→.89, CDs .76→1.20, Steam .34→.47, MovieLens 2.26→2.04 (only dataset where it falls).
+- Dataset: rows/item Toys 8.6, CDs 9.2, Steam 18.7, MovieLens 27.9; top-10% items hold .35/.37/.36/.55 of train targets; last-item-successor baseline HR@10 .089/.120/.023/.104; target-in-history .015/.031/0/0.
+- Training: Steam hinge NEVER satisfied (margin_loss ≈ .20 = margin all 3 epochs, wider_loss ≈ 1.0) → explains unused latent there; Toys/CDs/MovieLens margin_loss falls to .02/.06/.055 in epoch 3.
+- Reading: MovieLens is a dense item-transition dataset with no title-readable rows; R3's decoder already lists 2.26 successors per top-10; the latent (history identity) displaces that with history items instead of adding successors as on CDs/Steam.
+
+### 2026-11-22 MovieLens: make the latent encode "next is B" (user: latent should be the reasoning result, not "watched A"; try both)
+
+- Diagnosis (user discussion): the swap hinge is satisfied by a history summary ("watched A"), so the latent does not need to carry the conclusion ("next is B"); on MovieLens the decoder already reads the history, so the latent only re-surfaces history items.
+- Code 013bd0ac (frozen output_dir/margin_wider_collab_code/code_013bd0ac):
+  - **MW-HN** `HINGE_NEG=history`: swapped latent = bank latent (detached) of another user's train row with the same last history item and a different next item (top-32 by history overlap; in-batch fallback until the bank row is filled). MovieLens: 99.98% rows have candidates, mean 26.6, mean overlap .30 of own history. Tests: tmp/test_hardneg.py (index constraints; tiny-model forward; batch mode unchanged).
+  - motive_probe: + history_vs_next (cos same-last/different-next vs same-next/different-last vs random).
+- Submitted via JobManager (tmp/submit_movielens_next_is_b.sh, hady A40):
+  1. MW-R-H + same-motive InfoNCE (MOTIVE_W=0.1) → Movielens_margin_0.2_wider_0.1_refweight_nolatent_rank_motive (+ exclude-history TAG=mwrh_motive)
+  2. MW-HN (MOTIVE_W=0, HINGE_NEG=history) → ..._rank_hardneg (+ exclude-history TAG=mwrh_hardneg)
+  3. motive probe on R3 base and MW-R-H (tags movielens_r3_base, movielens_mwrh)
+- Job ids: motive 374774 (exhist 374775), MW-HN 374776 (exhist 374777), probe 374778.
+- 2026-11-22 (user): also CDs MW-R-H + same-motive InfoNCE (MOTIVE_W=0.1, code 013bd0ac, 366023 recipe otherwise) → CDs_and_Vinyl_margin_0.2_wider_0.1_refweight_nolatent_rank_motive, submitted via JobManager (tmp/submit_cds_mwrh_motive.sh): job 374791.
+
+## 2026-11-22 — Why rank GRPO does not help MW-R-H; new arms A / C / A+C (user request)
+
+**Prediction re-analysis (Toys test 6,738; MW-R-H 365504 vs +GRPO 368198; script `$CLAUDE_JOB_DIR/tmp/pa.py` logic, numbers here).**
+- GRPO barely moves the model: same top-1 on 87% of rows; hit@10 sets 710 shared, 22 only before / 24 only after.
+- Headroom is ordering inside the list: MW-R-H hits 732, of which 258 at rank 1 (35%); non-copy hits 22% at rank 1. Perfect reorder of the top-10 → HR@1 .109 (now .038).
+- Reward starvation on train rows (Test A records, G=8): non-copy rows have a hit 21%, hits at rank ≥2 only 42/300 (14%); train non-copy hit rate 21% vs test 4.9% (memorised targets).
+- Top-10 waste: 10.2% of slots are history items (target in history 1.5%); 44% share top-1 brand; 3.6 distinct brands; target brand in top-10 only 32%.
+- Popularity bias: top-1 mean train freq 26.9 vs target 16.4; HR@10 .157 (freq>10), .09 (3–10), .03 (1–2), 0 (unseen, 5% of rows).
+- R3_ori and MW-R-H top-10 lists share nothing; hits both 519 / only MW-R-H 213 / only R3 170 (union .134 vs .109).
+
+**New arms (code f3409399, frozen `output_dir/grpo_stage2_code/code_f3409399`; user chose A+C, 3 arms, no diagnostic, attention-only):**
+- A: G=16 beams; if no beam hits, the target (label ids) replaces the lowest-ranked beam, reward +1 → every row has a signal.
+- C: extra −0.5 for a beam that is a history item, −0.25 for a beam redundant with a higher-ranked beam (same first word and title Jaccard ≥ 0.5); no-hit groups: only these penalties (no rank penalty).
+- A+C: both. All: rank reward −0.5/log2(k+1), KL anchor β 0.04, fp32 attention, lr 3e-5 (was 1e-5), micro-batch 16, start model MW-R-H 365504. Tags toys_mwrh_rankA / rankC / rankAC, smoke toys_mwrh_rankAC_smoke. Logged metrics: rank/label_ids_match, injected_frac, hist_slot_frac, dup_slot_frac, distinct_brands.
+- Success: ≥ R3 at @5/@10 (paired bootstrap + t-test), interventions mask/mean/shuffle still significantly hurt; compare vs 365504 and 368198. Submitted via JobManager (ids pending).
+- Submitted 2026-11-22 via JobManager (hady A40, 72 h, requeue; all PENDING): smoke 374797 (toys_mwrh_rankAC_smoke) → afterok: A 374798 (toys_mwrh_rankA), C 374799 (toys_mwrh_rankC), A+C 374800 (toys_mwrh_rankAC). Full runs do not start if the smoke fails. Smoke checks: rank/label_ids_match ≈ 1, injected_frac, hist_slot_frac.
+
+### 2026-11-22 MW-nc ep2 (374720) normal ranking + interventions DONE — CORRECTS the "over-trust" reading of the ep2 model
+
+- Normal decoding HR@1/3/5/10 .0226/.0474/.0695/.1102, NDCG .0226/.0368/.0458/.0590. vs R3: HR@10 −.0233, NDCG@10 −.0108 (sig @3–@10). vs MW-R-H: HR@10 −.0086 sig (p .003), HR@1 +.0033 sig, rest n.s.
+- Latent NOT used at all: mask − raw HR@10 +.0020 n.s.; mean +.0030 (p .04/.03); shuffle +.0027 (p .06/.05), NDCG@10 +.0012 (p .05/.04). Even masking is harmless.
+- Training log 374203: hinge never satisfied (margin_loss ≈ .20 through epoch 2.0–2.1) → like Steam. So this model's Q1 loss cannot be decoder over-trust in r; it is a worse decoder (epoch-2 state, hinge unsatisfied). The ep2 model is NOT a valid test of MW-nc; wait for rerun 374722 (its margin_loss already falls in epoch 1.0–1.5: .125) — runs are nondeterministic.
+- MW-3b 374225: hinge satisfied late in epoch 1 (.173 avg in 0.5–1.0), then off.
+
+### 2026-11-22 Motive probe MovieLens 374778 DONE (first 20,000 train rows; cos of normalised r; other users only)
+
+| model | same last item, diff next | same next item, diff last | random | gap history | gap next | within-user similar − dissimilar | global mean cos |
+|---|---|---|---|---|---|---|---|
+| R3 base | .9810 | .7550 | .7193 | +.2617 | +.0357 | +.0074 | .7205 |
+| MW-R-H | .1069 | .0703 | .0456 | +.0613 | +.0247 | +.1067 | .0540 |
+
+- Both latents follow the history side more than the next item (R3 7x, MW-R-H 2.5x); MW-R-H same-next retrieval P@10 .0071 (chance .0018; R3 .0284). MW-R-H's largest structure is same-user (+.107). Supports "r = watched A / who the user is, weakly next is B". Baselines for the motive (374774) and MW-HN (374776) models: gap_next should rise above gap_history.
+
+### 2026-11-22 MovieLens MW-R-H: latent interventions split by copy_row (tmp/ml_copy_interv.py) — the copy-row loss is in the DECODER, not in r
+
+| rows | R3 | no-latent | MW-R-H raw | mean r | shuffle r | mask |
+|---|---|---|---|---|---|---|
+| copy_row HR@10 (n 2,541) | .4061 | .4707 | .3318 | .2857 (−.0460*) | .2562 (−.0756*) | .1909 (−.1409*) |
+| non-copy HR@10 (n 7,623) | .0426 | .0207 | .0478 | .0418 (−.0059*) | .0374 (−.0104*) | .0328 (−.0150*) |
+
+- On copy rows the own latent HELPS MW-R-H (removing it costs .046–.141); without it the decoder is far below R3/no-latent. So the decoder lost its history-only reading of copy rows and now needs r as a (lossy) substitute. Withdraws "latent misleads / over-trust" as the mechanism; test-time gating is dead (oracle gate mean-on-copy: HR@10 .1072, sig below R3).
+- Note copy_row is defined by the no-latent reference, hence no-latent .4707 > R3 .4061 there (and .0207 < .0426 on non-copy).
+- Design candidates discussed with user: (a) swapped-latent CE on copy rows (weight 1 − w_i), (b) KL distillation from the frozen no-latent reference on copy rows.
+
+### 2026-11-22 MW-R-H-S / MW-R-H-D on MovieLens (user: try both) — keep the decoder's history-only reading on copy rows
+
+- Code 1186ca19 (frozen code_1186ca19); refweight only; row weight (1 − w_i)^COPY_POWER (default 1; rank weights → mean .5, copy rows .75–1):
+  - **MW-R-H-S** `COPY_SWAP_W=1`: + mean((1−w_i)·NLL(y | x, r_swapped)) — CE on the swapped-latent pass (already computed for the hinge; no extra cost).
+  - **MW-R-H-D** `DISTILL_W=1 DISTILL_MODEL=<no-latent ref>`: + mean((1−w_i)·KL(ref ‖ model)) on target tokens; teacher = frozen Movielens_R3_no_latent_ref/model (thought slot removed, token-aligned, vocab slice 151,666), outside the module tree.
+- Tests tmp/test_copyloss.py: values = manual per-row computation (padded row, varying thought positions, smaller teacher vocab), student-as-teacher KL 0, teacher frozen / not saved, off by default.
+- Note: with rank weights the new terms also act on Q2–Q3 rows (weight .5–.75), where the hinge gives its gain — possible dilution; COPY_POWER=2 is the follow-up if non-copy gain drops.
+- Success check: copy_row HR@10 → ~.41 with mean-r ≈ raw on copy rows; non-copy gain kept and shuffle still hurts there.
+- Submitted via JobManager (tmp/submit_movielens_copyloss.sh): ..._rank_swapce, ..._rank_distill (+ exclude-history TAG=mwrh_swapce / mwrh_distill): swapce 375420 (exhist 375421), distill 375422 (exhist 375423).
+- Smoke 374797 DONE 2026-11-22 (8m50s, exit 0): label_ids_match 1.0, injected_frac 0.25–1.0, hist_slot_frac 0.05–0.125, KL ~1e-4, clip_ratio 0. A 374798 / C 374799 / AC 374800 now pending (Priority).
+
+### 2026-11-22 DONE: MovieLens MW-3b 374225 and CDs MW-R-H + same-motive 374791 (tmp/done_1122.py)
+
+- **MovieLens MW-3b**: HR@1/3/5/10 .0269/.0617/.0830/.1263, NDCG .0269/.0469/.0557/.0696. vs R3: HR@3 +.0061* (.0045/.008), HR@5 +.0025 n.s., HR@10 −.0072* (.014/.01), NDCG@3 +.0045*, NDCG@5 +.0029 (.07), NDCG@10 −.0002 n.s. vs MW-R-H: all cutoffs sig better (HR@10 +.0076, NDCG@10 +.0091). Latent UNUSED (mask +.0019 [−.0006,+.0044], mean +.0013, shuffle +.0011, n.s.). History items per top-10 .39 (R3 .48). Hinge satisfied by end of epoch 1, then off.
+  - copy_row: HR@10 .3676 vs R3 .4061 (−.0386*), @1–@5 n.s.; non-copy: HR@3 +.0062*, HR@5 +.0071*, HR@10 +.0033 n.s., NDCG@10 +.0033*.
+  - → the copy(−@10)/non-copy(+) trade appears WITHOUT latent use: partly a regulariser/redistribution effect, not only latent content.
+- **CDs MW-R-H + motive**: HR .0547/.0801/.0947/.1145, NDCG .0547/.0692/.0752/.0816. vs R3_ori: all cutoffs sig (HR@10 +.0156, NDCG@10 +.0099). vs MW-R-H 366023: n.s. everywhere (HR@5 +.0041 p .09, HR@10 +.0024). Latent used MORE: mask −.0369 [.0313,.0426], mean −.0352, shuffle −.0401 (MW-R-H shuffle −.017). motive_loss 3.04→1.96, cos_cross .067→.181 vs cos_neg .014. (JobManager's ".0744" line was the shuffled-latent result, not the ranking.)
+
+### 2026-11-23 MovieLens rankings DONE (interventions + exclude-history pending): MW-nc rerun 374722, MW-R-H+motive 374774, MW-HN 374776 (tmp/ml_runs.py)
+
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | hist/top-10 | copy HR@10 | non-copy HR@5 / @10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R3 | .0249 | .0556 | .0806 | .1335 | .0425 | .0527 | .0698 | .48 | .4061 | .0101 / .0426 |
+| MW-R-H | .0193 | .0492 | .0701 | .1188 | .0363 | .0449 | .0605 | 1.09 | .3318 | .0143 / .0478 |
+| MW-3b | .0269 | .0617 | .0830 | .1263 | .0469 | .0557 | .0696 | .39 | .3676 | .0172 / .0459 |
+| MW-nc rerun | .0228 | .0557 | .0793 | .1250 | .0417 | .0514 | .0660 | .62 | .3597 | .0163 / .0467 |
+| MW-R-H+motive | .0261 | .0531 | .0761 | .1207 | .0416 | .0509 | .0652 | .90 | .3424 | .0143 / .0468 |
+| MW-HN | .0263 | .0588 | .0841 | .1279 | .0449 | .0552 | .0694 | .39 | .3628 | .0173 / .0496 |
+
+- vs R3: MW-nc HR@10 −.0086* NDCG@10 −.0037*, @1–@5 n.s.; motive HR@10 −.0128* NDCG@10 −.0045*, HR@5 −.0045 (.05); MW-HN HR@10 −.0056 (.05/.048) rest n.s. (NDCG@10 −.0004).
+- vs MW-R-H: MW-nc and MW-HN sig better at all cutoffs; motive sig at @1, @5, NDCG.
+- All variants: non-copy gain at @3/@5 sig (+.003 to +.007), copy_row HR@10 loss −.043 to −.064 sig.
+- CAUTION MW-HN: margin_loss .08/.02 already in epoch 0–1 (in-batch runs: ~.19) and WIDER loss ≈ 1.0 in epoch 0.5–1.5 → the hinge is trivially satisfied against STALE bank latents (old-model r is separable for the wrong reason); profile ≈ MW-3b (hist/top-10 .39) → latent probably unused; wait for interventions.
+- motive: cos_cross .36 vs cos_neg .23 (global similarity also rose → partial collapse of spread).
+- 2026-11-22 (user): history-excluded evals postponed — "fixing it, MW-R-H is still lower than R3; do it later". Asked JobManager to cancel pending 374723, 374775, 374777, 375421, 375423 (trainings untouched; resubmit later via eval_exclude_history.sbatch with TAG mwnc / mwrh_motive / mwrh_hardneg / mwrh_swapce / mwrh_distill).
+
+### 2026-11-22 MW-nc rerun 374722 DONE (3 epochs; 20,327 copy rows without hinge) — latent STRONGLY used at .1250 / .0660
+
+- Ranking (normal): HR .0228/.0557/.0793/.1250, NDCG .0228/.0417/.0514/.0660; vs R3 @1–@5 n.s., HR@10 −.0086*, NDCG@10 −.0037*; vs MW-R-H sig better at all cutoffs. (JobManager's ".0786" line is the shuffled-latent result.)
+- Interventions (x − raw), all p < 5e-4: mask HR@10 −.0414 (copy −.1338 / non-copy −.0106); mean −.0335 (copy −.0992 / non-copy −.0117); shuffle −.0463. NDCG@10 −.0270 / −.0250 / −.0309.
+- Latent use is LARGER than MW-R-H (shuffle −.0267) with better ranking; and the latent matters most on copy rows although they get no hinge → decoder dependence on r generalises to all rows (shared decoder), consistent with the copy-row intervention split of MW-R-H.
+
+### 2026-11-22 MovieLens MW-R-H + same-motive 374774 DONE — latent used most of all runs, ranking between MW-R-H and MW-nc
+
+- Ranking: HR .0261/.0531/.0761/.1207, NDCG .0261/.0416/.0509/.0652; vs R3 HR@10 −.0128*, NDCG@10 −.0045*, @1–@5 n.s. (HR@5 −.0045 p .05); vs MW-R-H better at @1, @5, NDCG (HR@10 +.0020 n.s.).
+- Interventions (x − raw), all p < 5e-4: mask HR@10 −.0727 (copy −.2011 / non-copy −.0299); mean −.0545 (copy −.1527 / non-copy −.0218); shuffle −.0627 (copy −.1696 / non-copy −.0270); NDCG@10 −.0407 / −.0324 / −.0366.
+- Latent use on MovieLens (shuffle HR@10): R3 −.0027, MW-3b −.0011 n.s., MW-R-H −.0267, MW-nc −.0463, motive −.0627.
+- Probe on MW-nc + motive models requested via JobManager (tmp/submit_movielens_probe2.sh).
+
+### 2026-11-22 MovieLens MW-HN 374776 DONE — per-user latent content UNUSED (as predicted from the trivially satisfied hinge)
+
+- Ranking .0263/.0588/.0841/.1279, NDCG@10 .0694 (vs R3 HR@10 −.0056 p .05, rest n.s.).
+- Interventions (JobManager CIs): shuffle_user HR@10 −.0006 [−.0030,+.0018] n.s.; mean −.0103 [.0061,.0144] sig; mask −.0715 sig. → another user's latent works as well as the own one; only the mean / zero vector hurt = the decoder needs a "current-model-like" latent but not this user's.
+- Cause: hinge satisfied against STALE bank latents (margin_loss .02–.08 from epoch 1). Fix if pursued: recompute the hard negative's r with the current encoder (extra history-encoder pass) instead of reading the bank.
+
+
+## 2026-11-23 MovieLens headroom map (analysis only, tmp/ml_headroom.py; no new runs)
+
+Test rows bucketed by where train co-occurrence counts put the target (history items excluded from candidates):
+last-item successor count top-10 ("last item"), else earlier-history-item count top-10 ("earlier history only"), else "neither".
+Last-item count table alone: HR@10 .1494 (> R3 .1335); earlier-history table .0942; either list .2081.
+
+| bucket | n | share | R3 | no-latent | MW-R-H | MW-nc | motive | MW-3b | MW-HN |
+|---|---|---|---|---|---|---|---|---|---|
+| last item | 1,518 | .149 | .5264 | .5283 | .4704 | .4875 | .4611 | .5165 | .5250 |
+| earlier history only | 597 | .059 | .3551 | .3769 | .3417 | .3886 | .3635 | .3233 | .3166 |
+| neither | 8,049 | .792 | .0430 | .0406 | .0359 | .0370 | .0385 | .0381 | .0390 |
+
+- R3 − no-latent n.s. in every bucket. Last item: MW-R-H − R3 −.0560, MW-nc −.0389, motive −.0652 (all p ≤ .002 both tests).
+  Earlier history only: MW-R-H −.0134 (.54/.58), MW-nc +.0335 (.10/.11), motive +.0084 (.68/.70). Neither: MW-R-H −.0071 (.004/.004), MW-nc −.0060 (.012/.013), motive −.0045 (.07/.08).
+- Share of R3 hits: .59 / .16 / .25. Top-50 buckets give the same picture (shares .255 / .132 / .613 of rows).
+- History length: MW-R-H below R3 in every length group; MW-nc = R3 for length ≤ 4, below for 10+.
+- Complementarity of hits@10 with R3: no-latent union .1706 (each-only .037); MW-R-H .1682; MW-nc .1692; motive .1691; MW-3b .1732; MW-HN .1722.
+  Latent-using models are no more complementary to R3 than the no-latent model is. Union of all 7: .2481.
+- copy_row vs buckets: P(last item | copy_row) .378 vs .073 non-copy.
+Reading: the headroom on MovieLens is in last-item transitions (R3 finds 53% of targets a count table lists in its top-10), not in
+summarising the user's history; forced latent use costs exactly there and gains nowhere significantly.
+
+
+## 2026-11-23 MovieLens: per-bucket gap with history excluded; cross-dataset characteristics; MW-R-H-CR submitted (376544)
+
+- MW-R-H (369532) − R3 (371446) per evidence bucket, existing exclude-history files (tmp/ml_headroom_ex.py):
+  HR@5 normal −.0104 → excluded −.0010 (n.s.) overall; last item −.0336 → −.0033; earlier-only −.0536 → −.0034; neither −.0029 → −.0004.
+  HR@10 normal −.0148 → excluded −.0085 (sig); last item −.0560 → −.0389 (sig); earlier-only −.0134 → +.0134 (n.s.); neither −.0071 → −.0043 (.08/.09).
+  Reading: the across-the-board gap = watched movies taking list slots (1.09 vs .48 per top-10); residual = last-item successors at ranks 6–10.
+- Cross-dataset (tmp/xds.py): R3 − last-item-successor table HR@10: Toys +.016, CDs −.021, Steam +.013, MovieLens +.030;
+  MW-R-H − R3: +.0034, +.0132, +.0030, −.0148. Rows/item 8.6 / 9.2 / 18.7 / 27.9; lexical-target rows 10.6% / 8.8% / 3.0% / 1.4%.
+- User 11-23: try MW-R-H + ORIGINAL collaborative reasoning InfoNCE (user head = same user's other rows, target head = same next item)
+  on MovieLens. Code c3b42206 (METHOD=infonce + MARGIN_MODE=refweight, EARLY_STOP=False; tiny-model check tmp/test_mwrh_cr.py: with
+  InfoNCE weights 0, CE / hinge / total loss = MW-R-H's exactly). Run Movielens_margin_0.2_wider_0.1_refweight_nolatent_rank_cr,
+  USER_W=TARGET_W=0.1 from epoch 2, GATE=0.5, queue 10k, 16 positives per head, 256 negatives; job **376544** (R3_mwrh_cr_movielens,
+  hady A40, via JobManager, tmp/submit_movielens_mwrh_cr.sh). No exclude-history eval.
+  Differences from the same-motive run 374774 besides the positives: FIFO queue of 10k gated latents (not the full row bank), two heads.
+
+
+## 2026-11-24 probe 376414 DONE (MovieLens MW-nc rerun 374722, MW-R-H + same-motive 374774; first 20,000 train rows)
+
+| model | gap_history (same last item, different next) | gap_next (same next, different last) | next / history | cross-user same-item gap | within-user gap |
+|---|---|---|---|---|---|
+| R3 371446 | +.262 | +.036 | .14 | | |
+| MW-R-H 369532 | +.061 | +.025 | .41 | | +.107 |
+| MW-nc 374722 | +.186 | +.068 | .37 | +.075 | +.054 |
+| MW-R-H + same-motive 374774 | +.318 | +.151 | .48 | +.159 | +.064 |
+
+gap_next does not exceed gap_history in any model. Same-motive raises gap_next 6x over MW-R-H (.025 → .151) but gap_history rises too
+(.061 → .318). Train rows, and same-next rows are the trained positives of 374774, so its gap_next is partly fitted.
+MW-R-H-CR 376544 started 11-24 ~04:20 on album.
+
+
+## 2026-11-24 MovieLens: two same-motive follow-ups after probe 376414 (user: "implement 1 and 2")
+
+Base for both = 374774 recipe (MW-R-H rank weights, margin 0.2, WIDER 0.1, same-motive InfoNCE from epoch 2, 3 epochs, Qwen2.5-1.5B).
+1. **History-matched InfoNCE negatives** (code 1caa41c6, MOTIVE_HARD_NEG=16, MOTIVE_W=0.1): per anchor up to 16 bank rows of other
+   users with the same last history item and a different next item are added to the 256 random negatives. Positives and negatives
+   are all bank latents, so the fresh-vs-stale shortcut of MW-HN (374776) does not apply. Tiny-model test tmp/test_motive_hardneg.py:
+   loss = manual logsumexp, off = unchanged, hinge negative mode untouched. Output ..._rank_motive_hn.
+2. **Stronger InfoNCE** (MOTIVE_W=0.3, settings only). Output ..._rank_motive_w03.
+3. Probe on both (afterok). Submitted via JobManager, tmp/submit_movielens_motive_next.sh; job IDs: see JobManager reply / run_logs
+   (R3_mwrh_motive_hn_movielens, R3_mwrh_motive_w03_movielens, R3_motive_probe_movielens3). No exclude-history evals.
+Question: does the next gap exceed the history gap, and does ranking at @5/@10 move toward R3 (.0806 / .1335; NDCG .0527 / .0698)?
+
+Job IDs (2026-11-24): 376835 same-motive + history-matched InfoNCE negatives, 376836 InfoNCE weight 0.3, 376837 probe (afterok on both).
+
+2026-11-24: 376835 / 376836 FAILED at start-up (TypeError str > int): margin_wider_collab.sbatch had no space after --motive_hard_neg "..." so the value was glued to --copy_swap_weight. Fixed in bd018410 (frozen code_bd018410); tmp/test_sbatch_args.sh now renders the motive command and checks argument types through fire against train(). Probe 376837 cancelled (dependency never satisfied); resubmission of the same three jobs requested from JobManager.
+
+Resubmitted from code_bd018410 (2026-11-24): 376838 same-motive + history-matched InfoNCE negatives, 376839 InfoNCE weight 0.3, 376840 probe (afterok). Start-up verified: both log training steps; 376838 prints the hard-negative index (99.98% of rows have candidates, mean 26.6) with hinge: False, InfoNCE: 16 per anchor.
+
+## 2026-11-22/23 — HiLaR GRPO on MW-R-H: step 1 = signal probe (user request)
+
+HiLaR (arXiv 2607.27760, "Hierarchical Latent Reasoning for LLM-based Recommendation"): G=6 rollouts of K=4 Gaussian latents (σ .12/.08/.05/.025), reward = hit + prefix + F1 + SASRec z-score + target logp + process (align, gain), KL .05, lr 5e-6, backbone frozen; its repo is a placeholder (README "Coming Soon"), so weights are unknown. User chose: their GRPO recipe on MW-R-H, SASRec term included. Prior reimplementation (worktree HiLaR, Musical, doc `document/hilar.md`): stage 2 HR@10 .1205 / NDCG@10 .0713 vs R3 .1226 / .0950, latents unused (swap .1550→.1540), probe at the paper's σ: 1.0–1.2 distinct titles per 6 rollouts, reward std 0–0.015 → GRPO never run. Caveat for the SASRec term: the Cornac SASRec is in-sample on train rows (train top-10 hit .835 vs test .100).
+Single-token design (user point: only 1 thinking token): no hierarchy/process terms; policy N(r, σ²I); σ relative to median inter-user ‖r_i−r_j‖; antithetic ± rollouts, G=12; dLL vs the noise-free r instead of the empty-slot gain.
+**Step 1 (probe, no update):** `src/grpo_attention_tuning/hilar_probe.py` + `scripts/hilar_probe.sbatch`, code 6af2c9c8 (frozen `output_dir/hilar_probe_code/code_6af2c9c8`); σ_rel 0.1/0.25/0.5/1.0; models MW-R-H 365504 and MW; 128 copy + 128 non-copy train rows; reports distinct titles per group and within-group std of hit/prefix/F1/dLL/combined. Submitted via JobManager (smoke → full; ids pending). Gate: train only if some σ gives ≥2 distinct titles per group with a usable reward std.
+- Probe jobs submitted via JobManager: smoke 376904 (1 h limit) → full 376905 (afterok). Output analysis/results/hilar_probe/toys_probe/.
+
+
+## 2026-11-24 MovieLens MW-R-H-S (swapped-pass CE, COPY_SWAP_W=1) 375420 DONE — FIRST MovieLens run meeting the criterion
+
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | hist/top-10 |
+|---|---|---|---|---|---|---|---|---|
+| R3 seed 0 (371446) | .0249 | .0556 | .0806 | .1335 | .0425 | .0527 | .0698 | .48 |
+| R3 seed 1 | .0261 | .0581 | .0819 | .1372 | .0445 | .0542 | .0720 | |
+| MW-R-H (369532) | .0193 | .0492 | .0701 | .1188 | .0363 | .0449 | .0605 | 1.09 |
+| MW-R-H-S (375420) | .0267 | .0616 | .0887 | .1380 | .0467 | .0578 | .0737 | .41 |
+
+- vs R3 seed 0 (p_t / p_boot): HR@1 +.0018 (.25/.26), HR@3 +.0060 (.005/.006), HR@5 +.0082 (.001/.001), HR@10 +.0045 (.12/.12);
+  NDCG@3 +.0042 (.008/.009), NDCG@5 +.0051 (.001/.003), NDCG@10 +.0039 (.012/.016).
+- vs R3 seed 1: HR@5 +.0069 (.006/.009), NDCG@5 +.0037 (.021/.028) sig; HR@1 +.0006, HR@3 +.0034 (.11/.12), HR@10 +.0008 (.78/.82), NDCG@3 +.0022, NDCG@10 +.0017 n.s.
+- vs MW-R-H: all cutoffs sig (HR@10 +.0193, NDCG@10 +.0132, p < 5e-4).
+- copy_row HR@10 .4026 (R3 .4061, MW-R-H .3318): −.0035 vs R3 n.s.; HR@5 +.0185 (.037/.039). non-copy HR@10 .0498 (R3 .0426): +.0072 (.008/.006), sig at all cutoffs.
+- Latent tests (p < 5e-4): mask HR@5 −.0283 / HR@10 −.0346 / NDCG@10 −.0191; mean −.0258 / −.0356 / −.0190; shuffle −.0284 / −.0381 / −.0206.
+  By copy split (HR@10): shuffle copy −.0307 (.0007), non-copy −.0405; mean copy −.0240, non-copy −.0395; mask copy −.0201 (.022), non-copy −.0395.
+  → on non-copy rows about 80% of the hits need the user's own latent; on copy rows the decoder keeps its history-only reading.
+- Training: copy_swap_ce .39 → .22; margin_loss .20 → .06 (hinge satisfied by epoch 3); WIDER stays low (≤ .16).
+- Latent rank: effective rank 26.5, mean pairwise cos .017.
+Caveats: single seed for MW-R-H-S; MW-R-H was not seed-robust on Toys.
+- 2026-11-23 probe 376905 (code 6af2c9c8): decode columns valid (MW-R-H sigma_rel 1.0: 1.56 distinct/12, P(>=2) .40, hit unchanged .30; MW 2.52 distinct, hit .205), BUT dLL column INVALID: transformers 4.48 ignores logits_to_keep so the teacher-forced slice used prompt positions (clean mean logp -8.85, constant in sigma). Fixed in code 0bbb59bc (CPU check: clean -0.18, noisy -0.94); rerun pending.
+
+
+## 2026-11-24 MovieLens MW-R-H-D (KL to the no-latent reference, DISTILL_W=1) 375422 DONE — also meets the criterion
+
+MW-R-H-D: HR@1/3/5/10 .0276/.0576/.0851/.1350, NDCG@3/5/10 .0446/.0558/.0718; hist/top-10 .45.
+- vs R3 seed 0: HR@1 +.0028 (.044/.051), HR@3 +.0020 n.s., HR@5 +.0045 (.045/.042), HR@10 +.0015 (.60/.63); NDCG@3 +.0021 n.s., NDCG@5 +.0031 (.025/.023), NDCG@10 +.0020 (.15/.16).
+- vs R3 seed 1 (.1372 / .0720): n.s. at every cutoff (HR@5 +.0032, HR@10 −.0023, NDCG@10 −.0002).
+- vs MW-R-H: all cutoffs sig (HR@10 +.0162, NDCG@10 +.0113).
+- copy_row HR@10 .4093 (R3 .4061; +.0031 n.s.); non-copy .0436 (R3 .0426; +.0009 n.s.; NDCG@3/@5 sig +.0013/+.0016).
+- Latent tests (p < 5e-4): mask HR@5 −.0413 / HR@10 −.0593 / NDCG@10 −.0334; mean −.0447 / −.0694 / −.0380; shuffle −.0472 / −.0729 / −.0395.
+  By copy split (HR@10): shuffle copy −.2125, non-copy −.0264; mean copy −.2019, non-copy −.0252; mask copy −.1708, non-copy −.0222.
+- Training: distill_kl .18 → .016; margin_loss .20 → .014; WIDER ≤ .27. Latent rank: effective rank 9.5 (S: 26.5), top-1 energy .50.
+- S − D (paired): all cutoffs n.s. overall (HR@10 +.0030, NDCG@10 +.0019); non-copy HR@10 +.0063 (.019/.016), NDCG@10 +.0026 (.011/.010) for S; copy_row n.s.
+Reading: both recover copy_rows to R3 level. S does it by making the decoder predict them WITHOUT the right latent (shuffle on copy rows
+−.031) and keeps the non-copy gain; D matches the reference WITH the own latent, so copy rows become strongly latent-dependent (−.21)
+and the non-copy gain over R3 is not significant. S is the stronger of the two on ranking; D shows the stronger latent dependence.
+
+
+## 2026-11-24 Method descriptions for the report: MW-R-H-S (swapped-pass loss) and MW-R-H-D (reference distillation)
+
+**Common setup.** Reference model = the same base (Qwen2.5-1.5B) fine-tuned on the same data and prompt with the latent slot
+removed; trained once, frozen. Row weight `w_i` = rank percentile (0–1) of the reference loss on row i's target; low `w_i` = the
+history alone explains the target (copy_row = lowest quarter). Per row, the decoder runs an own pass (history + own latent, loss
+`own_i`) and a swapped pass (history + another row's latent from the batch, detached; loss `swapped_i`).
+
+```
+L = mean_i( own_i )                                              prediction
+  + sum_i( w_i · max(0, m + own_i − swapped_i) ) / sum_i( w_i )   hinge (MW-R-H), m = 0.2
+  + [S]  mean_i( (1 − w_i) · swapped_i )                          swapped-pass loss, weight 1   (375420)
+  + [D]  mean_i( (1 − w_i) · KL_i )                               reference distillation, weight 1   (375422)
+  + 0.1 · WIDER                                                   latent diversity
+```
+
+`KL_i` = KL(reference ‖ model own pass) on the next-token distribution, averaged over the target title tokens of row i; the
+reference reads the same prompt without the latent slot, target tokens aligned one by one; reference under no_grad.
+
+**Why MW-R-H needed it.** In MW-R-H low-`w` rows only get a small hinge. The decoder is shared, so the habit learned on high-`w`
+rows ("trust the latent") spreads to all rows; on MovieLens that cost −.074 HR@10 on copy_rows (decoder lost its history-only
+reading). A small hinge weight says "don't push here"; S and D say something active about those rows.
+
+**How the weighted terms divide the work.**
+- High-`w` rows: the hinge dominates → the own latent must beat another user's latent by the margin.
+- Low-`w` rows, S: the decoder must still predict the target with the WRONG latent → it must be able to read the history alone.
+  S reuses the swapped pass already run for the hinge (no extra compute). On the swapped pass the hinge and S pull in opposite
+  directions; `w_i` decides which wins per row, giving the decoder a rule for when to rely on the latent.
+- Low-`w` rows, D: the model, with its OWN latent in place, must predict what the history-only model predicts. One extra forward
+  pass of a frozen model per step.
+- Inference, prompt and latent module are unchanged from R3 in both.
+
+**What the results say about the mechanism (MovieLens, HR@10; shuffle = another user's latent).**
+
+| rows | R3 | MW-R-H | S | S shuffle | D | D shuffle |
+|---|---|---|---|---|---|---|
+| copy_rows (2,541) | .4061 | .3318 | .4026 | −.0307 | .4093 | −.2125 |
+| non-copy (7,623) | .0426 | .0478 | .0498 | −.0405 | .0436 | −.0264 |
+| all | .1335 | .1188 | .1380 | −.0381 | .1350 | −.0729 |
+
+- Both restore copy_rows to R3's level (the whole MW-R-H deficit).
+- S: copy_rows stay largely independent of the latent; the latent carries the non-copy rows (about 80% of those hits need the own
+  latent) and S is sig above R3 there (+.0072).
+- D: copy_rows become strongly latent-dependent (half of their hits are lost under shuffle) although the latent adds no accuracy
+  over R3 there; non-copy gain over R3 n.s. (+.0009). Larger latent-test numbers, but part of the dependence is on rows where the
+  latent does not help.
+- S − D: n.s. overall; S sig better on non-copy HR@10 (+.0063). S is the lead recipe. Both single seed; replication pending.
+
+
+## 2026-11-24 MovieLens MW-R-H-CR 376544 and same-motive + history-matched InfoNCE negatives 376838 DONE — neither meets the criterion
+
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | hist/top-10 | copy HR@10 | non-copy HR@10 | shuffle HR@10 (copy / non-copy) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| R3 371446 | .0249 | .0556 | .0806 | .1335 | .0425 | .0527 | .0698 | .48 | .4061 | .0426 | −.0027 |
+| same-motive 374774 | .0261 | .0531 | .0761 | .1207 | .0416 | .0509 | .0652 | .90 | .3424 | .0468 | −.0627 |
+| MW-R-H-CR 376544 | .0249 | .0552 | .0818 | .1265 | .0423 | .0532 | .0677 | .57 | .3617 | .0481 | −.0507 (−.1452 / −.0192) |
+| motive + HN-neg 376838 | .0241 | .0532 | .0729 | .1155 | .0406 | .0486 | .0623 | .91 | .3310 | .0437 | −.0413 (−.1149 / −.0168) |
+| MW-R-H-S 375420 | .0267 | .0616 | .0887 | .1380 | .0467 | .0578 | .0737 | .41 | .4026 | .0498 | −.0381 |
+
+- CR vs R3: = at @1–@5 (n.s.), HR@10 −.0070 (.015/.006), NDCG@10 −.0021 (.17/.15). copy −.0445 sig, non-copy +.0055 (.034/.041), HR@5 +.0060 sig.
+  CR vs MW-R-H: all cutoffs sig better. CR vs same-motive: HR@5 +.0057 (.017/.025), HR@10 +.0058 (.037/.038), NDCG n.s.
+  S − CR: HR@3 +.0064, HR@5 +.0070, HR@10 +.0115, NDCG@10 +.0060, all sig. Latent tests CR (p < 5e-4): mask −.0382, mean −.0437, shuffle −.0507.
+  Hinge satisfied early (margin_loss .003 from epoch 1.5). The same-user term did not make CR worse than same-motive here (feared from Toys 358547).
+- HN-neg vs R3: HR@5 −.0077, HR@10 −.0180, NDCG@5 −.0041, NDCG@10 −.0075, all sig. vs same-motive 374774: n.s. (HR@10 −.0052, .06/.078; NDCG@10 −.0030, .049/.06).
+  Latent tests (p < 5e-4): mask −.0333, mean −.0405, shuffle −.0413.
+  Training: InfoNCE did NOT separate the history-matched negatives: cos_hard ≥ cos_cross throughout (ep 2.5: positives .619, hard .668,
+  random .579; 374774 at ep 2.5: positives .356, random .229), motive_loss 3.03 → 2.78 (374774: 2.85 → 2.24); all similarities rose
+  together (projection space contracting). ~14.8 hard negatives per anchor were used.
+  Reading: a latent computed from the history cannot tell "same last movie, different next" rows apart well enough; adding those
+  negatives degraded the InfoNCE rather than sharpening it. Option 1 is negative. (Probe 376840 pending on 376839.)
+- 376839 (weight 0.3) still running; its hinge is NOT satisfied in epochs 1.5–3 (margin_loss ≈ .195) → expect weak latent use.
+
+
+## 2026-11-24 MovieLens same-motive with InfoNCE weight 0.3 (376839) DONE — worse, and not a clean test of the weight
+
+HR@1/3/5/10 .0226/.0503/.0710/.1127, NDCG@3/5/10 .0384/.0469/.0603; hist/top-10 .80.
+- vs R3: HR@3 −.0053, HR@5 −.0095, HR@10 −.0209, NDCG@5 −.0058, NDCG@10 −.0094, all sig. copy_row .3117 (−.0945), non-copy .0463 (+.0037 n.s.; HR@5 +.0043 sig).
+- vs same-motive weight 0.1 (374774): HR@1 −.0034, HR@5 −.0050, HR@10 −.0081, NDCG@10 −.0049, all sig.
+- Latent tests: mask HR@10 −.0059 (.004/.002), mean −.0082, shuffle −.0096 (p < 5e-4) — significant but 6x smaller than 374774 (−.0627).
+- Training: hinge NEVER satisfied (margin_loss .202 / .206 / .199 / .197 / .195 / .194 per half epoch); it was already unsatisfied in
+  epoch 0–1, BEFORE the InfoNCE turns on and where the recipe is identical to 374774 (there .200 / .197 then .109 in epoch 1–1.5).
+  ce_loss spiked to 1.64 in epoch 0.5–1.0 (374774: .655). So the run diverged from 374774 before the weight could matter
+  (runs are not deterministic) → the weak latent use cannot be attributed to the weight alone. InfoNCE itself separated
+  positives from negatives (cos .400 vs .289 at the end).
+Conclusion for the pair (user's options 1 and 2): neither history-matched negatives (376838) nor a stronger InfoNCE (376839) improves
+on same-motive 374774; 376839 is confounded by an unsatisfied hinge from epoch 1.
+
+## 2026-11-24 probe 376840 DONE (same-motive + HN-neg 376838, same-motive weight 0.3 376839; first 20,000 train rows)
+
+| model | gap_history | gap_next | next / history | cross-user same-item gap |
+|---|---|---|---|---|
+| MW-R-H 369532 | +.061 | +.025 | .41 | |
+| same-motive w0.1 374774 | +.318 | +.151 | .48 | +.159 |
+| + HN-neg 376838 | +.225 | +.102 | .45 | +.108 |
+| weight 0.3 376839 | +.432 | +.168 | .39 | +.176 |
+
+Neither follow-up raised the next / history ratio above 374774 (.48). HN-neg lowered both gaps (history −29%, next −33%); weight 0.3 raised both, history more. gap_next < gap_history in every model so far. All MovieLens jobs of this batch are finished.
+- 2026-11-23 corrected probe 377036 (toys_probe2, code 0bbb59bc): MW-R-H sigma_rel 1.0: noise/‖r‖ 1.35, distinct 1.52/12, P(≥2) .36, hit .303 (clean .301), mean dLL −.137 (std .071), combined reward std .143, 80% of rows > .01 (non-copy: distinct 1.62, sd .107); sigma_rel ≤0.5: sd ≤ .046. MW sigma_rel 1.0: sd .287 but hit .289→.209. Concerns: signal mostly noise cost (mean dLL −.137), perverse incentive (robustness to noise = ignoring r), SASRec in-sample. User said go ahead.
+- **Trainer built** `src/grpo_attention_tuning/hilar_grpo.py` + `scripts/hilar_grpo.sbatch`, commit 55908a7e (frozen `output_dir/hilar_grpo_code/code_55908a7e`): policy N(mu(H_u), σ²I), σ = 1.0·D/√d (D = median inter-user ‖mu_i−mu_j‖ on the start model), antithetic G=12, batch 8 users, greedy constrained decode per rollout; R = hit + .5 prefix + .5 F1 + .1·SASRec z(clip ±3) + dLL (clip ±1, vs noise-free mu); group-normalised advantage; loss −mean A log N(r_g; mu_θ, σ²) + β‖mu_θ−mu_ref‖²/(2σ²), β .05, lr 5e-6, attention fp32 only, one update per batch; logs antisym/sym reward std of the ± pairs (first-order signal); resume.pt every 500 steps. SASRec = Cornac Toys 2026-11-19 pkl (in-sample on train). Submitted via JobManager: smoke toys_mwrh_hilar_smoke → full toys_mwrh_hilar (ids pending).
+- Submitted 2026-11-23 via JobManager: HiLaR GRPO smoke 378363 (toys_mwrh_hilar_smoke) → full 378364 (toys_mwrh_hilar, afterok). JobManager declines to delete the smoke checkpoint (only with its own user OK); I delete it myself after checking the smoke (user asked 11-23 to remove smoke ckpts from scratch).
+- Smoke 378363 DONE (2m07s): 8 steps OK, antisym/sym reward std ratio ~1.4-1.7, sigma 5.37, SASRec 6241/6269 titles mapped; smoke ranking (64 rows) hook check only. Smoke checkpoint dir deleted 2026-11-24 (user OK). Full 378364 (toys_mwrh_hilar) RUNNING on alarm, ~15-18 h train + eval.
+
+### Result: rank GRPO arm A (target injected into no-hit groups), Toys, 374798 DONE 2026-11-24 (29 h 34 m)
+Compare script `analysis/results/rank_grpo_AC/compare.py` (+ output.txt; paired bootstrap + t-test, n = 6,738).
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|
+| MW-R-H 365504 (start) | .0383 | .0681 | .0828 | .1086 | .0615 | .0698 |
+| MW-R-H + beam GRPO 368198 | .0381 | .0681 | .0827 | .1089 | .0615 | .0700 |
+| R3_ori | .0377 | .0607 | .0778 | .1023 | .0580 | .0659 |
+| **A 374798** | .0370 | .0652 | .0795 | .1043 | .0594 | .0674 |
+- A vs start: SIG WORSE at @3/@5/@10 (HR@10 −.0043 [−.0071,−.0013] p .003; NDCG@10 −.0024, p .002; HR@1 n.s.). vs 368198 same. vs R3_ori: n.s. (HR@10 +.0021, p .49).
+- Split: copy HR@10 −.0132 sig vs start; non-copy −.0030 sig vs start (still +.0053 vs R3_ori, borderline p .05).
+- Interventions: raw HR@10 .1037; mask −.0252, mean −.0252, shuffle −.0260 (all sig) → latent still used (start ≈ −.030 to −.035).
+- List quality: A DOES move the model (top-1 changed on 28% of rows vs 13% for 368198) and improves list diversity slightly (history slots .102→.088, distinct brands 3.61→3.88, top-1 brand share .44→.40) but hits fall (732→703), so accuracy is lost faster than waste is removed. Training end: group hit .25, injected .75, KL .012.
+- Reading: hindsight injection gives a real gradient (unlike beam-only GRPO) but acts like SFT on memorised train targets with lr 3e-5; it overfits. Confound: lr 3e-5 / G=16 differ from 368198. C (374799) and A+C (374800) still running.
+
+### Result: rank GRPO arm C (history −0.5 / redundant-beam −0.25 penalties, no target injection), Toys, 374799 DONE 2026-11-24 (29 h 48 m)
+HR@1/3/5/10 .0315 / .0586 / .0723 / .0959; NDCG@3/5/10 .0471 / .0527 / .0603 (raw interventions run: .0956 / .0600).
+- vs start MW-R-H: SIG WORSE at every cutoff (HR@10 −.0128 [−.0169,−.0086], NDCG@10 −.0095 [−.0118,−.0071], HR@1 −.0068). vs R3_ori: SIG WORSE (HR@10 −.0064 [−.0125,−.0004] p .04; NDCG@10 −.0056 p .003).
+- Split: copy HR@10 .4581 (−.0682 vs start, −.0754 vs R3_ori, sig); non-copy .0446 (−.0049 vs start sig; +.0034 vs R3_ori n.s.).
+- Interventions: mask −.0171, mean −.0295, shuffle −.0251 (sig) → latent used.
+- List quality: history slots .102→.065, distinct brands 3.61→4.10, but hits 732→646, top-1 changed on 51% of rows. The redundancy penalty (same brand + title Jaccard ≥ .5) penalises exactly the same-product variants that copy-row targets are → copy recall collapses. Design flaw of the dup term, not only over-training. Training end: KL .048, hist_slot_frac .031, dup_slot_frac .086.
+- 2026-11-24 scratch cleanup (user OK): deleted checkpoints Toys_and_Games_R3_grpo_toys_mwrh_rankA, ..._rankC (6 GB each) and Toys_and_Games_R3exact_toys_r3ori_exact (3 GB) = 15 GB; results/predictions kept in output_dir/grpo_stage2/<tag> and output_dir/r3_exact_grpo/<tag>. rankAC (running) and hilar (running) untouched.
+
+### Result: rank GRPO arm A+C, Toys, 374800 DONE 2026-11-24 (29 h 51 m) — all three arms done
+HR@1/3/5/10 .0356 / .0631 / .0803 / .1033; NDCG@3/5/10 .0516 / .0587 / .0660.
+- vs start MW-R-H: SIG WORSE except HR@5 (HR@10 −.0053 [−.0086,−.0022] p .001; NDCG@10 −.0037 [−.0054,−.0021]; HR@5 −.0025 p .065 / pt .047). vs R3_ori: n.s. everywhere (HR@10 +.0010 p .74; NDCG@10 +.0002).
+- Split: copy HR@10 .4952 (−.0311 vs start sig; −.0383 vs R3_ori sig); non-copy .0478 (−.0017 vs start n.s.; +.0066 vs R3_ori sig).
+- Interventions: mask −.0242, mean −.0255, shuffle −.0261 (sig) → latent used. List quality: history slots .077, brands 3.99, hits 696, top-1 changed on 37% of rows. KL .019.
+- Summary of arms (HR@10 / NDCG@10): start .1086/.0698; A .1043/.0674; A+C .1033/.0660; C .0959/.0603; beam-only 368198 .1089/.0700; R3_ori .1023/.0659. Ordering by damage tracks the redundancy penalty (copy-row loss: A −.013, A+C −.031, C −.068); the history penalty and hindsight injection alone do not help ranking. None meets "≥ R3 AND beats start".
+
+### Result (ranking): HiLaR-style GRPO on MW-R-H, Toys, 378364 (training DONE 2026-11-24, 11.6 h, 6,737 steps; interventions still running)
+HR@1/3/5/10 .0365 / .0650 / .0812 / .1077; NDCG@3/5/10 .0531 / .0597 / .0683 (compare script `analysis/results/rank_grpo_AC/compare.py`, scratch final_result.json).
+- vs start MW-R-H: no gain. HR@10 −.0009 [−.0033,+.0013] p .50 n.s.; HR@3 −.0031 sig; NDCG@3/5/10 −.0023/−.0018/−.0015 sig (small). vs R3_ori: n.s. at all cutoffs (HR@10 +.0055 [+.0000,+.0113] p .053; NDCG@10 +.0024 p .17).
+- Split: copy HR@10 .5239 (−.0024 n.s. vs start; NDCG@10 −.0073 sig); non-copy .0488 (−.0007 n.s. vs start; +.0076 sig vs R3_ori). List quality unchanged from start (history slots .108, brands 3.68, same top-1 as start 82%).
+- Training curve: reward .450 → .554; dLL −.115 → −.014 (accounts for the whole gain), noisy hit .141 → .151, SASRec z flat 2.10 → 2.06, reward std .140 → .102, antisym/sym ≈ 1.4 stable, drift ‖μ−μ_ref‖ 0.4 → 16. Interventions (mask/mean/shuffle) pending: they decide whether r got ignored.
+
+## 2026-11-24 — Rank GRPO removed (user instruction)
+User: ignore the 368198 recipe; "R3's GRPO" = the original R3 code. Removed rank_grpo.py, the rank/A/C options in train_noise_grpo.py + grpo_stage2.sbatch, and the Test A script (grad_coherence.py/.sbatch) — commit 6284ef8b; all recoverable from git (55908a7e and earlier). HiLaR probe/trainer made self-contained (running job 378364 uses frozen code_55908a7e, unaffected). Results/logs of 368198, A, C, A+C and Test A stay in this log and analysis/results as history, but are not to be used as a method. The exact R3 recipe on MW-R-H 365504 is still to be run.
+
+### Check: does R3's own stage 2 help? R3_ori runs (user: "we've trained R3 on Toys and CDs for a few seeds, use that"), 2026-11-24
+`analysis/results/r3_ori_stage2_check/compare.py` (+ output.txt). R3_ori `output_dir/{Toys,CDs}/{.,run2,run3}/`: stage 1 = `latent`, stage 2 = `nomul_attn_lr_5e-5` (attention_grpo.sh recipe; Toys run 1 also lr 1e-5, 1e-4). Paired bootstrap + t-test over all test rows, stage 2 − stage 1, HR@10 (NDCG@10):
+- Toys run1 lr 5e-5: +.0033 [+.0007,+.0058] sig (+.0015 sig); lr 1e-5: −.0004 n.s. (+.0001); lr 1e-4: +.0046 sig (+.0012 n.s.). Toys run2 lr 5e-5: COLLAPSED (HR@10 .0024; −.1027). Toys run3: +.0009 n.s. (+.0013 n.s.; NDCG@5 +.0017 sig).
+- CDs run1: +.0106 [+.0067,+.0146] sig (+.0087 sig); run2: +.0002 n.s. (−.0000); run3: −.0016 n.s. (−.0010 n.s.; HR@5 −.0019 sig). Mean of the 3 CDs runs: HR@10 +.0030 [+.0016,+.0045] sig, NDCG@10 +.0026 sig, driven by run1.
+- Stage-1 run-to-run spread on Toys HR@10 .1023 / .1051 / .1082 (~±.003, as large as the stage-2 gains).
+- Reading: R3's own stage 2 gives a small, non-reproducible gain (one big CDs run, otherwise ≈0), one collapse in 6 lr-5e-5 runs; at lr 1e-5 it is a no-op, which matches our exact replica 371452 (−.0010 n.s.) — replication confirmed. The paper's RL ablation (Toys +~4%, CDs +~15% HR@10) is one run per cell.
+
+## 2026-11-24 — R3's exact stage-2 GRPO on MW-R-H (user request)
+Question: can R3's own GRPO (original code, unmodified) help MW-R-H? R3_ori's own runs: small non-reproducible gain at lr 5e-5 (CDs +.0106 / +.0002 / −.0016; Toys +.0033 / collapse / +.0009), no-op at lr 1e-5.
+Setup: code `output_dir/r3_exact_grpo_code/code_c558b44` (R3_ori HEAD), script copy `output_dir/r3_exact_grpo_code/r3_exact_grpo.sbatch` (09716616), ANALYSIS_CODE `grpo_stage2_code/code_1a2053ff`, base MW-R-H 365504 (read-only), 2×A40, G 8, noise N(0,1.5²) on r with the first copy noise-free, −PPL reward, beta 0, batch 256, micro 8, seed 42, 1 epoch. Arms: lr 5e-5 (R3's launch-script lr, tag toys_mwrh_r3exact_lr5e-5) and lr 1e-5 (tag toys_mwrh_r3exact_lr1e-5); smoke toys_mwrh_r3exact_smoke first (weights load check). Submitted via JobManager (ids pending). Compare against MW-R-H 365504 and R3_ori (+ R3_ori's own stage 2) with paired bootstrap + t-test, copy split, mask/mean/shuffle interventions.
+- Submitted via JobManager 2026-11-24: smoke 379966 (toys_mwrh_r3exact_smoke, lr 5e-5) → full A 379967 (lr 5e-5) and full B 379968 (lr 1e-5), both afterok:379966; 2×A40 each, 72 h. Smoke pending on Priority.
+
+### Result (final): HiLaR-style GRPO on MW-R-H, Toys, 378364 DONE 2026-11-24 (15 h 59 m incl. interventions)
+Ranking as above (HR@10 .1077 / NDCG@10 .0683: = start n.s. at HR@10, NDCG@3/5/10 slightly lower sig; = R3_ori n.s.). Interventions (raw HR@10 .1082 / NDCG@10 .0686): mask −.0297 [−.0352,−.0240], mean −.0294 [−.0349,−.0240], shuffle_user −.0343 [−.0396,−.0286] (all sig) → latent content STILL USED, same size as the start (−.030 to −.035): the feared "robust to noise = ignores r" did not happen. Net: stable, latent kept, but no ranking gain. Checkpoint (3.0 GB) on scratch Toys_and_Games_R3_grpo_toys_mwrh_hilar (deletion pending user OK).
+- 2026-11-24 20:2x: hady A40 pool unavailable (album drained "SlurmdSpoolDir is full", alarm full) → user: move to researchshort. Asked JobManager to cancel 379966/379967/379968 and resubmit the same chain on researchshort (--qos research-1-qos, 48 h, a40, 2 GPUs). New ids pending.
+- Moved to researchshort 2026-11-24: old 379966/7/8 cancelled; new chain smoke 380282 → full A 380283 (lr 5e-5) and full B 380284 (lr 1e-5), afterok:380282; 48 h, research-1-qos, a40 ×2. Note: researchshort jobs on alarm/album can be preempted by hady jobs (JobManager moves a job to hady after 2 preemptions).
+- Smoke 380282 DONE 2026-11-25 (2m06s, exit 0): original R3 code loads and trains on MW-R-H 365504; smoke checkpoint dir (5.9 GB) deleted (standing user instruction to remove smoke ckpts). Full A 380283 (lr 5e-5) and B 380284 (lr 1e-5) pending on Priority (researchshort).
+- 2026-11-25: JobManager (its user request) moved full runs 380283 (lr 5e-5) and 380284 (lr 1e-5) from researchshort to hadylauwresearch (a40, 48 h; no requeue risk). Hady a40 full; estimated starts: 380283 today 19:40, 380284 30 Nov 13:06.
+
+### Result: R3's exact stage-2 GRPO (original code) on MW-R-H 365504, Toys — lr 5e-5 (380283, DONE 11-25, 6 h 59 m) and lr 1e-5 (380284, ranking done)
+Script `analysis/results/r3_exact_mwrh/compare.py` (+ output.txt); paired bootstrap + t-test, n = 6,738.
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|
+| MW-R-H 365504 (start) | .0383 | .0681 | .0828 | .1086 | .0615 | .0698 |
+| R3_ori stage 1 / stage 2 lr 5e-5 | .0377 / .0380 | .0607 / .0628 | .0778 / .0784 | .1023 / .1055 | .0580 / .0586 | .0659 / .0674 |
+| **R3 exact, lr 5e-5** | .0197 | .0383 | .0484 | **.0701** | .0345 | .0415 |
+| **R3 exact, lr 1e-5** | .0380 | .0689 | .0828 | **.1095** | .0614 | .0701 |
+- lr 5e-5: COLLAPSE. Vs start HR@10 −.0386 [−.0438,−.0335], NDCG@10 −.0283, all cutoffs sig; copy HR@10 .346 (−.181), non-copy .0310 (−.0185). Latent use destroyed: raw .0699; mask +.0086 (masking HELPS), mean −.0101, shuffle −.0065. Top-1 changed on 55% of rows, distinct brands 2.79, history slots .067. Training: grad_norm grew from .03–.05 to 4.8 (epoch .36) → unstable, then loss ≈ −.03; clip_ratio 0. Same failure mode as R3_ori Toys run 2 (collapse at 5e-5), here on every seed-42 run.
+- lr 1e-5: NO-OP. HR@10 +.0009 [−.0003,+.0022] p .16; all cutoffs n.s. vs start; same top-1 on 93% of rows; copy +.0024 n.s., non-copy +.0007 n.s. Vs R3_ori stage 1: sig better (HR@10 +.0073) — the start already was. Interventions for lr 1e-5 still running.
+- Conclusion: R3's own GRPO does not help MW-R-H: harmless but inert at lr 1e-5, destructive at lr 5e-5 (the lr at which R3_ori sometimes gains).
+
+## 2026-11-25 Which rows benefit from R3's GRPO (R3_ori) vs MW-R-H
+Script/output: analysis/results/grpo_row_types/{analyze.py,output.txt} (Toys test n=6,738, copy 836).
+- R3_ori stage1->stage2 (lr 5e-5): run1 +.0032 HR@10 (49 gained / 27 lost rows), run3 +.0009 (49/43), run2 collapsed (-.103). Top-1 changes on 16-24% of rows (MW-R-H lr1e-5: 7%).
+- Run1 gain: 41% copy rows (+.0108), 59% non-copy, concentrated in high-train-frequency targets (+.0063; low/mid ~0). Run3: copy -.0072, non-copy +.0020 spread over tf low/mid. No consistent row type across seeds.
+- R3_ori s2 gains are mostly rows MW-R-H start already hits: 39-49% of gained rows (slack rows recovered 10-11% vs 0.5% for others). GRPO moves R3_ori toward MW-R-H (.1055/.1091 ~ .1086), not past it.
+- MW-R-H: lr1e-5 only 18 rows change status (12/6); lr5e-5 loses 301 (copy 165, tf-high non-copy 82), history slots .102->.067, brands 3.61->2.79.
+
+
+## 2026-11-25 MW-R-H-S (swapped-pass CE) on CDs / Toys / Steam SUBMITTED
+
+Code bd018410, recipe = MovieLens 375420 (COPY_SWAP_W=1, rank weights, margin 0.2, WIDER 0.1, 3 epochs, base Qwen2.5-1.5B, hady A40, default seed). Jobs: CDs 382418, Toys 382419, Steam 382420 (pending). Outputs <Dataset>_margin_0.2_wider_0.1_refweight_nolatent_rank_swapce. Exclude-history evals postponed.
+
+UPDATE 2026-11-25: moved to researchshort at user request. hady jobs 382418/382419/382420 cancelled (pending, nothing written); resubmitted as CDs 382429, Toys 382430, Steam 382431 (research-1-qos, a40|l40s|a100|l40, 2 days, requeue).
+UPDATE 2026-11-25: GPU list of 382429/382430/382431 widened in place to a40|l40s|a100|l40|h100|h100nvl (scontrol update by JobManager; same job IDs). Estimated starts 26 Nov 03:00 / 03:29 / 16:07 (CDs / Toys / Steam).
+
+
+## 2026-11-26 CDs MW-R-H-S (swapped-pass CE, 382429) DONE — best ranking on CDs, but latent NOT used
+
+Code bd018410, default seed, analog A100, 4h54m. n = 6,157 (418 copy rows). Normal decoding:
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | copy HR@10 | non-copy HR@10 |
+|---|---|---|---|---|---|---|---|---|---|
+| R3_ori | .0494 | .0710 | .0819 | .0989 | .0617 | .0662 | .0717 | .5766 | .0641 |
+| MW-R-H 366023 | .0555 | .0801 | .0906 | .1121 | .0696 | .0739 | .0808 | .6244 | .0748 |
+| MW-R-H-S 382429 | .0607 | .0866 | .1002 | .1215 | .0757 | .0813 | .0882 | .6196 | .0852 |
+- S − R3_ori: all cutoffs sig (t-test and bootstrap): HR@1 +.0114, HR@3 +.0156, HR@5 +.0184, HR@10 +.0226, NDCG@10 +.0165 (p_t < 1e-6). copy +.0431, non-copy +.0211.
+- S − MW-R-H: all cutoffs sig: HR@5 +.0096 (p_t 1.3e-4), HR@10 +.0094 (8e-4), NDCG@10 +.0074 (6e-5); copy −.0048, non-copy +.0105.
+- Latent tests (raw − intervention, HR@10): mask +.0000, mean −.0010, shuffle −.0021, ALL n.s. (p .23–1) → latent content UNUSED. MW-R-H 366023 had shuffle −.017 (used). On CDs the ranking gain comes without latent use, so the goal (latent used AND ranking ≥ R3) is not met on this seed. Single seed.
+
+## 2026-11-26 Exact R3 stage-2 GRPO on MW-R-H 365504, 5 seeds at lr 1e-5 (42 + 1..4; jobs 380284, 382413-382416, ranking only)
+Script: analysis/results/grpo_row_types/seeds.py -> seeds_output.txt. HR@10 .1095/.1095/.1083/.1091/.1089 vs start .1086; NDCG@10 .0701/.0700/.0697/.0700/.0698 vs .0698.
+No seed differs from the start at any cutoff (each p>.13); mean of 5 seeds HR@10 +.0004 [-.0005,+.0014], NDCG@10 +.0001 (n.s.). Seed spread .0012 HR@10. Conclusion: R3's GRPO at lr 1e-5 is a seed-independent no-op on MW-R-H; lr 5e-5 collapses. Middle lr not tried.
+
+## 2026-11-26 Is lr the factor? weight drift of the pooling attention under R3 stage-2 GRPO (R3_ori vs MW-R-H)
+Scripts: analysis/results/grpo_row_types/{weight_drift,drift_cos,drift_r3ori}.py (+ *_output.txt). Trained tensors = the 6 pooling-attention tensors (query/key/value W,b), ||W||≈54 in both models; decoder unchanged bit-for-bit. (First weight_drift.py used all 34 attention.* keys incl. frozen ones, so its "rel" values .1%/2% are understated; correct: below.)
+- MW-R-H 365504: lr1e-5 ||Δ|| .20-.25 (0.4%), 5 runs mutually aligned cos .53-.63; lr5e-5 ||Δ|| 4.44 (8.2%, collapsed), cos with lr1e-5 update .06.
+- R3_ori Toys run1 (same stage 1): lr1e-5 .55 (1.0%), 5e-5 2.15 (4.0%), 1e-4 4.41 (8.3%); cos(1e-5,5e-5) .16, (5e-5,1e-4) .52. lr5e-5: Toys run2 5.99 (collapsed), run3 3.57; CDs 4.41/1.86/3.95 (all fine, CDs run1 +.0106).
+- Drift size alone does not separate gain from collapse (CDs run1 4.41 fine vs MW-R-H 4.44 collapsed): the decoder's sensitivity to r does.
+
+CLEANUP 2026-11-26 (user OK): deleted latent/model.safetensors (and the cr checkpoint-1905) of MovieLens runs rank (369532), rank_cr, rank_motive, rank_motive_hn, rank_motive_w03, rank_hardneg, marginwarm, nc_refq1, nc_refq1_ep2 on scratch (~38 GB); results/configs/trainer_state kept. Kept: swapce, distill, R3 bases, Movielens_R3_no_latent_ref.
+
+
+## 2026-11-26 Toys MW-R-H-S (swapped-pass CE, 382430) DONE — ranking above R3, latent essentially unused
+
+Code bd018410, default seed, sodag A40, 9h31m. n = 6,738 (905 copy rows). Normal decoding:
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | copy HR@10 | non-copy HR@10 |
+|---|---|---|---|---|---|---|---|---|---|
+| plain R3 (A) | .0367 | .0625 | .0795 | .1052 | .0514 | .0584 | .0667 | .5127 | .0420 |
+| MW-R-H 365504 | .0383 | .0681 | .0828 | .1086 | .0554 | .0615 | .0698 | .5039 | .0473 |
+| MW-R-H s1 A40 368189 | .0404 | .0647 | .0804 | .1088 | .0544 | .0608 | .0700 | .5105 | .0465 |
+| MW-R-H s2 A40 366001 | .0334 | .0574 | .0717 | .0944 | .0471 | .0530 | .0603 | .4630 | .0372 |
+| MW-R-H-S 382430 | .0416 | .0706 | .0856 | .1095 | .0585 | .0648 | .0723 | .5050 | .0482 |
+- S − R3 (A): HR@1 +.0049 (p_t .011), HR@3 +.0082 (4e-4), HR@5 +.0061 (.015), NDCG@3 +.0071, NDCG@5 +.0063, NDCG@10 +.0056 (7e-4) all sig (t and bootstrap); HR@10 +.0043 n.s. (.12/.11). copy −.0077, non-copy +.0062.
+- S − MW-R-H 365504: all n.s. except NDCG@5 +.0033 (.041/.050); HR@10 +.0009. vs seed 1 (368189): HR@3 +.0059, HR@5 +.0052, NDCG@3/@5 sig, HR@10 n.s. vs failed seed 2 (366001): all cutoffs sig (HR@10 +.0151, NDCG@10 +.0120), copy +.0420.
+- Latent tests (raw − intervention, HR@10): mask +.0006, mean +.0016, shuffle +.0027 all n.s.; NDCG@10 shuffle +.0032 sig (p .005/.006), mask/mean n.s. → latent barely used (MW-R-H 365504 shuffle −.035, seed 1 −.051). So like CDs, S ≥ R3 but the latent-use goal is not met on this seed. Single seed.
+
+
+## 2026-11-26 Why MW-R-H-S ranks well on Toys / CDs without using the latent (training-log check, no new runs)
+
+Per-epoch means from the run logs (margin_loss = weighted hinge, 0.2 = no gap, 0 = satisfied; copy_swap_ce = CE on the swapped-latent pass):
+| run | hinge ep 0–1 | ep 1.5–2 | ep 2.5–3 | copy_swap_ce ep 2.5–3 | shuffle HR@10 |
+|---|---|---|---|---|---|
+| Toys MW-R-H 365504 | .200 | .088 | .020 | – | −.035 (used) |
+| Toys S 382430 | .175 | .139 | .093 | .172 | +.003 n.s. |
+| CDs S 382429 | .200 | .191 | .175 | .185 | −.002 n.s. |
+| MovieLens S 375420 | .199 | .094 | .060 | .219 | −.038 (used) |
+- In S the hinge (own latent must beat another user's latent by margin 0.2) and the swapped-pass CE (predict the target well with another user's latent, weight 1 − w) pull the same swapped-pass loss in opposite directions. On CDs and Toys the swapped CE falls to .17–.19 (the decoder predicts well with the WRONG latent) and the hinge stays largely unsatisfied (CDs .175, Toys .093 vs .020 in MW-R-H) → decoder learns to read the history and ignore the latent. On MovieLens the hinge is satisfied to .060 and the latent is used.
+- Reading: the ranking gain on Toys/CDs comes from the decoder keeping/strengthening its history-only reading (S acts as a regulariser: swapped pass = history-only training signal), not from latent content. Correlational (logs); not tested causally.
+
+DECISION 2026-11-26 (user): swapped-pass (MW-R-H-S) design does not align with the objective (on CDs/Toys it ranks well but the latent is unused, because the swapped-pass CE counteracts the hinge). Steam swapce 382431 cancelled via JobManager; CDs 382429 and Toys 382430 results kept; no further S runs.
+
+
+## 2026-11-26 WIDER / hinge trajectories: Steam vs Toys vs CDs vs MovieLens (MW-R-H, training logs)
+
+WIDER penalty = mean cos² between each user's pooled latent and the stop-gradient EMA shared direction across users (src/latent/wider_reg.py; 1 = all users' latents identical). Hinge: 0.2 = no own-vs-other gap.
+| epochs | Steam 369662 | Toys 365504 | CDs 366023 | MovieLens 369532 |
+|---|---|---|---|---|
+| WIDER 0–.25 | .724 | .444 | .575 | .771 |
+| .25–.5 | .957 | .067 | .236 | .490 |
+| .5–1 | 1.000 | .051 | .074 | .096 |
+| 1–1.5 | .995 | .068 | .108 | .171 |
+| 1.5–2 | .991 | .149 | .352 | .250 |
+| 2–2.5 | 1.000 | .087 | .230 | .259 |
+| 2.5–3 | 1.000 | .069 | .162 | .132 |
+| hinge 2.5–3 | .198 | .020 | .062 | .055 |
+- Steam: latents collapse to one direction by epoch 0.5 and stay there (final mean cos to shared direction 1.0000, |ema| .9999); hinge stays .20 → no gap; shuffle n.s. Toys/CDs/MovieLens: WIDER drops to .05–.10 by epoch 1 (diverse latents), hinge falls to .02–.06 by epoch 3, latent used.
+- Likely stuck fixed point (inference from the code): at z = q the WIDER gradient (I − zzᵀ)q/|r| is exactly zero, so once the Steam latents are identical the regulariser (weight 0.1) cannot pull them apart; the hinge cannot either, since swapping identical latents changes nothing.
+- Steam is the only dataset whose latents collapse in the first half epoch; not yet checked why (Steam CE at start 2.8 vs ~1.8 Toys; items 4,419; text/titles).
+
+
+## 2026-11-26 Steam MW-R-H first steps (log check, no new run): the latent collapses at steps ~150–200, not in the first 50
+
+Source: run logs 369662 (Steam) and 365504 (Toys); 643 / 421 steps per epoch; lr warm-up to 3e-4 by step ~20.
+- Steps 1–50: no collapse on Steam. WIDER .64 (Toys .59), hinge .24 → .20, grad_norm 203 → 5–10 (Toys 87 → 3–5). Both start with latents near one direction (mean cos to shared direction .91 Steam, .95 Toys at call 1).
+- Divergence from step ~50: Toys WIDER .32 (51–100) → .065 (101–150) and stays .04–.09 until the hinge starts to be satisfied (steps 600+, hinge .14 → .03). Steam WIDER .73 → .76 → **.998 at steps 151–200** and ≈1.0 for most of the run; hinge ≈ .20 throughout.
+- The collapse coincides with an instability on Steam: grad_norm rises 21 → 39 → 80 → 58 (steps 51–200; Toys 21 → ~6 in the same window), CE spikes 1.9 → 2.6 → **4.4** at steps 151–200 (Toys 1.9 → 1.2), then recovers to 1.7 by step 300 while WIDER stays ≈1.0.
+- Reading (inference from logs): at peak lr 3e-4 a loss/gradient spike on Steam pushes the pooled latents onto one direction; the WIDER gradient is zero at z = q (see wider_reg.py) so it cannot undo it, and the hinge cannot either. Not yet shown which comes first (spike or collapse) or that lr is the cause.
+
+## 2026-11-26 Steam collapse test SUBMITTED (code 66b61b81: LR and MAX_GRAD_NORM env)
+
+Steam MW-R-H recipe, default seed, researchshort a40|l40s|a100|l40, exclude alarm,album. 383065 = clip1.0 (explicit MAX_GRAD_NORM=1.0, lr 3e-4; reproduction check of 369662), 383066 = lr 1e-4, 383067 = lr 5e-5. Question: does lowering the peak lr stop the WIDER collapse at steps ~117-200 (369662: WIDER 1.0, hinge .20, shuffle n.s.)? Scratch at 445G of the 485G guard; JobManager may hold unstarted jobs.
+
+
+## 2026-11-26 Steam lr / clip runs: first ~410 of 1,929 steps (log check)
+
+383065 (clip1.0, lr 3e-4), 383066 (lr 1e-4), 383067 (lr 5e-5) vs 369662 (default). Mean per step block:
+| steps | WIDER 369662 / 383065 / 383066 / 383067 | CE (same order) | hinge (same order) |
+|---|---|---|---|
+| 101–150 | .761 / .072 / .508 / .432 | 2.55 / 1.85 / 1.65 / 1.69 | .201 / .197 / .198 / .191 |
+| 151–200 | **.998** / .062 / .774 / .360 | **4.36** / 1.61 / 1.44 / 1.45 | .198 / .200 / .209 / .197 |
+| 251–300 | .928 / .061 / .148 / .252 | 1.83 / 1.52 / 1.38 / 1.37 | .201 / .199 / .198 / .173 |
+| 301–400 | .967 / .058 / .043 / .607 | 1.71 / 1.40 / 1.28 / 1.29 | .203 / .201 / .202 / .204 |
+- The explicit-clip-1.0 run at the SAME lr 3e-4 does NOT collapse (WIDER .06 from step ~100, no CE spike, grad norm 4 → 2): the collapse of 369662 is therefore not reproduced by the same settings → likely a run-to-run (nondeterministic) instability, not the lr by itself (consistent with Toys seed 2 / seed-to-seed variance). Caveat: one run each, 410/1929 steps; a clip default other than 1.0 in 369662 is not excluded (not verified in the installed transformers).
+- lr 1e-4: a transient WIDER bump (.77 at 151–200, grad norm 48) that recovers to .04; lr 5e-5: WIDER stays higher (.25–.61), slower to separate.
+- Hinge still ≈ .20 in all (Toys' hinge only started falling after ~1.4 epochs = step ~600 of 1,263); the hinge/latent-use outcome needs the full runs.
+
+## 2026-11-26 SUMMARY: attempts to improve MW-R-H (Toys, start 365504: HR@10 .1086 / NDCG@10 .0698, latent used: shuffle −.035) with GRPO
+Goal: ranking ≥ start while keeping latent use. Test n=6,738 (copy rows 836 = 12.4%). Paired bootstrap + paired t over all rows. "R3's GRPO" = original R3_ori stage-2 code (noise N(0,1.5²) on r, G=8, reward −PPL, only the pooling attention trains).
+
+| # | attempt | HR@10 / NDCG@10 | vs start | latent | verdict |
+|---|---|---|---|---|---|
+| 1 | beam-only rank GRPO 368198 (own design, no noise; dropped as not R3's GRPO, code removed 2026-11-24) | .1089 / – | no-op | used | 13% top-1 changed, reward starved on memorised train rows |
+| 2 | rank GRPO + A (target injection into no-hit groups, G=16) | .1043 | −.0043 sig (p .003) | used | worse |
+| 3 | rank GRPO + C (history −.5, redundancy −.25 penalties) | .0959 | −.0127; copy rows −.068 | – | much worse |
+| 4 | rank GRPO + A+C | .1033 | worse (copy −.031) | – | worse |
+| 5 | HiLaR-style (arXiv 2607.27760) single-latent port: Gaussian policy on r (σ rel. to inter-user dist.), antithetic rollouts G=12, hit/prefix/F1/SASRec/dLL reward, latent KL β .05 | .1077 / .0683 | HR@10 = start; NDCG@3/5/10 slightly lower sig | used (shuffle −.034) | stable but no gain |
+| 6 | R3 exact stage 2, lr 5e-5 (380283) | .0701 / .0415 | −.0386 sig, all cutoffs | destroyed (mask +.009) | collapse, grad-norm .03→4.8 |
+| 7 | R3 exact, lr 1e-5, 5 seeds (42,1,2,3,4) | .1095/.1095/.1083/.1091/.1089; NDCG@10 .0697–.0701 | mean +.0004 [−.0005,+.0014], p .33; no seed sig | unchanged | seed-independent no-op (93% top-1 unchanged) |
+| 8 | R3 exact, lr 2e-5 (383021) | .0950 / .0544 | −.0137 [−.0175,−.0099], NDCG@10 −.0153 | – | already damaged |
+| 9 | R3 exact, lr 3e-5 (383022) | .0473 / .0240 | −.0613 | – | collapse (worse than 5e-5) |
+| 10 | R3 exact, lr 4e-5 (383023) | pending (restarted after preemption) | | | |
+
+Diagnostics:
+- Why rank GRPO fails: MW-R-H already sits at the non-copy level rank GRPO gives other models; beam-only GRPO barely moves the model; reward starved on memorised train rows (SASRec in-sample: train hit .835 vs test .100). Test A (gradient alignment) did not explain it.
+- Does R3's GRPO help R3_ori? Small, inconsistent: Toys +.0033 sig / collapse / +.0009 n.s.; CDs +.0106 sig / +.0002 / −.0016. Its gain is below R3_ori's own stage-1 seed spread (HR@10 .1023/.1051/.1082) and 39–49% of gained rows are rows MW-R-H already hits (moves R3_ori toward MW-R-H level, not past it). Row types (analysis/results/grpo_row_types/): no consistent row type across runs; run1 gain 41% copy + high-frequency non-copy targets, run3 non-copy low/mid. User's reading: gain is run noise; improvement of GRPO on R3_ori is not established.
+- Weight drift of the 6 pooling-attention tensors (decoder bit-identical): MW-R-H lr1e-5 ||Δ|| .20–.25 (0.4%), updates mutually aligned (cos .53–.63) but too small to change outputs; lr5e-5 4.44 (8.2%, cos .06 with the 1e-5 direction). R3_ori Toys run1 1e-5 .55 / 5e-5 2.15 / 1e-4 4.41; CDs 5e-5 1.9–4.4. Drift size does not separate gain from collapse (CDs run1 4.41 fine vs MW-R-H 4.44 collapsed): MW-R-H's decoder reads r, so noise on r + shifted attention changes its outputs; R3_ori's decoder mostly ignores r.
+- Grad norm (mean over run): lr1e-5 .07; 2e-5 .38; 3e-5 .24; 5e-5 .93 → not monotone with outcome.
+- Interventions lr1e-5 (seed 42): mask −.030, mean −.030, shuffle −.033 = start (−.0297/−.0294/−.0343); lr5e-5: mean −.010, shuffle −.007, mask +.009 (identical mask rows across runs are expected: mask zeroes r, decoder frozen).
+
+Conclusion: nothing met the goal. R3's GRPO on MW-R-H has a no-op regime (lr ≤1e-5, any seed) and a destructive regime (lr ≥2e-5); no useful lr in between (4e-5 pending). Own rank-GRPO variants and the HiLaR-style port are no-ops or worse. The only no-loss outcomes are runs where the model barely moves.
+Open (not run): extrapolating along the consistent lr1e-5 update direction (start + α·Δ), seeds at lr 2e-5.
+Files: analysis/results/{rank_grpo_AC,r3_exact_mwrh,r3_ori_stage2_check,grpo_row_types}/; checkpoints in scratch Toys_and_Games_R3exact_*, *_R3_grpo_* (deletion pending user approval).
+
+### 2026-11-26 Approach descriptions and full results (replaces the short table in the summary entry above)
+Start model: MW-R-H 365504 (Toys, single latent token, margin+WIDER+reference-weighted hinge). Test n=6,738. All approaches train only the pooling attention that produces r; decoder frozen.
+1. **Beam-only rank GRPO (368198, own design; dropped, code removed 2026-11-24).** One unperturbed r per row; the group is G beams from beam search; reward by rank of the target among the beams (hit/rank penalty); KL anchor to the start attention. No noise on r (so rollouts differ only in the beam), which is not what R3's GRPO does.
+2. **Rank GRPO + A (target injection).** Same as 1, but when no beam hits the target, the target is injected into the group as a hindsight sample (G=16), to avoid reward-starved groups.
+3. **Rank GRPO + C (penalties).** Same as 1 plus penalties: a beam that equals a history item gets -0.5, redundant beams (near-duplicates of another beam) get -0.25.
+4. **Rank GRPO + A+C.** Both.
+5. **HiLaR-style (arXiv 2607.27760) single-latent port.** Policy N(mu(history), sigma^2 I) on the single r (sigma = sigma_rel*D/sqrt(d), D = median inter-user distance of r, sigma_rel 1); antithetic +-eps rollouts, G=12, 8 users/update, lr 5e-6; dense reward = hit + 0.5 prefix + 0.5 F1 + 0.1 SASRec z-score (clip +-3) + target-likelihood gain (clip +-1); loss = -mean A*log N(r_g; mu_theta, sigma^2) + beta*||mu_theta-mu_ref||^2/(2 sigma^2), beta .05 latent KL to the start attention.
+6. **R3 exact stage 2 (original R3_ori code c558b44, lr 1e-5), 5 seeds (42,1,2,3,4).** Noise N(0,1.5^2) on r at the thought slot, 8 copies per row (first copy of the micro-batch noise-free), reward = -PPL of the target, advantage normalised by the noise-free mean, clipped surrogate (inactive, 1 iteration), beta 0; batch 256, micro 8, 1 epoch, 2 GPUs. Seed changes row order and noise only; start model identical.
+7. **R3 exact, lr search 2e-5 / 3e-5 / 4e-5 (seed 42).** Same recipe, higher lr.
+8. **R3 exact, lr 5e-5 (seed 42).** R3's own stage-2 lr.
+Reference rows: R3_ori stage 1 and its own stage 2 (lr 5e-5), Toys run 1.
+
+Full results (paired bootstrap p / paired t-test p vs start in brackets; script analysis/results/grpo_row_types/full_table.py):
+
+| run | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@1 | NDCG@3 | NDCG@5 | NDCG@10 | ΔHR@10 vs start (p bootstrap / p t) | ΔNDCG@10 vs start (p b / p t) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| start MW-R-H 365504 | 0.0383 | 0.0681 | 0.0828 | 0.1086 | 0.0383 | 0.0554 | 0.0615 | 0.0698 | — | — |
+| 1 beam-only rank GRPO 368198 | 0.0381 | 0.0681 | 0.0827 | 0.1089 | 0.0381 | 0.0555 | 0.0615 | 0.0700 | +0.0003 (0.800 / 0.768) | +0.0002 (0.647 / 0.656) |
+| 2 rank GRPO + A | 0.0370 | 0.0652 | 0.0795 | 0.1043 | 0.0370 | 0.0534 | 0.0594 | 0.0674 | -0.0043 (0.002 / 0.003) | -0.0024 (0.001 / 0.002) |
+| 3 rank GRPO + C | 0.0315 | 0.0586 | 0.0723 | 0.0959 | 0.0315 | 0.0471 | 0.0527 | 0.0603 | -0.0128 (0.000 / 0.000) | -0.0095 (0.000 / 0.000) |
+| 4 rank GRPO + A+C | 0.0356 | 0.0631 | 0.0803 | 0.1033 | 0.0356 | 0.0516 | 0.0587 | 0.0660 | -0.0053 (0.000 / 0.001) | -0.0037 (0.000 / 0.000) |
+| 5 HiLaR-style | 0.0365 | 0.0650 | 0.0812 | 0.1077 | 0.0365 | 0.0531 | 0.0597 | 0.0683 | -0.0009 (0.500 / 0.453) | -0.0015 (0.020 / 0.020) |
+| 6 R3-exact lr1e-5 seed42 | 0.0380 | 0.0689 | 0.0828 | 0.1095 | 0.0380 | 0.0557 | 0.0614 | 0.0701 | +0.0009 (0.170 / 0.157) | +0.0003 (0.380 / 0.412) |
+| 6 R3-exact lr1e-5 seed1 | 0.0380 | 0.0678 | 0.0828 | 0.1095 | 0.0380 | 0.0552 | 0.0614 | 0.0700 | +0.0009 (0.147 / 0.134) | +0.0002 (0.494 / 0.527) |
+| 6 R3-exact lr1e-5 seed2 | 0.0378 | 0.0681 | 0.0831 | 0.1083 | 0.0378 | 0.0553 | 0.0615 | 0.0697 | -0.0003 (0.782 / 0.655) | -0.0001 (0.733 / 0.710) |
+| 6 R3-exact lr1e-5 seed3 | 0.0381 | 0.0680 | 0.0831 | 0.1091 | 0.0381 | 0.0554 | 0.0616 | 0.0700 | +0.0004 (0.543 / 0.491) | +0.0002 (0.456 / 0.492) |
+| 6 R3-exact lr1e-5 seed4 | 0.0380 | 0.0677 | 0.0830 | 0.1089 | 0.0380 | 0.0551 | 0.0614 | 0.0698 | +0.0003 (0.711 / 0.655) | -0.0000 (0.953 / 0.927) |
+| 7 R3-exact lr2e-5 seed42 | 0.0230 | 0.0493 | 0.0668 | 0.0950 | 0.0230 | 0.0382 | 0.0454 | 0.0544 | -0.0137 (0.000 / 0.000) | -0.0153 (0.000 / 0.000) |
+| 7 R3-exact lr3e-5 seed42 | 0.0071 | 0.0191 | 0.0301 | 0.0473 | 0.0071 | 0.0139 | 0.0184 | 0.0240 | -0.0613 (0.000 / 0.000) | -0.0458 (0.000 / 0.000) |
+| 7 R3-exact lr4e-5 seed42 | (pending) |
+| 8 R3-exact lr5e-5 seed42 | 0.0197 | 0.0383 | 0.0484 | 0.0701 | 0.0197 | 0.0303 | 0.0345 | 0.0415 | -0.0386 (0.000 / 0.000) | -0.0283 (0.000 / 0.000) |
+| ref R3_ori stage 1 (run1) | 0.0377 | 0.0607 | 0.0778 | 0.1023 | 0.0377 | 0.0510 | 0.0580 | 0.0659 | -0.0064 (0.027 / 0.028) | -0.0039 (0.019 / 0.025) |
+| ref R3_ori stage 2 lr5e-5 (run1) | 0.0380 | 0.0628 | 0.0784 | 0.1055 | 0.0380 | 0.0522 | 0.0586 | 0.0674 | -0.0031 (0.278 / 0.276) | -0.0024 (0.161 / 0.169) |
+
+Notes: 4 is pending (lr 4e-5, 383023, restarted after a preemption). HiLaR-style: HR@10 equal to the start (p .50) but NDCG@3/5/10 slightly lower, NDCG@10 significant (p .02).
+
+### 2026-11-26 lr 4e-5 (383023) finished — lr search complete
+See row "7 R3-exact lr4e-5" in analysis/results/grpo_row_types/full_table.md: HR@1/3/5/10 .0255/.0481/.0614/.0841, NDCG@1/3/5/10 .0255/.0385/.0440/.0513. Search (seed 42, one run per lr): HR@10 2e-5 .0950, 3e-5 .0473, 4e-5 .0841, 5e-5 .0701 — all far below start .1086; non-monotone (3e-5 lowest), no trend readable without seeds. No lr between 1e-5 (no-op) and 5e-5 helps.
+
+
+## 2026-11-26 15:30 Steam lr / clip runs: progress at epoch ~2.45 of 3 (after preemption + resume)
+
+Preempted on lagoon at step 1242 (13:03); resumed from checkpoint-643 on lexicon (13:05, resume line present in all three logs; requeue overwrote the log files, so epochs 0–1 detail is only in the earlier log section). Means per quarter epoch:
+| epochs | WIDER 369662 / 383065 clip1.0 / 383066 lr1e-4 / 383067 lr5e-5 | hinge (same order) |
+|---|---|---|
+| 1.0–1.25 | 1.000 / .035 / .023 / .129 | .201 / .200 / .199 / .161 |
+| 1.5–1.75 | .982 / .023 / .017 / .120 | .199 / .200 / .194 / .044 |
+| 2.0–2.25 | 1.000 / .017 / .059 / .107 | .200 / .197 / .175 / .026 |
+| 2.25–2.5 | 1.000 / .109 / .106 / .086 | .201 / .177 / .162 / .021 |
+- No collapse in any new run (WIDER ≤ .16 throughout epochs 1–2.5, the resume did not disturb it).
+- lr 5e-5: the hinge is satisfied (.161 → .021 from epoch 1.25) — the first Steam MW-R-H run where the own latent beats another user's. clip1.0 (3e-4) and lr 1e-4: hinge only starting to fall at epoch 2+ (.177 / .162).
+- CE at epoch 2.25–2.5: 369662 .944, clip1.0 .892, lr1e-4 1.000, lr5e-5 1.077 (lower lr → slower CE fit).
+
+
+## 2026-11-26 Steam MW-R-H clip1.0 (383065, lr 3e-4, MAX_GRAD_NORM=1.0 explicit, code 66b61b81) DONE
+
+n = 10,303. Paired t-test p / bootstrap p (2,000 resamples, seed 42), script tmp/steam_lr_eval.py.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|---|
+| R3 (371447) | .0077 | .0151 | .0226 | .0358 | .0119 | .0150 | .0192 |
+| MW-R-H (369662, collapsed) | .0100 | .0193 | .0262 | .0388 | .0154 | .0182 | .0223 |
+| MW-R-H clip1.0 (383065) | .0099 | .0170 | .0242 | .0363 | .0140 | .0170 | .0209 |
+- vs R3: HR@1 +.0022 (.025/.027), NDCG@3 +.0021 (.040/.038), NDCG@5 +.0020 (.047/.042) sig; HR@3 +.0018 (.14), HR@5 +.0016 (.28), HR@10 +.0005 (.78), NDCG@10 +.0017 (.096/.090) n.s.
+- vs 369662: all n.s. (HR@10 −.0025, p .15/.17; NDCG@10 −.0014, p .18/.20).
+- Latent tests (raw − intervention), all sig p < 5e-4: mask HR@10 +.0292 / NDCG@10 +.0172; mean +.0116 / +.0068; shuffle_user +.0094 / +.0050 (@5: mask +.0201/+.0143, mean +.0074/+.0055, shuffle +.0048/+.0035).
+- **First Steam run whose latent CONTENT is used** (mean and shuffle hurt sig; 369662: mean/shuffle n.s.), ranking ≥ R3 at all cutoffs (sig at HR@1, NDCG@3/5) and n.s. below the collapsed 369662. Hinge in training only reached ~.17 by epoch 2.5, yet content use transfers to test. Meets the criterion (content matters AND ≈/≥ R3). Single run; the collapse in 369662 vs none here shows run-to-run variance at identical settings.
+
+
+## 2026-11-26 Steam MW-R-H lr 5e-5 (383067, clip 1.0, code 66b61b81) DONE
+
+n = 10,303; paired t p / bootstrap p (2,000, seed 42); tmp/steam_lr_eval.py _lr5e-5.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|---|
+| R3 (371447) | .0077 | .0151 | .0226 | .0358 | .0119 | .0150 | .0192 |
+| MW-R-H (369662, collapsed) | .0100 | .0193 | .0262 | .0388 | .0154 | .0182 | .0223 |
+| MW-R-H clip1.0 3e-4 (383065) | .0099 | .0170 | .0242 | .0363 | .0140 | .0170 | .0209 |
+| MW-R-H lr 5e-5 (383067) | .0102 | .0193 | .0248 | .0360 | .0154 | .0177 | .0213 |
+- vs R3: sig at HR@1 +.0025 (.0086/.012), HR@3 +.0042 (.00055/.001), NDCG@3 +.0035, NDCG@5 +.0027 (.0047/.008), NDCG@10 +.0021 (.024/.032); HR@5 +.0022 (.10) and HR@10 +.0002 (.91) n.s.
+- vs 369662: all n.s. (HR@10 −.0028, p .098/.11; NDCG@10 −.0010, p .34/.36).
+- Latent tests (raw − intervention), all sig: @10 mask +.0066 / +.0067, mean +.0034 (p .007) / +.0043, shuffle_user +.0070 / +.0062; @5 mask +.0081/+.0071, mean +.0056/+.0050, shuffle +.0077/+.0064.
+- Content used (shuffle hurts sig) and ranking ≥ R3 with more sig cutoffs than 383065 (NDCG@5 and NDCG@10 sig). Different profile from 383065: much smaller mask drop (HR@10 −.0066 vs −.0292) → the decoder depends less on having some vector in the slot; shuffle drop similar in size at @10 (−.0070 vs −.0094) and larger at @5 (−.0077 vs −.0048); hinge was satisfied in training (.021).
+
+
+## 2026-11-26 MW-R-H-CR on Toys, CDs, Steam — submitted via JobManager (tmp/submit_mwrh_cr_3ds.sh)
+
+User: run MW-R-H + original collaborative-reasoning InfoNCE on Toys, CDs, Steam; the InfoNCE must be the same as margin+WIDER+InfoNCE (MWC-I 358547).
+Implementation check (git diff b3740008 = MWC-I code → HEAD 66b61b81):
+- InfoNCE path unchanged: same trainer `latent_attention_train_collaborative_margin.py`, same `_relation_loss`; two-phase (epoch 1 margin+WIDER only, InfoNCE epochs 2–3), user head (same user's other rows) 0.1 + target head (same next item) 0.1, projection 256, temp 0.1, FIFO queue 10k, 16 positives per head, 256 negatives, token-accuracy gate 0.5. Code added since (same-user hard negatives, item head, CF grounding) is off by default (HARD_NEG=0, ITEM_W=0).
+- Intended differences (MW-R-H base, commit c3b42206): hinge weighted per row by the history-only reference (rank, tau 0.5, sum(w·hinge)/sum(w)); CE = mean per-row NLL; EARLY_STOP=False (MW-R-H has no best-checkpoint reload; MWC-I used early stopping). Optimiser/schedule identical (lr 3e-4, warm-up 20, HF clip 1.0, save per epoch, 1 checkpoint).
+Runs (code_66b61b81, base Qwen2.5-1.5B, margin 0.2, WIDER 0.1, 3 epochs, lr 3e-4 on all three incl. Steam; researchshort a40|l40s|a100|l40, excl. alarm,album): Toys_and_Games / CDs_and_Vinyl / Steam `_margin_0.2_wider_0.1_refweight_nolatent_rank_cr`, references `reference_nll/<cat>_nolatent/train.pt`. Comparisons: R3 (Toys A / CDs R3_ori / Steam 371447) and MW-R-H (365504 / 366023 / 383065).
+- Job IDs (JobManager, 2026-11-26): Toys **383923**, CDs **383924**, Steam **383925**. Scratch 429G / 485G at submission; one job may queue (JobManager's researchshort cap 8).
+
+
+## 2026-11-26 Steam MW-R-H lr 1e-4 (383066, clip 1.0, code 66b61b81) DONE — Steam collapse test complete
+
+n = 10,303; paired t p / bootstrap p (2,000, seed 42); tmp/steam_lr_eval.py _lr1e-4.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | shuffle HR@10 drop | mean HR@10 drop |
+|---|---|---|---|---|---|---|---|---|---|
+| R3 (371447) | .0077 | .0151 | .0226 | .0358 | .0119 | .0150 | .0192 | | |
+| MW-R-H 3e-4 (369662, collapsed) | .0100 | .0193 | .0262 | .0388 | .0154 | .0182 | .0223 | n.s. | n.s. |
+| MW-R-H clip1.0 3e-4 (383065) | .0099 | .0170 | .0242 | .0363 | .0140 | .0170 | .0209 | .0094 sig | .0116 sig |
+| MW-R-H lr 1e-4 (383066) | .0116 | .0231 | .0302 | .0425 | .0182 | .0211 | .0251 | .0026 n.s. | −.0009 n.s. |
+| MW-R-H lr 5e-5 (383067) | .0102 | .0193 | .0248 | .0360 | .0154 | .0177 | .0213 | .0070 sig | .0034 sig |
+- lr 1e-4 vs R3: ALL cutoffs sig (p < 5e-4): HR@5 +.0076, HR@10 +.0067, NDCG@5 +.0061, NDCG@10 +.0059. vs 369662: sig at @3/@5/@10 (HR@10 +.0037, .039/.047; NDCG@10 +.0028, .0068/.008).
+- Latent tests: mask @10 HR +.0079 / NDCG +.0036 sig; mean @10 −.0009 / −.0004 n.s. (p .50/.54); shuffle_user @10 +.0026 (.068/.084) / +.0008 n.s. → content NOT used (only slot presence).
+- Training: hinge only fell to ~.16 by epoch 2.5 (not satisfied), WIDER ≤ .11 (no collapse).
+- Reading: the best Steam ranking so far comes WITHOUT content use (regulariser effect, as in 369662); the two runs that use content (383065, 383067) rank ≈ R3 at HR@10. On Steam ranking and content use still trade off; lr 5e-5 is the only run with both content use and NDCG@10 sig > R3.
+- 2026-11-26: Steam 383925 FAILED at start (KeyError 'Steam': collab-margin trainer's category_dict only had lowercase 'steam'; earlier Steam MW-R-H runs used the motive trainer, whose CATEGORY_TEXT has 'Steam'). Fix commit 42e0da0a adds 'Steam': 'games' (+ 'Goodreads'), prompt text identical to the motive trainer for all shared keys (tmp/test_category_text.py PASS; old code fails). Frozen code_42e0da0a (diff -r vs 66b61b81: that line only). Resubmit via JobManager: tmp/submit_mwrh_cr_steam_fix.sh. CDs 383924 preempted at ~1h (no checkpoint yet), requeued from step 0.
+- Steam CR resubmitted to hady (user): **384089** (hadylauwresearch, hady-priority, a40, code_42e0da0a; tmp/submit_mwrh_cr_steam_fix_hady.sh); researchshort retry stopped before any submission.
+
+
+## 2026-11-27 MW-R-H-CR training progress (tmp/cr_progress.py; means per half epoch)
+
+CDs 383924 restarted on avenue from step 0 (no checkpoint before the preemption). Toys 383923 at epoch 2.65 (sodag), Steam 384089 at epoch 1.65 (alarm).
+| run | epochs | CE | hinge | WIDER | user InfoNCE | target InfoNCE | user / target positive rate |
+|---|---|---|---|---|---|---|---|
+| Toys 383923 | 0.5–1.0 | .878 | .146 | .287 | – | – | – |
+| | 1.0–1.5 | .672 | .073 | .154 | 1.874 | 4.428 | .63 / .80 |
+| | 2.0–2.5 | .474 | .023 | .078 | .466 | 3.938 | .61 / .83 |
+| | 2.5–3.0 | .456 | .024 | .047 | .391 | 3.815 | .65 / .84 |
+| Steam 384089 | 0.0–0.5 | 1.933 | .211 | .567 | – | – | – |
+| | 0.5–1.0 | 1.351 | .200 | **.724** | – | – | – |
+| | 1.0–1.5 | 1.256 | .199 | .157 | 3.571 | 4.164 | .66 / .88 |
+| | 1.5–2.0 | 1.210 | .198 | .093 | 2.430 | 4.226 | .68 / .87 |
+- Toys: hinge satisfied (.023 from epoch 2, as MW-R-H 365504). As in MWC-I 358547, the user head is what is learned (1.87 → .39) while the target head stays near chance (~4.5 → 3.8).
+- Steam: partial collapse in epoch 1 (WIDER .72, grad norm 60 early; margin+WIDER only, same recipe as 369662), recovered to .09–.16 once the InfoNCE switched on. Hinge NOT satisfied (.198) at 1.65 — as in the MW-R-H lr 3e-4 runs.
+
+
+## 2026-11-27 MW-R-H-CR Toys (383923, code 66b61b81) DONE
+
+n = 6,738 (copy_row 905, same-brand rule); paired bootstrap 95% CI + t-test p / bootstrap p; tmp/toys_cr.py.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | copy HR@10 | non-copy HR@10 |
+|---|---|---|---|---|---|---|---|---|---|
+| plain R3 (A) | .0367 | .0625 | .0795 | .1052 | .0514 | .0584 | .0667 | .5127 | .0420 |
+| MW-R-H 365504 | .0383 | .0681 | .0828 | .1086 | .0554 | .0615 | .0698 | .5039 | .0473 |
+| MW-R-H s1 A40 368189 | .0404 | .0647 | .0804 | .1088 | .0544 | .0608 | .0700 | .5105 | .0465 |
+| MW-R-H s2 A40 366001 | .0334 | .0574 | .0717 | .0944 | .0471 | .0530 | .0603 | .4630 | .0372 |
+| MWC-I 358547 (margin+WIDER+InfoNCE) | | | | .0966 | | | .0600 | | |
+| MW-R-H-CR 383923 | .0337 | .0637 | .0806 | .1076 | .0509 | .0578 | .0665 | .5061 | .0458 |
+- vs R3 (A): all n.s. (HR@1 −.0030 p .12; HR@5 +.0010 p .68/.70; HR@10 +.0024 p .39/.40; NDCG@5 −.0006 p .72; NDCG@10 −.0002 p .90/.94); copy −.0066, non-copy +.0038.
+- vs MW-R-H 365504: sig worse at HR@1 −.0046 (.008/.006), HR@3 −.0045 (.032/.036), NDCG@3 −.0045, NDCG@5 −.0036 (.018/.024), NDCG@10 −.0033 (.032/.038); HR@5 −.0022 (.33) and HR@10 −.0010 (.70) n.s. vs seed 1 368189: NDCG@10 −.0034 sig, HR@10 n.s. vs the failed seed 2 366001: better at all @3–@10 (sig).
+- Latent tests (raw − intervention), all p < 5e-4: mask HR@10 +.0793 / NDCG@10 +.0505; mean +.0706 / +.0469; shuffle_user +.0793 / +.0516 (−74% of raw HR@10; copy rows +.35, non-copy +.037). MW-R-H 365504 shuffle was −.035 → CR more than doubles the content dependence (= MWC-I's level, −.075).
+- Reading: meets the criterion (content strongly used AND ranking = R3 at every cutoff). On the MW-R-H base the original InfoNCE no longer costs ranking vs R3 (MWC-I on the margin+WIDER base: HR@10 .0966, −.0086 sig). But it is below MW-R-H 365504 at the top of the list and NDCG (−.003 to −.005 sig), so the InfoNCE buys dependence at a small accuracy cost vs MW-R-H. Training: hinge satisfied (.023), user InfoNCE learned (1.87 → .39), target InfoNCE near chance (4.4 → 3.8), as in MWC-I.
+
+
+## 2026-11-27 MW-R-H-CR Steam (384089, code 42e0da0a, hady A40 alarm, lr 3e-4) DONE — content NOT used
+
+n = 10,303; t p / bootstrap p; tmp/steam_lr_eval.py _cr, tmp/steam_cr_vs_clip.py _cr.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 |
+|---|---|---|---|---|---|---|---|
+| R3 (371447) | .0077 | .0151 | .0226 | .0358 | .0119 | .0150 | .0192 |
+| MW-R-H 369662 (collapsed) | .0100 | .0193 | .0262 | .0388 | .0154 | .0182 | .0223 |
+| MW-R-H clip1.0 383065 (same settings) | .0099 | .0170 | .0242 | .0363 | .0140 | .0170 | .0209 |
+| MW-R-H-CR 384089 | .0071 | .0165 | .0235 | .0361 | .0125 | .0154 | .0195 |
+- vs R3: all n.s. (HR@5 +.0009 p .50/.52; HR@10 +.0003 p .86/.90; NDCG@10 +.0003 p .76/.74).
+- vs 383065: HR@1 −.0028 sig (.0055/.006); rest n.s. (NDCG@10 −.0014, .17/.18). vs 369662: sig worse at HR@1/3, NDCG@3/5/10 (NDCG@10 −.0028, .0025/.005).
+- Latent tests: none sig, all within ±.0007 (mask HR@10 +.0003 p .77; mean +.0000; shuffle_user +.0007 p .35/.41) → content AND slot unused (even mask is neutral; 383065: mask −.029, shuffle −.009).
+- Training: hinge NEVER satisfied (.20 all six half-epochs); WIDER partial collapse in epoch 1 (.72), down to .05 by the end; user InfoNCE learned (3.57 → 1.44), target InfoNCE at chance (4.16 → 4.20); grad norm 60 early, 13 at epoch 1.5–2.
+- Reading: fails the criterion (= R3, latent ignored). On Steam the InfoNCE neither rescued the hinge nor made r used; the slot became fully ignorable (mask neutral), unlike every MW-R-H Steam run. lr 3e-4 on Steam remains unstable (epoch-1 WIDER rise); a CR run at lr 5e-5 (where the MW-R-H hinge was satisfied) is the untested option.
+
+
+## 2026-11-27 MW-R-H-CR CDs (383924, code 66b61b81, avenue after one preemption) DONE — FAILS; 3-dataset summary
+
+n = 6,157 (copy_row 418); bootstrap CI + t p / bootstrap p; tmp/cds_cr.py.
+| model | HR@1 | HR@3 | HR@5 | HR@10 | NDCG@3 | NDCG@5 | NDCG@10 | copy HR@10 | non-copy HR@10 |
+|---|---|---|---|---|---|---|---|---|---|
+| R3_ori | .0494 | .0710 | .0819 | .0989 | .0617 | .0662 | .0717 | .5766 | .0641 |
+| MW-R-H 366023 | .0555 | .0801 | .0906 | .1121 | .0696 | .0739 | .0808 | .6244 | .0748 |
+| MW-R-H-CR 383924 | .0422 | .0594 | .0695 | .0884 | .0522 | .0564 | .0625 | .5574 | .0542 |
+- vs R3_ori: sig WORSE at every cutoff (HR@5 −.0123, HR@10 −.0106 (.0006/.003), NDCG@5 −.0098, NDCG@10 −.0092 (<5e-4)); copy −.019, non-copy −.010.
+- vs MW-R-H 366023: sig worse at every cutoff (HR@10 −.0237, NDCG@10 −.0183, p < 5e-4).
+- Latent tests (raw − intervention) @10: mask −.0068 HR / −.0058 NDCG (mask significantly BETTER than raw; copy rows −.062); mean +.0122 / +.0106 sig; shuffle_user +.0060 / +.0052 sig — the content effect is almost all on copy rows (mean +.148, shuffle +.086; non-copy +.002 / +.000). The latent hurts on average (zero slot better than own r).
+- Training: hinge NEVER satisfied (.194–.203 all epochs) vs MW-R-H 366023 falling to .077/.062 in epoch 2–3; CE ends .874 vs .662; user InfoNCE learned (3.54 → .70), target at chance (4.4 → 4.0). The InfoNCE (user head) displaces the hinge and slows CE fitting.
+
+**3-dataset summary, MW-R-H-CR (original user+target InfoNCE on MW-R-H, lr 3e-4):**
+| dataset | ranking vs R3 | vs MW-R-H | latent content | hinge in training | criterion |
+|---|---|---|---|---|---|
+| MovieLens 376544 | = @1–@5, HR@10 −.0070 sig | better | used (shuffle −.051) | satisfied (.003) | no (HR@10) |
+| Toys 383923 | = all cutoffs | NDCG −.003 sig | strongly used (shuffle −.079) | satisfied (.023) | YES |
+| CDs 383924 | WORSE all cutoffs (HR@10 −.011) | −.024 sig | mixed (mask > raw) | NOT satisfied (.20) | no |
+| Steam 384089 | = all cutoffs | HR@1 −.003 sig (vs 383065) | unused (mask neutral) | NOT satisfied (.20) | no |
+Reading: CR works only where the hinge is satisfied (Toys, MovieLens). On CDs and Steam the user-InfoNCE head (the only one that learns; the target head stays at chance on all three) competes with the hinge, which never forms; on CDs that costs ranking as in MWC-I on Toys. MW-R-H alone remains better or equal on every dataset at ranking. Not seed-replicated.
+
+### 2026-11-27: Beam-NDCG reward, full-model GRPO on MW-R-H (Toys): smoke passed, 3 lr runs submitted
+
+- **Smoke 383569** (code 40087bf9, lagoon 2× L40): completed in 6 min with no OOM.
+  - Speed: 15.3 s/step at 4 rows/step, about 3.8 s per row. `BATCH` counts generations (8 per row), not rows, so the earlier estimate of 16k rows ≈ 7 h was wrong; 16k rows would take about 17 h.
+  - Reward: 6 of the 16 steps had no hit in any group.
+- **Bug in the stock R3 advantage under a hit/miss reward.** The baseline is the mean noise-free reward over all groups in the step (one group per GPU). A row whose 8 copies all miss therefore gets a negative advantage whenever the other row hits, and GRPO lowers that row's target log-prob. This explains the non-zero grad_norm on steps 8, 12 and 15, where the logged reward was 0.
+- **Fix (user-approved).** `adv_baseline=group`: advantage = reward − the same row's noise-free reward. Ties, including all-miss groups, give 0, so only the effect of the noise on the beam list is rewarded.
+- **Checkpoint fix.** The smoke checkpoint was 24 GB, including a 12 GB optimizer.pt. Now `save_only_model` is set and `checkpoint-*` is removed after training, leaving one ~6 GB final model. The smoke model was deleted.
+- **Code:** commits b0e806ec and 071e729c; frozen copy at `output_dir/r3_beam_grpo_code/code_071e729c`, sbatch `r3_beam_grpo_071e729c.sbatch`.
+- **Runs:**
+  - Setup: 8,000 train rows, batch 64 (8 rows/step, 1,000 steps), warmup 25, β 0, 1 iteration, full model in fp32 with bf16 autocast, seed 42.
+  - lr 3e-7 / 1e-6 / 3e-6, plus an fp32 eval of the start model (`toys_mwrh_start_fp32`) as the comparison baseline.
+  - Submitted via JobManager: start eval 385004; lr3e-7 385005, lr1e-6 385006, lr3e-6 385007. The three lr runs were held for scratch space and released after the user approved deleting ~47 GB of finished exact-R3 and HiLaR checkpoints (scratch 473G → 426G).
+
+
+## 2026-11-27 Paper Report folder created (no runs)
+
+Author: the line is now a paper with C1 = MW-R-H and C2 = collaborative reasoning. Writing material lives in worktree `R3MarginWiderCollab/Report/`: main.md (story, method, experiment table E00–E09, open issues, evidence gaps, proposed runs), CONTEXT.md, CONVENTIONS.md, experiments/00–09/report_*.md (compiled from this log, the older log and the analysis docs; numbers spot-checked against this log). Corrections found while compiling: MovieLens test n = 10,164; Toys copy_row 905 (trainer rule) vs 836 (compare.py); REF_TAU has no effect with rank weights; the "R3_ori Toys" interventions at line ~915 are Toys v0 ckpt-844.
+
+
+## 2026-11-27 Scope, per-dataset hyperparameters, Steam lr 5e-5 replicate SUBMITTED
+
+- Author: develop only on CDs, Toys, Steam; MovieLens = substitute dataset (results kept, no new development runs).
+- Author: each dataset keeps its best MW-R-H hyperparameters and every later model uses them: Toys / CDs lr 3e-4, Steam lr 5e-5 (clip 1.0, margin 0.2, WIDER 0.1, rank weights, 3 epochs, batch 128 / micro 4, base Qwen2.5-1.5B, shared). Table in Report/CONVENTIONS.md. Steam MW-R-H-CR 384089 (lr 3e-4) is therefore not a valid Steam test of CR.
+- Author seed rule: a configuration succeeds if the criterion holds on its single run, or on >= 2 seeds when several were run (reruns at identical settings count). Under it: CDs MW-R-H 3/3, Toys 3/5, Steam lr 5e-5 1/1, MovieLens 0/1 (D 1/1).
+- Steam MW-R-H lr 5e-5 replicate **385083** (R3_mwrh_lr5e5_rep2_steam; identical to 383067: code_66b61b81, LR=5e-5, MAX_GRAD_NORM=1.0, default seed; output Steam_margin_0.2_wider_0.1_refweight_nolatent_rank_lr5e-5_rep2; researchshort a40|l40s|a100|l40 excl. alarm,album; tmp/submit_steam_lr5e5_rep2.sh), via JobManager.
+
+## 2026-11-27 — C2 phase starts: MW-R-H + same-motive on Toys and Steam (submitted via JobManager)
+- Author: "based on MW-R-H let move to collaborative reasoning contribution".
+- Lead C2 variant is **same-motive InfoNCE** (`MOTIVE_W=0.1`, from epoch 2).
+  - It is the only collaborative term that meets the criterion on the MW-R-H base: CDs 374791 is significantly above
+    R3_ori at all cutoffs, equals MW-R-H, and its shuffle drop is −.040 vs −.017.
+  - The original CR (user + target heads) passes only on Toys 383923. It fails on CDs, and Steam was run at a non-best lr.
+- What's missing is the C2 table on Toys and Steam.
+  - Script: `.claude/jobs/e8c23a07/tmp/submit_mwrh_motive_toys_steam.sh`, code_42e0da0a, researchshort.
+  - The motive path equals 013bd0ac (374791): all later additions are off by default and `max_grad_norm` 1.0 is the HF default
+    (checked by `git diff 013bd0ac 42e0da0a`).
+  - Toys_and_Games_margin_0.2_wider_0.1_refweight_nolatent_rank_motive (lr 3e-4); Steam_margin_0.2_wider_0.1_refweight_nolatent_rank_lr5e-5_motive (lr 5e-5).
+  - Job IDs: pending JobManager.
