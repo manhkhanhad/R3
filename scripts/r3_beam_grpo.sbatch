@@ -17,7 +17,8 @@
 #   (2) full-model training (decoder + embeddings + lm_head + attention), fp32 master weights with bf16 autocast, gradient checkpointing.
 # Also (needed by 2): fewer rows (SAMPLE, beam search on every copy is slow), smaller batch (BATCH) so there are enough updates,
 # warm-up WARMUP steps instead of 200 (the run only has SAMPLE/BATCH steps); evaluation in fp32 (bf16 rounding would erase tiny updates).
-# Env: CODE_ROOT BASE_MODEL TAG LR [SAMPLE=16000 BATCH=64 WARMUP=25 SEED=42 SMOKE=1 CATEGORY]
+# BATCH counts generations (8 per row): BATCH=64 is 8 rows per step. ADV_BASELINE group = reward minus the same row's noise-free reward; batch = stock R3.
+# Env: CODE_ROOT BASE_MODEL TAG LR [SAMPLE=8000 BATCH=64 WARMUP=25 SEED=42 ADV_BASELINE=group SMOKE=1 CATEGORY]
 #      EVAL_ONLY_MODEL=<dir>: skip training, evaluate that model in fp32 (used for the start model under the same dtype).
 set -euo pipefail
 module purge
@@ -42,12 +43,12 @@ train_file=$(ls ${data}/train/${category}_5_*.csv)
 eval_file=$(ls ${data}/valid/${category}_5_*.csv)
 test_file=$(ls ${data}/test/${category}_5_*.csv)
 info_file=$(ls ${data}/info/${category}_5_*.txt)
-sample="${SAMPLE:-16000}"; batch="${BATCH:-64}"; warmup="${WARMUP:-25}"; test_sample=-1
+sample="${SAMPLE:-8000}"; batch="${BATCH:-64}"; warmup="${WARMUP:-25}"; adv_baseline="${ADV_BASELINE:-group}"; test_sample=-1
 if [[ "$smoke" == 1 ]]; then sample=64; batch=32; warmup=1; test_sample=48; fi
 task_dir="/common/home/users/m/mk.ngohuu.2024/scratchDirectory/R3/output_dir/${category}_R3beam_${tag}"
 out="${task_dir}/model"
 mkdir -p "$task_dir"
-echo "[$(date --iso-8601=seconds)] GPUs: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tr '\n' ' '); base ${base_model}; code ${code}; lr ${lr}; sample ${sample}; batch ${batch}; warmup ${warmup}; seed ${seed}; smoke ${smoke}"
+echo "[$(date --iso-8601=seconds)] GPUs: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tr '\n' ' '); base ${base_model}; code ${code}; lr ${lr}; sample ${sample}; batch ${batch}; warmup ${warmup}; seed ${seed}; adv_baseline ${adv_baseline}; smoke ${smoke}"
 
 if [[ -n "${EVAL_ONLY_MODEL:-}" ]]; then
   out="$EVAL_ONLY_MODEL"
@@ -61,7 +62,9 @@ else
     --train_file "$train_file" --eval_file "$eval_file" \
     --num_iterations 1 --epsilon 0.2 --epsilon_high 0.28 \
     --reward_type beam_ndcg --rank_beams 10 --train_full True --model_fp32 True --gradient_checkpointing True \
-    --warmup_steps "$warmup" --save_steps 1000000
+    --warmup_steps "$warmup" --save_steps 1000000 --adv_baseline "$adv_baseline"
+  # one checkpoint per run: keep the final model in $out, drop the trainer checkpoint (optimizer state, ~18 GB)
+  rm -rf "$out"/checkpoint-*
 fi
 
 results="output_dir/r3_beam_grpo/${tag}"

@@ -40,6 +40,7 @@ def train(
     kl_anchor: bool = False, # reference log-probs from the reference model's own r (grpo_trainer.py)
     reward_type: str = "ppl", # "ppl" (stock -PPL) or "beam_ndcg" (NDCG@rank_beams of the target in a constrained beam-search list from the noisy r)
     rank_beams: int = 10,
+    adv_baseline: str = "batch", # "batch" (stock R3) or "group" (reward minus the same row's noise-free reward)
     train_full: bool = False, # unfreeze the whole model (decoder, embeddings, lm_head, attention), not only the pooling attention
     model_fp32: bool = False, # load the model in fp32 (bf16 autocast): bf16 master weights round away lr<=1e-5 full-model updates
     gradient_checkpointing: bool = False,
@@ -192,7 +193,7 @@ def train(
     trainer = trainer_class(
         **trainer_kwargs,
         kl_anchor=kl_anchor,
-        reward_type=reward_type, rank_beams=rank_beams,
+        reward_type=reward_type, rank_beams=rank_beams, adv_baseline=adv_baseline,
     # from grpo_trainer import HalfGRPORecTrainer
     # trainer = HalfGRPORecTrainer(
         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,

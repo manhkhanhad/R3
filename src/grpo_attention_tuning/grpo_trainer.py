@@ -33,7 +33,7 @@ def swap_adjacent_blocks(x, k):
 
 class NoiseGRPORecTrainer(GRPOTrainer):
 
-    def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, reward_type="ppl", rank_beams=10,
+    def __init__(self, prefix_allowed_tokens_fn, *args, kl_anchor=False, reward_type="ppl", rank_beams=10, adv_baseline="batch",
                  rank_max_new_tokens=128, rank_chunk=2, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # reward_type "ppl" = stock R3 (-PPL of the target, teacher forced). "beam_ndcg" = NDCG@rank_beams of the
@@ -42,6 +42,12 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         if reward_type not in ("ppl", "beam_ndcg"):
             raise ValueError(reward_type)
         self.reward_type, self.rank_beams, self.rank_max_new_tokens, self.rank_chunk = reward_type, rank_beams, rank_max_new_tokens, rank_chunk
+        # adv_baseline "batch" = stock R3 (reward minus the mean noise-free reward over all groups of the step);
+        # "group" = reward minus the same row's noise-free reward (only the effect of the noise is rewarded).
+        if adv_baseline not in ("batch", "group"):
+            raise ValueError(adv_baseline)
+        self.adv_baseline = adv_baseline
+        print(f"GRPO advantage baseline: {adv_baseline}", flush=True)
         print(f"GRPO reward: {reward_type}" + (f" (NDCG@{rank_beams}, constrained beam search from the noisy r)" if reward_type == "beam_ndcg" else ""), flush=True)
         # kl_anchor: the reference log-probs use the REFERENCE model's own latent r (its frozen
         # stage-1 attention, same noise), as in standard GRPO where pi_ref sees the same input.
@@ -261,7 +267,10 @@ class NoiseGRPORecTrainer(GRPOTrainer):
         temp_rewards = rewards.clone().view(-1, self.num_generations)
         xx = temp_rewards[:, 0].unsqueeze(1).expand_as(temp_rewards).reshape(-1)
         xx = swap_adjacent_blocks(xx, self.num_generations)
-        advantages = rewards - xx.mean()
+        if self.adv_baseline == "group":
+            advantages = rewards - temp_rewards[:, 0].unsqueeze(1).expand_as(temp_rewards).reshape(-1)
+        else:
+            advantages = rewards - xx.mean()
         advantages = advantages / (torch.norm(advantages) + 1e-6)
         # advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
         # Slice to keep only the local part of the data
