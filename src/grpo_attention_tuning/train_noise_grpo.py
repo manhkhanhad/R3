@@ -226,6 +226,7 @@ def train(
             # save_strategy="epoch",
             save_steps=save_steps,
             save_total_limit=1,
+            save_only_model=train_full,  # full-model runs: no 12 GB optimizer state in the checkpoint (no resume is used)
             load_best_model_at_end=False,
             ddp_find_unused_parameters=True,
             report_to=wandb_report_to(),
